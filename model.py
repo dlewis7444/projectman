@@ -9,8 +9,6 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import GObject, Gio
 
 
-PROJECTS_DIR = os.path.expanduser('~/claude-projects/')
-ARCHIVE_DIR = os.path.join(PROJECTS_DIR, '.archive')
 STATUS_FILE = os.path.expanduser('~/.claude/projectman/status.json')
 HISTORY_FILE = os.path.expanduser('~/.claude/history.jsonl')
 
@@ -40,10 +38,19 @@ class StatusSnapshot:
 
 
 class ProjectStore:
+    def __init__(self, settings):
+        self._settings = settings
+
+    def _projects_dir(self):
+        return self._settings.resolved_projects_dir
+
+    def _archive_dir(self):
+        return os.path.join(self._settings.resolved_projects_dir, '.archive')
+
     def load_projects(self):
         projects = []
         try:
-            for entry in os.scandir(PROJECTS_DIR):
+            for entry in os.scandir(self._projects_dir()):
                 if entry.name.startswith('.'):
                     continue
                 if entry.is_dir(follow_symlinks=True):
@@ -58,10 +65,10 @@ class ProjectStore:
         return projects
 
     def load_archived(self):
-        os.makedirs(ARCHIVE_DIR, exist_ok=True)
+        os.makedirs(self._archive_dir(), exist_ok=True)
         projects = []
         try:
-            for entry in os.scandir(ARCHIVE_DIR):
+            for entry in os.scandir(self._archive_dir()):
                 if entry.name.startswith('.'):
                     continue
                 if entry.is_dir(follow_symlinks=True):
@@ -76,14 +83,14 @@ class ProjectStore:
         return projects
 
     def archive(self, project):
-        os.makedirs(ARCHIVE_DIR, exist_ok=True)
-        src = os.path.join(PROJECTS_DIR, project.name)
-        dest = os.path.join(ARCHIVE_DIR, project.name)
+        os.makedirs(self._archive_dir(), exist_ok=True)
+        src = os.path.join(self._projects_dir(), project.name)
+        dest = os.path.join(self._archive_dir(), project.name)
         shutil.move(src, dest)
 
     def restore(self, project):
-        src = os.path.join(ARCHIVE_DIR, project.name)
-        dest = os.path.join(PROJECTS_DIR, project.name)
+        src = os.path.join(self._archive_dir(), project.name)
+        dest = os.path.join(self._projects_dir(), project.name)
         shutil.move(src, dest)
 
 
@@ -216,11 +223,17 @@ class ProjectsWatcher(GObject.GObject):
         super().__init__()
         self._monitor = None
 
-    def start(self):
-        os.makedirs(PROJECTS_DIR, exist_ok=True)
-        f = Gio.File.new_for_path(PROJECTS_DIR)
+    def start(self, path):
+        os.makedirs(path, exist_ok=True)
+        f = Gio.File.new_for_path(path)
         self._monitor = f.monitor_directory(Gio.FileMonitorFlags.NONE, None)
         self._monitor.connect('changed', self._on_changed)
+
+    def restart(self, new_path):
+        if self._monitor is not None:
+            self._monitor.cancel()
+            self._monitor = None
+        self.start(new_path)
 
     def _on_changed(self, monitor, file, other_file, event_type):
         if event_type in (
