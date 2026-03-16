@@ -18,7 +18,7 @@ from session import (
 
 
 class AppWindow(Adw.ApplicationWindow):
-    def __init__(self, app, store, history, watcher, settings):
+    def __init__(self, app, store, history, watcher, settings, zellij_watcher):
         super().__init__(application=app)
         self._store = store
         self._history = history
@@ -28,6 +28,8 @@ class AppWindow(Adw.ApplicationWindow):
         self._active_path = None
         self._archive_win = None
         self._settings_win = None
+        self._zellij_watcher = zellij_watcher
+        zellij_watcher.connect('sessions-changed', self._on_zellij_sessions_changed)
 
         self.set_default_size(1200, 750)
         self.set_title('ProjectMan')
@@ -75,6 +77,23 @@ class AppWindow(Adw.ApplicationWindow):
         self.connect('close-request', self._on_close_request)
         self._sidebar.start_polling()
         self._setup_shortcuts()
+
+    def _on_zellij_sessions_changed(self, watcher):
+        """A session appeared or disappeared — reconcile sidebar state."""
+        if self._settings.multiplexer != 'zellij':
+            return
+        import zellij as z
+        for project in self._store.load_projects():
+            path = project.path
+            sname = z.session_name(project.name)
+            tv = self._terminals.get(path)
+            currently_attached = tv is not None and tv._child_pid is not None
+            if currently_attached:
+                continue  # process-exited will handle this case
+            if z.session_exists(sname):
+                self._sidebar.set_project_state(path, 'detached')
+            else:
+                self._sidebar.set_project_state(path, 'inactive')
 
     def _on_close_request(self, window):
         running = {path: tv for path, tv in self._terminals.items()
