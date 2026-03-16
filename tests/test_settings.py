@@ -8,7 +8,8 @@ def test_defaults():
     s = Settings()
     assert s.projects_dir == '~/.ProjectMan/Projects'
     assert s.claude_binary == ''
-    assert s.resume_last_project is True
+    assert s.resume_projects is True
+    assert 'resume_last_project' not in Settings.__dataclass_fields__
     assert s.font_size == 11
     assert s.scrollback_lines == 10000
     assert s.audible_bell is False
@@ -90,3 +91,12 @@ def test_save_creates_directory(tmp_path):
 
 def test_default_settings_path_constant():
     assert DEFAULT_SETTINGS_PATH == os.path.expanduser('~/.ProjectMan/settings.json')
+
+
+def test_load_ignores_old_resume_last_project_key(tmp_path):
+    """Old settings.json with resume_last_project is silently upgraded."""
+    path = tmp_path / 'settings.json'
+    path.write_text('{"resume_last_project": false}')
+    s = Settings.load(str(path))
+    # Old key is ignored; new field uses dataclass default (True)
+    assert s.resume_projects is True

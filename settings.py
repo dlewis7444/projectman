@@ -11,7 +11,7 @@ DEFAULT_SETTINGS_PATH = os.path.expanduser('~/.ProjectMan/settings.json')
 class Settings:
     projects_dir: str = '~/.ProjectMan/Projects'
     claude_binary: str = ''
-    resume_last_project: bool = True
+    resume_projects: bool = True
     font_size: int = 11
     scrollback_lines: int = 10000
     audible_bell: bool = False

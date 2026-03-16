@@ -58,10 +58,10 @@ class SettingsWindow(Adw.PreferencesDialog):
         page.add(startup_group)
 
         self._resume_row = Adw.SwitchRow(
-            title='Resume Last Project',
-            subtitle='Auto-open the last active project on launch',
+            title='Resume projects on startup',
+            subtitle='Restore all active projects from the last session',
         )
-        self._resume_row.set_active(self._settings.resume_last_project)
+        self._resume_row.set_active(self._settings.resume_projects)
         self._resume_row.connect('notify::active', self._on_resume_toggled)
         startup_group.add(self._resume_row)
 
@@ -172,7 +172,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._save_and_notify()
 
     def _on_resume_toggled(self, row, _param):
-        self._settings.resume_last_project = row.get_active()
+        self._settings.resume_projects = row.get_active()
         self._save_and_notify()
 
     def _on_font_size_changed(self, row, _param):
