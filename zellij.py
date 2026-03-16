@@ -1,5 +1,6 @@
 import os
 import re
+import subprocess
 
 import gi
 gi.require_version('Gio', '2.0')
@@ -39,6 +40,47 @@ def socket_dir() -> str:
 def session_exists(name: str) -> bool:
     """Return True if a live zellij session socket exists for this name."""
     return os.path.exists(os.path.join(socket_dir(), name))
+
+
+def session_alive(name: str) -> bool:
+    """Return True if zellij reports this session as active (not EXITED).
+
+    Uses `zellij list-sessions` rather than the socket file, so it correctly
+    rejects stale/orphan sockets and EXITED sessions.
+    """
+    try:
+        result = subprocess.run(
+            ['zellij', 'list-sessions', '--no-formatting'],
+            capture_output=True, text=True, timeout=2,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if parts and parts[0] == name and 'EXITED' not in line:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def alive_session_names() -> set:
+    """Return the set of all alive (non-EXITED) session names.
+
+    Single subprocess call — use this when checking multiple sessions at once.
+    """
+    try:
+        result = subprocess.run(
+            ['zellij', 'list-sessions', '--no-formatting'],
+            capture_output=True, text=True, timeout=2,
+        )
+        names = set()
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if parts and 'EXITED' not in line:
+                names.add(parts[0])
+        return names
+    except Exception:
+        pass
+    return set()
 
 
 class ZellijWatcher(GObject.GObject):

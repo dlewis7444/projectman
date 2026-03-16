@@ -9,6 +9,33 @@ from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk, Gio
 import zellij
 
 
+def _ensure_zellij_shell_wrapper():
+    """Write (or overwrite) ~/.ProjectMan/zellij-shell-init.sh; return its path.
+
+    This wrapper is set as SHELL when creating new zellij sessions so that
+    the initial pane auto-starts `claude -c`. It checks for a per-session
+    flag file (~/.ProjectMan/.zellij-init-<session>) and, if present, removes
+    it and runs claude, then exits (closing the pane). Subsequent panes in the
+    same session find no flag and go straight to the real shell.
+    """
+    pm_dir = os.path.expanduser('~/.ProjectMan')
+    wrapper_path = os.path.join(pm_dir, 'zellij-shell-init.sh')
+    script = (
+        '#!/bin/bash\n'
+        'REAL_SHELL="${ZELLIJ_REAL_SHELL:-/bin/bash}"\n'
+        'INIT_FILE="${HOME}/.ProjectMan/.zellij-init-${ZELLIJ_SESSION_NAME}"\n'
+        'if rm "$INIT_FILE" 2>/dev/null; then\n'
+        '    claude -c || claude\n'
+        '    exit 0\n'
+        'fi\n'
+        'exec "$REAL_SHELL" "$@"\n'
+    )
+    with open(wrapper_path, 'w') as f:
+        f.write(script)
+    os.chmod(wrapper_path, 0o755)
+    return wrapper_path
+
+
 class TerminalView(Gtk.Box):
     __gsignals__ = {
         'process-exited':   (GObject.SignalFlags.RUN_FIRST, None, (int,)),
@@ -75,30 +102,52 @@ class TerminalView(Gtk.Box):
         self._kill_child()
         self._terminal.reset(True, True)
         claude_cmd = self._settings.resolved_claude_binary
-        args = []
         if session_id:
-            args = ['--resume', session_id]
-        elif not fresh:
-            args = ['-c']
-        argv = [claude_cmd] + args
+            argv = [claude_cmd, '--resume', session_id]
+        elif fresh:
+            argv = [claude_cmd]
+        else:
+            # Try continuing most recent conversation; fall back to fresh
+            # if there's no history (claude -c exits non-zero).
+            import shlex
+            c = shlex.quote(claude_cmd)
+            argv = ['bash', '-c', f'{c} -c || exec {c}']
         self._is_multiplexed = False
         self._spawn(argv)
 
     def spawn_zellij(self, session_name):
         """Attach to or create a zellij session for this project.
 
-        Uses `zellij attach --create` which is idiomatic: creates the session
-        if absent, attaches if present. The session starts with an empty shell;
-        auto-starting claude inside zellij is deferred (future: KDL layout).
-
-        `session_exists` is a plain os.path.exists() call — non-blocking.
+        New sessions: created with a shell wrapper that auto-launches `claude -c`
+        in the initial pane, then drops to the real shell.
+        Existing sessions: attached with `zellij attach <name>`.
         """
         self._kill_child()
         self._terminal.reset(True, True)
         self._is_zellij = True
         self._zellij_session = session_name
         self._is_multiplexed = True
-        self._spawn(['zellij', 'attach', '--create', session_name])
+        alive = zellij.session_alive(session_name)
+        if alive:
+            cmd = ['zellij', 'attach', session_name]
+            env = None
+        else:
+            socket_path = os.path.join(zellij.socket_dir(), session_name)
+            try:
+                os.unlink(socket_path)
+            except OSError:
+                pass
+            # Create per-session init flag; wrapper reads it to auto-start claude
+            flag_path = os.path.join(
+                os.path.expanduser('~/.ProjectMan'), f'.zellij-init-{session_name}'
+            )
+            open(flag_path, 'w').close()
+            wrapper = _ensure_zellij_shell_wrapper()
+            env = dict(os.environ)
+            env['SHELL'] = wrapper
+            env['ZELLIJ_REAL_SHELL'] = os.environ.get('SHELL', '/bin/bash')
+            cmd = ['zellij', 'attach', '--create', session_name]
+        self._spawn(cmd, env)
 
     def deactivate(self):
         """Gracefully stop the child; terminal output is preserved for context."""
@@ -109,12 +158,13 @@ class TerminalView(Gtk.Box):
                 pass
             # child-exited signal will fire and emit process-exited
 
-    def _spawn(self, argv):
+    def _spawn(self, argv, env=None):
+        envv = [f'{k}={v}' for k, v in env.items()] if env is not None else None
         self._terminal.spawn_async(
             Vte.PtyFlags(0),
             self._project.path,
             argv,
-            None,                           # envv
+            envv,
             GLib.SpawnFlags.SEARCH_PATH,
             None,                           # child_setup
             None,                           # child_setup_data (hidden from __doc__)
@@ -133,7 +183,7 @@ class TerminalView(Gtk.Box):
     def _on_child_exited(self, terminal, status):
         self._child_pid = None
         if self._is_zellij and self._zellij_session:
-            if zellij.session_exists(self._zellij_session):
+            if zellij.session_alive(self._zellij_session):
                 self.emit('process-detached')
                 return
             # Session is truly gone — clear zellij state before emitting exited
