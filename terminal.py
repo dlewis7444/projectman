@@ -30,6 +30,8 @@ class TerminalView(Gtk.Box):
         self._apply_font()
         self.append(self._terminal)
 
+        # Intercept Shift+Enter at CAPTURE phase — GTK4/Wayland strips the Shift
+        # modifier before VTE sees it; feed kitty keyboard protocol sequence directly.
         key_ctrl = Gtk.EventControllerKey.new()
         key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         key_ctrl.connect('key-pressed', self._on_key_pressed)
@@ -123,6 +125,7 @@ class TerminalView(Gtk.Box):
         self._apply_font()
 
     def apply_settings(self, settings):
+        # Note: resets font_size to the settings default, discarding any active zoom offset.
         self._settings = settings
         self._font_size = settings.font_size
         self._apply_font()
