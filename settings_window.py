@@ -132,11 +132,11 @@ class SettingsWindow(Adw.PreferencesDialog):
         page.add(colors_group)
 
         status_colors = [
-            ('stopped',      'Stopped',      'alpha(currentColor, 0.08)'),
-            ('idle',         'Idle',         'alpha(currentColor, 0.25)'),
-            ('active',       'Active',       '#4caf50'),
-            ('working',      'Working',      '#ff9800'),
-            ('notification', 'Notification', '#f44336'),
+            ('stopped',  'Stopped',  'alpha(currentColor, 0.08)'),
+            ('idle',     'Idle',     'alpha(currentColor, 0.25)'),
+            ('done',     'Done',     '#4caf50'),
+            ('working',  'Working',  '#ff9800'),
+            ('waiting',  'Waiting',  '#2196f3'),
         ]
         for _key, label, color in status_colors:
             row = Adw.ActionRow(title=label)
