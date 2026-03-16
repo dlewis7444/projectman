@@ -11,8 +11,7 @@ from terminal import TerminalView
 from archive_window import ArchiveWindow
 from shutdown_window import ShutdownWindow
 from model import Project
-from session import save_session, load_session, filter_active_paths, \
-    collect_session_state, SESSION_FILE
+from session import save_session, collect_session_state, SESSION_FILE
 
 
 class AppWindow(Adw.ApplicationWindow):
