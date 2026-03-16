@@ -20,6 +20,7 @@ class Sidebar(Gtk.Box):
         'project-edit-md':      (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'show-archive-window':  (GObject.SignalFlags.RUN_FIRST, None, ()),
         'show-settings':        (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'project-create':       (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self, store, history, watcher):
@@ -28,12 +29,23 @@ class Sidebar(Gtk.Box):
         self._history = history
         self._watcher = watcher
         self._rows = {}
+        self._new_project_row = None
         self._active_only = False
 
+        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        header_box.add_css_class('sidebar-header')  # margin + font cascade to children
         header = Gtk.Label(label='PROJECTS')
-        header.add_css_class('sidebar-header')
         header.set_halign(Gtk.Align.START)
-        self.append(header)
+        header.set_hexpand(True)
+        header_box.append(header)
+        add_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
+        add_btn.add_css_class('flat')
+        add_btn.add_css_class('circular')
+        add_btn.set_valign(Gtk.Align.CENTER)
+        add_btn.set_tooltip_text('New Project')
+        add_btn.connect('clicked', self._on_add_project)
+        header_box.append(add_btn)
+        self.append(header_box)
 
         self._scrolled = Gtk.ScrolledWindow()
         self._scrolled.set_vexpand(True)
@@ -134,6 +146,70 @@ class Sidebar(Gtk.Box):
 
     def start_polling(self):
         self._resource_bar.start_polling()
+
+    def _on_add_project(self, button):
+        if self._new_project_row is not None:
+            self._new_project_row._entry.grab_focus()
+            return
+        row = NewProjectEntryRow(
+            on_commit=self._commit_new_project,
+            on_cancel=self._cancel_new_project,
+        )
+        self._new_project_row = row
+        self._listbox.prepend(row)
+
+    def _commit_new_project(self, name):
+        self._new_project_row = None
+        self.emit('project-create', name)
+
+    def _cancel_new_project(self):
+        if self._new_project_row is None:
+            return
+        self._listbox.remove(self._new_project_row)
+        self._new_project_row = None
+
+
+class NewProjectEntryRow(Gtk.ListBoxRow):
+    """Inline entry row for creating a new project directory."""
+    def __init__(self, on_commit, on_cancel):
+        super().__init__()
+        self.set_selectable(False)
+        self.set_activatable(False)
+        self._on_commit = on_commit
+        self._on_cancel = on_cancel
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_margin_start(8)
+        box.set_margin_end(8)
+        box.set_margin_top(4)
+        box.set_margin_bottom(4)
+
+        icon = Gtk.Image.new_from_icon_name('folder-new-symbolic')
+        box.append(icon)
+
+        self._entry = Gtk.Entry()
+        self._entry.set_placeholder_text('Project name\u2026')
+        self._entry.set_hexpand(True)
+        self._entry.connect('activate', self._on_activate)
+
+        key_ctrl = Gtk.EventControllerKey.new()
+        key_ctrl.connect('key-pressed', self._on_key_pressed)
+        self._entry.add_controller(key_ctrl)
+
+        box.append(self._entry)
+        self.set_child(box)
+        GLib.idle_add(self._entry.grab_focus)
+
+    def _on_activate(self, entry):
+        name = entry.get_text().strip()
+        if name and '/' not in name and not name.startswith('.'):
+            self._on_commit(name)
+
+    def _on_key_pressed(self, ctrl, keyval, keycode, state):
+        if keyval == Gdk.KEY_Escape:
+            self._on_cancel()
+            return True
+        return False
 
 
 class ProjectRow(Gtk.ListBoxRow):
