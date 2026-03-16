@@ -2,6 +2,13 @@ import os
 import signal
 
 import gi
+
+
+def _slugify(name):
+    """Convert project name to a safe multiplexer session name."""
+    import re
+    slug = re.sub(r'[^a-zA-Z0-9_-]', '-', name)
+    return slug[:48] or 'projectman'
 gi.require_version('Gtk', '4.0')
 gi.require_version('Vte', '3.91')
 from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk, Gio
@@ -18,6 +25,7 @@ class TerminalView(Gtk.Box):
         self._project = project
         self._settings = settings
         self._child_pid = None
+        self._is_multiplexed = False
         self._font_size = settings.font_size
 
         self._terminal = Vte.Terminal()
@@ -67,15 +75,35 @@ class TerminalView(Gtk.Box):
         desc = Pango.FontDescription.from_string(f'Monospace {self._font_size}')
         self._terminal.set_font(desc)
 
-    def spawn_claude(self, session_id=None, fresh=False):
+    def spawn_claude(self, session_id=None, fresh=False, project_name=None):
         self._kill_child()
         self._terminal.reset(True, True)
-        argv = [self._settings.resolved_claude_binary]
+        claude_cmd = self._settings.resolved_claude_binary
+        args = []
         if session_id:
-            argv += ['--resume', session_id]
+            args = ['--resume', session_id]
         elif not fresh:
-            argv += ['-c']
+            args = ['-c']
+
+        mux = self._settings.multiplexer
+        if mux != 'none' and project_name:
+            session_name = _slugify(project_name)
+            argv = self._build_mux_argv(mux, session_name, claude_cmd, args)
+            self._is_multiplexed = True
+        else:
+            argv = [claude_cmd] + args
+            self._is_multiplexed = False
         self._spawn(argv)
+
+    def _build_mux_argv(self, mux, session_name, claude_cmd, claude_args):
+        full_claude = [claude_cmd] + claude_args
+        if mux == 'tmux':
+            return ['tmux', 'new-session', '-A', '-s', session_name] + full_claude
+        if mux == 'zellij':
+            return ['zellij', 'attach', '--create', session_name, 'run', '--'] + full_claude
+        if mux == 'screen':
+            return ['screen', '-S', session_name, '-D', '-R'] + full_claude
+        return full_claude
 
     def spawn_multiplexer(self, binary):
         """Launch a terminal multiplexer by binary name (located via PATH)."""

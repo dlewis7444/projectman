@@ -94,8 +94,9 @@ class SettingsWindow(Adw.PreferencesDialog):
         behavior_group.add(self._bell_row)
 
         self._multiplexer_row = Adw.ComboRow(title='Multiplexer')
-        mux_options = ['zellij', 'tmux', 'screen']
-        self._multiplexer_row.set_model(Gtk.StringList.new(mux_options))
+        mux_options = ['none', 'zellij', 'tmux', 'screen']
+        self._mux_labels = ['None (direct)', 'Zellij', 'Tmux', 'Screen']
+        self._multiplexer_row.set_model(Gtk.StringList.new(self._mux_labels))
         selected = mux_options.index(self._settings.multiplexer) \
             if self._settings.multiplexer in mux_options else 0
         self._multiplexer_row.set_selected(selected)
@@ -162,7 +163,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._save_and_notify()
 
     def _on_multiplexer_changed(self, row, _param):
-        options = ['zellij', 'tmux', 'screen']
+        options = ['none', 'zellij', 'tmux', 'screen']
         idx = row.get_selected()
         if 0 <= idx < len(options):
             self._settings.multiplexer = options[idx]
