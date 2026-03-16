@@ -11,7 +11,10 @@ from terminal import TerminalView
 from archive_window import ArchiveWindow
 from shutdown_window import ShutdownWindow
 from model import Project
-from session import save_session, collect_session_state, SESSION_FILE
+from session import (
+    save_session, load_session, filter_active_paths,
+    collect_session_state, plan_restore, SESSION_FILE,
+)
 
 
 class AppWindow(Adw.ApplicationWindow):
@@ -123,6 +126,19 @@ class AppWindow(Adw.ApplicationWindow):
             return
         open_paths, focused = collect_session_state(self._terminals, self._active_path)
         save_session(SESSION_FILE, open_paths, focused)
+
+    def _restore_session(self):
+        """Restore projects that were running at the last committed close."""
+        if not self._settings.resume_projects:
+            return
+        open_paths, focused_path = load_session(SESSION_FILE)
+        active = filter_active_paths(open_paths, self._store.load_projects())
+        focused, background = plan_restore(open_paths, focused_path, active)
+        if focused:
+            self._on_project_activated(self._sidebar, focused)
+        for path in background:
+            tv = self._get_or_create_terminal(active[path])
+            tv.spawn_claude(project_name=active[path].name)
 
     def _setup_shortcuts(self):
         controller = Gtk.ShortcutController.new()
@@ -274,20 +290,6 @@ class AppWindow(Adw.ApplicationWindow):
         self._settings_win.connect(
             'closed', lambda w: setattr(self, '_settings_win', None)
         )
-
-    def _activate_last_project(self):
-        """Auto-open the most recently active project (called from main after present())."""
-        if not self._settings.resume_projects:
-            return
-        best_project = None
-        best_ts = 0
-        for proj in self._store.load_projects():
-            sessions = self._history.get_sessions(proj)
-            if sessions and sessions[0].last_active > best_ts:
-                best_ts = sessions[0].last_active
-                best_project = proj
-        if best_project:
-            self._on_project_activated(self._sidebar, best_project.path)
 
     def _on_project_edit_md(self, sidebar, path):
         editor = os.environ.get('VISUAL') or os.environ.get('EDITOR') or 'vi'

@@ -2,7 +2,7 @@ import json
 import os
 import types
 import pytest
-from session import save_session, load_session, filter_active_paths, collect_session_state
+from session import save_session, load_session, filter_active_paths, collect_session_state, plan_restore
 
 
 # ── save_session ──────────────────────────────────────────────────────────────
@@ -199,3 +199,54 @@ def test_collect_empty_terminals():
     paths, focused = collect_session_state({}, None)
     assert paths == []
     assert focused is None
+
+
+# ── plan_restore ──────────────────────────────────────────────────────────────
+
+def test_plan_restore_focused_in_active_set():
+    active = {'/a': _proj('/a'), '/b': _proj('/b')}
+    focused, bg = plan_restore(['/a', '/b'], '/a', active)
+    assert focused == '/a'
+    assert bg == ['/b']
+
+
+def test_plan_restore_focused_null_when_not_in_active():
+    """focused_path is in open_paths but not in active (e.g. archived)."""
+    active = {'/b': _proj('/b')}
+    focused, bg = plan_restore(['/a', '/b'], '/a', active)
+    assert focused is None
+    assert bg == ['/b']
+
+
+def test_plan_restore_focused_null_when_none():
+    active = {'/a': _proj('/a')}
+    focused, bg = plan_restore(['/a'], None, active)
+    assert focused is None
+    assert bg == ['/a']
+
+
+def test_plan_restore_background_excludes_focused():
+    active = {'/a': _proj('/a'), '/b': _proj('/b'), '/c': _proj('/c')}
+    focused, bg = plan_restore(['/a', '/b', '/c'], '/b', active)
+    assert focused == '/b'
+    assert '/b' not in bg
+    assert set(bg) == {'/a', '/c'}
+
+
+def test_plan_restore_preserves_order():
+    active = {'/a': _proj('/a'), '/b': _proj('/b'), '/c': _proj('/c')}
+    focused, bg = plan_restore(['/a', '/b', '/c'], '/a', active)
+    assert bg == ['/b', '/c']
+
+
+def test_plan_restore_empty_active():
+    focused, bg = plan_restore(['/a'], '/a', {})
+    assert focused is None
+    assert bg == []
+
+
+def test_plan_restore_empty_open_paths():
+    active = {'/a': _proj('/a')}
+    focused, bg = plan_restore([], None, active)
+    assert focused is None
+    assert bg == []
