@@ -320,7 +320,7 @@ class ProjectRow(Gtk.ListBoxRow):
         menu.append('New Claude Session', 'row.new-claude')
         menu.append('Rename',             'row.rename')
         menu.append('Deactivate',         'row.deactivate')
-        menu.append('Open in Multiplexer', 'row.zellij')
+        menu.append('Open in Zellij', 'row.zellij')
         menu.append('Edit CLAUDE.md',     'row.edit-md')
         menu.append('Archive',            'row.archive')
 
