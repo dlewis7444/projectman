@@ -167,7 +167,12 @@ class AppWindow(Adw.ApplicationWindow):
                 tv.spawn_claude(project_name=project.name)
 
     def _restore_zellij_session(self):
-        """In zellij mode: find live pm-* sessions, mark detached, re-open last-focused."""
+        """In zellij mode: find live pm-* sessions, mark detached, re-open last-focused.
+
+        Falls back to session.json when no live sessions exist (e.g. first run after
+        switching from direct-claude mode, or after a system reboot that cleared sessions).
+        _on_project_activated decides per-project whether to attach zellij or spawn claude.
+        """
         import zellij as z
         live = []
         for project in self._store.load_projects():
@@ -175,23 +180,38 @@ class AppWindow(Adw.ApplicationWindow):
             if z.session_exists(sname):
                 self._sidebar.set_project_state(project.path, 'detached')
                 live.append(project)
-        self._sidebar.set_active_only(bool(live))
 
-        if not live or not self._settings.resume_projects:
+        if not self._settings.resume_projects:
+            self._sidebar.set_active_only(bool(live))
             return
 
         open_paths, focused_path = load_session(SESSION_FILE)
-        live_paths = {p.path for p in live}
+        all_paths = {p.path for p in self._store.load_projects()}
 
-        restore_path = focused_path if focused_path and focused_path in live_paths else None
+        restore_path = focused_path if focused_path and focused_path in all_paths else None
         if restore_path is None:
             for path in open_paths:
-                if path in live_paths:
+                if path in all_paths:
                     restore_path = path
                     break
 
+        background = [p for p in open_paths if p != restore_path and p in all_paths]
+        self._sidebar.set_active_only(bool(live) or bool(restore_path))
+
         if restore_path:
             self._on_project_activated(self._sidebar, restore_path)
+
+        for path in background:
+            project = self._find_project(path)
+            if not project:
+                continue
+            tv = self._get_or_create_terminal(project)
+            if tv._child_pid is None:
+                sname = z.session_name(project.name)
+                if z.session_exists(sname):
+                    tv.spawn_zellij(sname)
+                else:
+                    tv.spawn_claude(project_name=project.name)
 
     def _setup_shortcuts(self):
         controller = Gtk.ShortcutController.new()
