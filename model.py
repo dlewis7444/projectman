@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import shutil
 from dataclasses import dataclass
 
@@ -9,7 +8,7 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import GObject, Gio, GLib
 
 
-STATUS_FILE = os.path.expanduser('~/.claude/projectman/status.json')
+STATUS_DIR = os.path.expanduser('~/.claude/projectman/status')
 HISTORY_FILE = os.path.expanduser('~/.claude/history.jsonl')
 
 
@@ -35,6 +34,7 @@ class StatusSnapshot:
     ts: int
     session: str
     tool: str = None
+    state: str = 'done'
 
 
 class ProjectStore:
@@ -171,13 +171,13 @@ class StatusWatcher(GObject.GObject):
 
     def __init__(self):
         super().__init__()
-        self._status = None
+        self._status: dict = {}
         self._monitor = None
 
     def start(self):
-        os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
-        f = Gio.File.new_for_path(STATUS_FILE)
-        self._monitor = f.monitor_file(Gio.FileMonitorFlags.NONE, None)
+        os.makedirs(STATUS_DIR, exist_ok=True)
+        f = Gio.File.new_for_path(STATUS_DIR)
+        self._monitor = f.monitor_directory(Gio.FileMonitorFlags.NONE, None)
         self._monitor.connect('changed', self._on_changed)
         self._reload()
 
@@ -185,7 +185,9 @@ class StatusWatcher(GObject.GObject):
         self._reload()
 
     def _on_changed(self, monitor, file, other_file, event_type):
-        if event_type in (Gio.FileMonitorEvent.CHANGED, Gio.FileMonitorEvent.CREATED):
+        if event_type in (Gio.FileMonitorEvent.CHANGED,
+                          Gio.FileMonitorEvent.CREATED,
+                          Gio.FileMonitorEvent.DELETED):
             self._reload()
             GLib.timeout_add(800, self._delayed_poll)
 
@@ -194,39 +196,41 @@ class StatusWatcher(GObject.GObject):
         return False  # don't repeat
 
     def _reload(self):
+        new_status = {}
         try:
-            with open(STATUS_FILE, 'r') as f:
-                data = json.loads(f.read())
-            self._status = StatusSnapshot(
-                event=data.get('event', ''),
-                cwd=data.get('cwd', ''),
-                ts=data.get('ts', 0),
-                session=data.get('session', ''),
-                tool=data.get('tool'),
-            )
-        except (FileNotFoundError, json.JSONDecodeError):
-            self._status = None
+            for entry in os.scandir(STATUS_DIR):
+                if not entry.name.endswith('.json'):
+                    continue
+                try:
+                    with open(entry.path, 'r') as f:
+                        data = json.loads(f.read())
+                    cwd = data.get('cwd', '')
+                    if not cwd:
+                        continue
+                    try:
+                        key = os.path.realpath(cwd)
+                    except OSError:
+                        continue
+                    new_status[key] = StatusSnapshot(
+                        event=data.get('event', ''),
+                        cwd=cwd,
+                        ts=data.get('ts', 0),
+                        session=data.get('session', ''),
+                        tool=data.get('tool'),
+                        state=data.get('state', 'done'),
+                    )
+                except (OSError, json.JSONDecodeError):
+                    continue
+        except Exception:
+            pass  # PermissionError or missing dir — keep previous status
+        self._status = new_status
         self.emit('status-changed')
 
     def get_project_status(self, project):
-        if self._status is None:
+        snapshot = self._status.get(project.path)
+        if snapshot is None:
             return 'idle'
-        try:
-            status_cwd = os.path.realpath(self._status.cwd)
-        except (OSError, ValueError):
-            return 'idle'
-        if status_cwd != project.path:
-            return 'idle'
-        if time.time() - self._status.ts > 60:
-            return 'idle'
-        event = self._status.event
-        if event == 'Notification':
-            return 'notification'
-        if event in ('PreToolUse', 'PostToolUse'):
-            return 'working'
-        if event in ('SessionStart', 'UserPromptSubmit', 'Stop'):
-            return 'active'
-        return 'idle'
+        return snapshot.state
 
 
 class ProjectsWatcher(GObject.GObject):
