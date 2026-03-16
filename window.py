@@ -13,14 +13,16 @@ from shutdown_window import ShutdownWindow
 
 
 class AppWindow(Adw.ApplicationWindow):
-    def __init__(self, app, store, history, watcher):
+    def __init__(self, app, store, history, watcher, settings):
         super().__init__(application=app)
         self._store = store
         self._history = history
         self._watcher = watcher
+        self._settings = settings
         self._terminals = {}
         self._active_path = None
         self._archive_win = None
+        self._settings_win = None
 
         self.set_default_size(1200, 750)
         self.set_title('ProjectMan')
@@ -44,9 +46,10 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.connect('project-deactivate',  self._on_project_deactivate)
         self._sidebar.connect('project-bash',        self._on_project_bash)
         self._sidebar.connect('project-new-claude',  self._on_project_new_claude)
-        self._sidebar.connect('project-zellij',      self._on_project_zellij)
+        self._sidebar.connect('project-zellij',      self._on_project_open_multiplexer)
         self._sidebar.connect('project-edit-md',     self._on_project_edit_md)
         self._sidebar.connect('show-archive-window', self._on_show_archive_window)
+        self._sidebar.connect('show-settings',       self._on_open_settings)
         self._paned.set_start_child(self._sidebar)
 
         self._stack = Gtk.Stack()
@@ -134,7 +137,7 @@ class AppWindow(Adw.ApplicationWindow):
 
     def _get_or_create_terminal(self, project):
         if project.path not in self._terminals:
-            tv = TerminalView(project)
+            tv = TerminalView(project, self._settings)
             tv.connect('process-started',
                        lambda t, p=project.path: self._sidebar.set_project_running(p, True))
             tv.connect('process-exited',
@@ -247,7 +250,7 @@ class AppWindow(Adw.ApplicationWindow):
         tv.spawn_claude(fresh=True)
         tv.get_terminal().grab_focus()
 
-    def _on_project_zellij(self, sidebar, path):
+    def _on_project_open_multiplexer(self, sidebar, path):
         project = self._find_project(path)
         if not project:
             return
@@ -255,10 +258,40 @@ class AppWindow(Adw.ApplicationWindow):
         self._stack.set_visible_child_name(path)
         self._title.set_subtitle(project.name)
         self._active_path = path
-        tv._kill_child()
-        tv._terminal.reset(True, True)
-        tv._spawn(['zellij'])
+        tv.spawn_multiplexer(self._settings.multiplexer)
         tv.get_terminal().grab_focus()
+
+    def apply_settings(self, settings):
+        """Apply updated settings to all running terminals."""
+        self._settings = settings
+        for tv in self._terminals.values():
+            tv.apply_settings(settings)
+
+    def _on_open_settings(self, *args):
+        if self._settings_win is not None:
+            self._settings_win.present(self)
+            return
+        from settings_window import SettingsWindow
+        self._settings_win = SettingsWindow(
+            self._settings, self.get_application(), self
+        )
+        self._settings_win.connect(
+            'destroy', lambda w: setattr(self, '_settings_win', None)
+        )
+
+    def _activate_last_project(self):
+        """Auto-open the most recently active project (called from main after present())."""
+        if not self._settings.resume_last_project:
+            return
+        best_project = None
+        best_ts = 0
+        for proj in self._store.load_projects():
+            sessions = self._history.get_sessions(proj)
+            if sessions and sessions[0].last_active > best_ts:
+                best_ts = sessions[0].last_active
+                best_project = proj
+        if best_project:
+            self._on_project_activated(self._sidebar, best_project.path)
 
     def _on_project_edit_md(self, sidebar, path):
         editor = os.environ.get('VISUAL') or os.environ.get('EDITOR') or 'vi'
