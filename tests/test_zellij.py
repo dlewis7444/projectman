@@ -61,3 +61,14 @@ def test_session_exists_true(tmp_path, monkeypatch):
 def test_session_exists_false(tmp_path, monkeypatch):
     monkeypatch.setattr(zellij, 'socket_dir', lambda: str(tmp_path))
     assert zellij.session_exists('pm-myproject') is False
+
+
+def test_zellij_watcher_is_gobject():
+    w = zellij.ZellijWatcher()
+    assert isinstance(w, GObject.GObject)
+
+
+def test_zellij_watcher_has_signal():
+    w = zellij.ZellijWatcher()
+    signals = GObject.signal_list_names(w)
+    assert 'sessions-changed' in signals

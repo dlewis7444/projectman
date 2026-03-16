@@ -39,3 +39,36 @@ def socket_dir() -> str:
 def session_exists(name: str) -> bool:
     """Return True if a live zellij session socket exists for this name."""
     return os.path.exists(os.path.join(socket_dir(), name))
+
+
+class ZellijWatcher(GObject.GObject):
+    """Watches the zellij socket directory and emits sessions-changed on any change."""
+    __gsignals__ = {
+        'sessions-changed': (GObject.SignalFlags.RUN_FIRST, None, ()),
+    }
+
+    def __init__(self):
+        super().__init__()
+        self._monitor = None
+
+    def start(self):
+        # socket_dir() returns the versioned subdir if it exists; monitor that.
+        # If zellij hasn't run yet the base dir is returned — that's fine,
+        # sockets will appear once zellij starts.
+        sdir = socket_dir()
+        os.makedirs(sdir, exist_ok=True)
+        f = Gio.File.new_for_path(sdir)
+        self._monitor = f.monitor_directory(Gio.FileMonitorFlags.NONE, None)
+        self._monitor.connect('changed', self._on_changed)
+
+    def stop(self):
+        if self._monitor:
+            self._monitor.cancel()
+            self._monitor = None
+
+    def _on_changed(self, monitor, file, other_file, event_type):
+        if event_type in (
+            Gio.FileMonitorEvent.CREATED,
+            Gio.FileMonitorEvent.DELETED,
+        ):
+            self.emit('sessions-changed')
