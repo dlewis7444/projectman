@@ -45,7 +45,7 @@ class ProjectStore:
         return self._settings.resolved_projects_dir
 
     def _archive_dir(self):
-        return os.path.join(self._settings.resolved_projects_dir, '.archive')
+        return os.path.join(self._projects_dir(), '.archive')
 
     def load_projects(self):
         projects = []
@@ -214,7 +214,7 @@ class StatusWatcher(GObject.GObject):
 
 
 class ProjectsWatcher(GObject.GObject):
-    """Watches ~/claude-projects/ via inotify and emits projects-changed on any add/remove."""
+    """Watches a directory via inotify and emits projects-changed on any add/remove."""
     __gsignals__ = {
         'projects-changed': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
