@@ -267,7 +267,7 @@ class AppWindow(Adw.ApplicationWindow):
 
     def _activate_last_project(self):
         """Auto-open the most recently active project (called from main after present())."""
-        if not self._settings.resume_last_project:
+        if not self._settings.resume_projects:
             return
         best_project = None
         best_ts = 0
