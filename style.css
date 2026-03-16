@@ -1,0 +1,23 @@
+/* Status dot: 4px wide Gtk.Box widget */
+.status-dot { min-width: 4px; min-height: 24px; border-radius: 2px; }
+.status-dot.status-stopped      { background: alpha(currentColor, 0.08); }
+.status-dot.status-idle         { background: alpha(currentColor, 0.25); }
+.status-dot.status-active       { background: #4caf50; }
+.status-dot.status-working      { background: #ff9800; }
+.status-dot.status-notification { background: #f44336; }
+
+/* Active project row highlight */
+row.active-project { background: alpha(@accent_color, 0.15); border-radius: 6px; }
+
+/* Sidebar section header */
+.sidebar-header { font-size: 11px; font-weight: 600; text-transform: uppercase;
+                  letter-spacing: 0.08em; color: alpha(currentColor, 0.5);
+                  margin: 12px 12px 4px 12px; }
+
+/* Session rows indented under project */
+.session-history-row > box { margin-left: 24px; }
+.session-title { font-size: 12px; }
+.session-default-badge { font-size: 10px; color: @accent_color; opacity: 0.8; }
+
+/* Resource bar separator */
+.resource-bar { border-top: 1px solid alpha(currentColor, 0.12); padding: 6px 12px; }
