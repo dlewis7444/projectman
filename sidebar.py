@@ -19,6 +19,7 @@ class Sidebar(Gtk.Box):
         'project-zellij':       (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-edit-md':      (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'show-archive-window':  (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'show-settings':        (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
     def __init__(self, store, history, watcher):
@@ -63,7 +64,9 @@ class Sidebar(Gtk.Box):
         archive_btn.connect('clicked', lambda b: self.emit('show-archive-window'))
         self.append(archive_btn)
 
-        self._resource_bar = ResourceBar()
+        self._resource_bar = ResourceBar(
+            on_settings_clicked=lambda: self.emit('show-settings')
+        )
         self.append(self._resource_bar)
 
         self._populate()
@@ -195,7 +198,7 @@ class ProjectRow(Gtk.ListBoxRow):
         menu.append('New Claude Session', 'row.new-claude')
         menu.append('Deactivate',         'row.deactivate')
         menu.append('Open Bash',          'row.bash')
-        menu.append('Open in Zellij',     'row.zellij')
+        menu.append('Open in Multiplexer', 'row.zellij')
         menu.append('Edit CLAUDE.md',     'row.edit-md')
         menu.append('Archive',            'row.archive')
 
@@ -311,7 +314,7 @@ class SessionHistoryRow(Gtk.ListBoxRow):
 
 
 class ResourceBar(Gtk.Box):
-    def __init__(self):
+    def __init__(self, on_settings_clicked=None):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         self.add_css_class('resource-bar')
 
@@ -327,12 +330,13 @@ class ResourceBar(Gtk.Box):
         self._ram_label.set_hexpand(True)
         self.append(self._ram_label)
 
-        # Settings gear — placeholder
         gear = Gtk.Button.new_from_icon_name('emblem-system-symbolic')
         gear.add_css_class('flat')
         gear.add_css_class('circular')
         gear.set_valign(Gtk.Align.CENTER)
         gear.set_tooltip_text('Settings')
+        if on_settings_clicked is not None:
+            gear.connect('clicked', lambda b: on_settings_clicked())
         self.append(gear)
 
     def start_polling(self):
