@@ -13,15 +13,16 @@ class TerminalView(Gtk.Box):
         'process-started': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
-    def __init__(self, project):
+    def __init__(self, project, settings):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self._project = project
+        self._settings = settings
         self._child_pid = None
-        self._font_size = 11
+        self._font_size = settings.font_size
 
         self._terminal = Vte.Terminal()
-        self._terminal.set_scrollback_lines(10000)
-        self._terminal.set_audible_bell(False)
+        self._terminal.set_scrollback_lines(settings.scrollback_lines)
+        self._terminal.set_audible_bell(settings.audible_bell)
         self._terminal.set_bold_is_bright(True)
         self._terminal.set_hexpand(True)
         self._terminal.set_vexpand(True)
@@ -29,8 +30,6 @@ class TerminalView(Gtk.Box):
         self._apply_font()
         self.append(self._terminal)
 
-        # Intercept Shift+Enter at CAPTURE phase — GTK4/Wayland strips the Shift
-        # modifier before VTE sees it; feed kitty keyboard protocol sequence directly.
         key_ctrl = Gtk.EventControllerKey.new()
         key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         key_ctrl.connect('key-pressed', self._on_key_pressed)
@@ -50,7 +49,7 @@ class TerminalView(Gtk.Box):
     def spawn_claude(self, session_id=None, fresh=False):
         self._kill_child()
         self._terminal.reset(True, True)
-        argv = ['claude']
+        argv = [self._settings.resolved_claude_binary]
         if session_id:
             argv += ['--resume', session_id]
         elif not fresh:
@@ -61,6 +60,12 @@ class TerminalView(Gtk.Box):
         self._kill_child()
         self._terminal.reset(True, True)
         self._spawn(['/bin/bash'])
+
+    def spawn_multiplexer(self, binary):
+        """Launch a terminal multiplexer by binary name (located via PATH)."""
+        self._kill_child()
+        self._terminal.reset(True, True)
+        self._spawn([binary])
 
     def deactivate(self):
         """Gracefully stop the child; terminal output is preserved for context."""
@@ -114,8 +119,15 @@ class TerminalView(Gtk.Box):
         self._apply_font()
 
     def zoom_reset(self):
-        self._font_size = 11
+        self._font_size = self._settings.font_size
         self._apply_font()
+
+    def apply_settings(self, settings):
+        self._settings = settings
+        self._font_size = settings.font_size
+        self._apply_font()
+        self._terminal.set_scrollback_lines(settings.scrollback_lines)
+        self._terminal.set_audible_bell(settings.audible_bell)
 
     def get_terminal(self):
         return self._terminal
