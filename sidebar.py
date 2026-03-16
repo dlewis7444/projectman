@@ -269,6 +269,9 @@ class ProjectRow(Gtk.ListBoxRow):
         rename_key = Gtk.EventControllerKey.new()
         rename_key.connect('key-pressed', self._on_rename_key)
         self._rename_entry.add_controller(rename_key)
+        rename_focus = Gtk.EventControllerFocus.new()
+        rename_focus.connect('leave', lambda c: self._exit_rename_mode())
+        self._rename_entry.add_controller(rename_focus)
         top.append(self._rename_entry)
 
         outer.append(top)
