@@ -45,7 +45,6 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.connect('session-activated',   self._on_session_activated)
         self._sidebar.connect('project-archive',     self._on_project_archive)
         self._sidebar.connect('project-deactivate',  self._on_project_deactivate)
-        self._sidebar.connect('project-bash',        self._on_project_bash)
         self._sidebar.connect('project-new-claude',  self._on_project_new_claude)
         self._sidebar.connect('project-zellij',      self._on_project_open_multiplexer)
         self._sidebar.connect('project-edit-md',     self._on_project_edit_md)
@@ -122,20 +121,11 @@ class AppWindow(Adw.ApplicationWindow):
             Gtk.ShortcutTrigger.parse_string('F5'),
             Gtk.CallbackAction.new(self._on_f5),
         ))
-        controller.add_shortcut(Gtk.Shortcut.new(
-            Gtk.ShortcutTrigger.parse_string('<Shift>F5'),
-            Gtk.CallbackAction.new(self._on_shift_f5),
-        ))
         self.add_controller(controller)
 
     def _on_f5(self, widget, args):
         if self._active_path and self._active_path in self._terminals:
             self._terminals[self._active_path].spawn_claude()
-        return True
-
-    def _on_shift_f5(self, widget, args):
-        if self._active_path and self._active_path in self._terminals:
-            self._terminals[self._active_path].spawn_bash()
         return True
 
     def _get_or_create_terminal(self, project):
@@ -230,17 +220,6 @@ class AppWindow(Adw.ApplicationWindow):
         self._sync_running_state()
 
     # --- other terminal actions ---
-
-    def _on_project_bash(self, sidebar, path):
-        project = self._find_project(path)
-        if not project:
-            return
-        tv = self._get_or_create_terminal(project)
-        self._stack.set_visible_child_name(path)
-        self._title.set_subtitle(project.name)
-        self._active_path = path
-        tv.spawn_bash()
-        tv.get_terminal().grab_focus()
 
     def _on_project_new_claude(self, sidebar, path):
         project = self._find_project(path)

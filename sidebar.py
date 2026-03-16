@@ -14,7 +14,6 @@ class Sidebar(Gtk.Box):
         'session-activated':    (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         'project-archive':      (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-deactivate':   (GObject.SignalFlags.RUN_FIRST, None, (str,)),
-        'project-bash':         (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-new-claude':   (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-zellij':       (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-edit-md':      (GObject.SignalFlags.RUN_FIRST, None, (str,)),
@@ -116,8 +115,6 @@ class Sidebar(Gtk.Box):
                         lambda r, p=proj.path: self.emit('project-archive', p))
             row.connect('project-deactivate',
                         lambda r, p=proj.path: self.emit('project-deactivate', p))
-            row.connect('project-bash',
-                        lambda r, p=proj.path: self.emit('project-bash', p))
             row.connect('project-new-claude',
                         lambda r, p=proj.path: self.emit('project-new-claude', p))
             row.connect('project-zellij',
@@ -225,7 +222,6 @@ class ProjectRow(Gtk.ListBoxRow):
         'session-activated':  (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         'project-archive':    (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-deactivate': (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'project-bash':       (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-new-claude': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-zellij':     (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-edit-md':    (GObject.SignalFlags.RUN_FIRST, None, ()),
@@ -295,7 +291,6 @@ class ProjectRow(Gtk.ListBoxRow):
         menu.append('New Claude Session', 'row.new-claude')
         menu.append('Rename',             'row.rename')
         menu.append('Deactivate',         'row.deactivate')
-        menu.append('Open Bash',          'row.bash')
         menu.append('Open in Multiplexer', 'row.zellij')
         menu.append('Edit CLAUDE.md',     'row.edit-md')
         menu.append('Archive',            'row.archive')
@@ -312,7 +307,6 @@ class ProjectRow(Gtk.ListBoxRow):
         _add('new-claude', 'project-new-claude')
         self._deactivate_action = _add('deactivate', 'project-deactivate')
         self._deactivate_action.set_enabled(False)  # enabled only when process is running
-        _add('bash',     'project-bash')
         _add('zellij',   'project-zellij')
         _add('edit-md',  'project-edit-md')
         _add('archive',  'project-archive')
