@@ -58,11 +58,6 @@ class TerminalView(Gtk.Box):
             argv += ['-c']
         self._spawn(argv)
 
-    def spawn_bash(self):
-        self._kill_child()
-        self._terminal.reset(True, True)
-        self._spawn(['/bin/bash'])
-
     def spawn_multiplexer(self, binary):
         """Launch a terminal multiplexer by binary name (located via PATH)."""
         self._kill_child()
