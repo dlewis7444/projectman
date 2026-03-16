@@ -412,8 +412,10 @@ class ProjectRow(Gtk.ListBoxRow):
         self.update_status()
 
     def update_status(self):
+        # Clear all classes, including legacy names (status-active, status-notification)
+        # to safely migrate any widget that had them applied before this version.
         for s in ('status-stopped', 'status-idle', 'status-active',
-                  'status-working', 'status-notification'):
+                  'status-done', 'status-working', 'status-waiting', 'status-notification'):
             self._status_dot.remove_css_class(s)
         if self._process_state == 'inactive':
             self._status_dot.add_css_class('status-stopped')
@@ -421,9 +423,11 @@ class ProjectRow(Gtk.ListBoxRow):
         if self._process_state == 'detached':
             self._status_dot.add_css_class('status-idle')
             return
-        self._status_dot.add_css_class(
-            f'status-{self._watcher.get_project_status(self._project)}'
-        )
+        # attached: apply live status; default to done if no file exists yet
+        status = self._watcher.get_project_status(self._project)
+        if status == 'idle':
+            status = 'done'
+        self._status_dot.add_css_class(f'status-{status}')
 
     def _enter_rename_mode(self):
         self._rename_entry.set_text(self._project.name)
