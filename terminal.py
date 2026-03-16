@@ -1,17 +1,17 @@
 import os
+import re
 import signal
 
 import gi
+gi.require_version('Gtk', '4.0')
+gi.require_version('Vte', '3.91')
+from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk, Gio
 
 
 def _slugify(name):
     """Convert project name to a safe multiplexer session name."""
-    import re
     slug = re.sub(r'[^a-zA-Z0-9_-]', '-', name)
     return slug[:48] or 'projectman'
-gi.require_version('Gtk', '4.0')
-gi.require_version('Vte', '3.91')
-from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk, Gio
 
 
 class TerminalView(Gtk.Box):
@@ -100,8 +100,9 @@ class TerminalView(Gtk.Box):
         if mux == 'tmux':
             return ['tmux', 'new-session', '-A', '-s', session_name] + full_claude
         if mux == 'zellij':
-            return ['zellij', 'attach', '--create', session_name, 'run', '--'] + full_claude
+            return ['zellij', 'attach', '--create', session_name]
         if mux == 'screen':
+            # Note: -D -R reattaches if session exists; command is ignored on reattach
             return ['screen', '-S', session_name, '-D', '-R'] + full_claude
         return full_claude
 

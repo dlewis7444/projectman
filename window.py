@@ -235,6 +235,8 @@ class AppWindow(Adw.ApplicationWindow):
         tv.get_terminal().grab_focus()
 
     def _on_project_open_multiplexer(self, sidebar, path):
+        if not self._settings.multiplexer or self._settings.multiplexer == 'none':
+            return
         project = self._find_project(path)
         if not project:
             return
