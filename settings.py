@@ -4,12 +4,12 @@ import tempfile
 from dataclasses import dataclass, asdict
 
 
-DEFAULT_SETTINGS_PATH = os.path.expanduser('~/.projectman/settings.json')
+DEFAULT_SETTINGS_PATH = os.path.expanduser('~/.ProjectMan/settings.json')
 
 
 @dataclass
 class Settings:
-    projects_dir: str = '~/.projectman/projects'
+    projects_dir: str = '~/.ProjectMan/Projects'
     claude_binary: str = ''
     resume_last_project: bool = True
     font_size: int = 11
