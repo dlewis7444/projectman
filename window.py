@@ -50,6 +50,8 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.connect('project-edit-md',     self._on_project_edit_md)
         self._sidebar.connect('show-archive-window', self._on_show_archive_window)
         self._sidebar.connect('show-settings',       self._on_open_settings)
+        self._sidebar.connect('project-create', self._on_project_create)
+        self._sidebar.connect('project-rename', self._on_project_rename)
         self._paned.set_start_child(self._sidebar)
 
         self._stack = Gtk.Stack()
@@ -297,3 +299,30 @@ class AppWindow(Adw.ApplicationWindow):
         editor = os.environ.get('VISUAL') or os.environ.get('EDITOR') or 'vi'
         claude_md = os.path.join(path, 'CLAUDE.md')
         subprocess.Popen([editor, claude_md], cwd=path)
+
+    def _on_project_create(self, sidebar, name):
+        self._store.create_project(name)
+        self._sidebar.refresh()
+
+    def _on_project_rename(self, sidebar, old_path, new_name):
+        project = self._find_project(old_path)
+        if not project:
+            return
+        new_path = os.path.join(os.path.dirname(old_path), new_name)
+        try:
+            self._store.rename_project(project, new_name)
+        except OSError:
+            return
+
+        # Migrate terminal stack entry so the running session survives the rename
+        if old_path in self._terminals:
+            tv = self._terminals.pop(old_path)
+            self._stack.remove(tv)
+            self._stack.add_named(tv, new_path)
+            self._terminals[new_path] = tv
+
+        if self._active_path == old_path:
+            self._active_path = new_path
+            self._title.set_subtitle(new_name)
+
+        self._sidebar.refresh()
