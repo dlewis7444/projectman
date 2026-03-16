@@ -92,7 +92,9 @@ class Sidebar(Gtk.Box):
         return True
 
     def _populate(self):
-        self._new_project_row = None
+        if self._new_project_row is not None:
+            self._listbox.remove(self._new_project_row)
+            self._new_project_row = None
         # Preserve process running state across rebuilds
         running_state = {path: row._process_running for path, row in self._rows.items()}
 
@@ -163,7 +165,10 @@ class Sidebar(Gtk.Box):
         self._listbox.prepend(row)
 
     def _commit_new_project(self, name):
+        row = self._new_project_row
         self._new_project_row = None
+        if row is not None:
+            self._listbox.remove(row)
         self.emit('project-create', name)
 
     def _cancel_new_project(self):
