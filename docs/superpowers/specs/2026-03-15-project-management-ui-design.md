@@ -27,7 +27,7 @@ New widget classes follow the existing `SessionHistoryRow` / `ProjectRow` patter
 
 ### Widget: `NewSessionRow(Gtk.ListBoxRow)`
 
-A new class in `sidebar.py`. Renders with a `list-add-symbolic` icon and "New Session…" label using the existing `session-history-row` CSS class. Carries no session data.
+A new class in `sidebar.py`. Renders with a `list-add-symbolic` icon and "New Session…" label using the existing `session-history-row` CSS class. Carries no session data. The row's child must be a `Gtk.Box` (matching the `.session-history-row > box` CSS selector used for left-indent).
 
 ### Integration
 
@@ -71,8 +71,8 @@ A new class in `sidebar.py`. Properties:
 - Takes `on_commit(name: str)` and `on_cancel()` callbacks
 
 **Entry behaviour:**
-- **Enter (`activate` signal):** validates name (non-empty, no `/`, no leading `.`) → calls `on_commit(name)` → removes self from listbox
-- **Escape (`EventControllerKey`):** calls `on_cancel()` → removes self from listbox
+- **Enter (`activate` signal):** validates name (non-empty, no `/`, no leading `.`) → calls `on_commit(name)` (row is removed implicitly when `refresh()` rebuilds the listbox)
+- **Escape (`EventControllerKey`):** calls `on_cancel()` (row is explicitly removed by `_cancel_new_project`)
 - Invalid commit (fails validation): does nothing (stays open)
 
 ### `Sidebar` changes
@@ -90,6 +90,7 @@ New signal: `'project-create': (GObject.SignalFlags.RUN_FIRST, None, (str,))`
 - `self.emit('project-create', name)`
 
 **`Sidebar._cancel_new_project()`:**
+- Guard: `if self._new_project_row is None: return`
 - `self._listbox.remove(self._new_project_row)`
 - `self._new_project_row = None`
 
