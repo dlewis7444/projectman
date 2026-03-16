@@ -1,5 +1,4 @@
 import os
-import re
 import signal
 
 import gi
@@ -8,12 +7,6 @@ gi.require_version('Vte', '3.91')
 from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk, Gio
 
 import zellij
-
-
-def _slugify(name):
-    """Convert project name to a safe multiplexer session name."""
-    slug = re.sub(r'[^a-zA-Z0-9_-]', '-', name)
-    return slug[:48] or 'projectman'
 
 
 class TerminalView(Gtk.Box):
