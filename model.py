@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import gi
 gi.require_version('Gtk', '4.0')
-from gi.repository import GObject, Gio
+from gi.repository import GObject, Gio, GLib
 
 
 STATUS_FILE = os.path.expanduser('~/.claude/projectman/status.json')
@@ -181,9 +181,17 @@ class StatusWatcher(GObject.GObject):
         self._monitor.connect('changed', self._on_changed)
         self._reload()
 
+    def force_poll(self):
+        self._reload()
+
     def _on_changed(self, monitor, file, other_file, event_type):
         if event_type in (Gio.FileMonitorEvent.CHANGED, Gio.FileMonitorEvent.CREATED):
             self._reload()
+            GLib.timeout_add(800, self._delayed_poll)
+
+    def _delayed_poll(self):
+        self._reload()
+        return False  # don't repeat
 
     def _reload(self):
         try:
@@ -209,7 +217,7 @@ class StatusWatcher(GObject.GObject):
             return 'idle'
         if status_cwd != project.path:
             return 'idle'
-        if time.time() - self._status.ts > 30:
+        if time.time() - self._status.ts > 60:
             return 'idle'
         event = self._status.event
         if event == 'Notification':
