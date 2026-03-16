@@ -93,6 +93,14 @@ class ProjectStore:
         dest = os.path.join(self._projects_dir(), project.name)
         shutil.move(src, dest)
 
+    def create_project(self, name):
+        path = os.path.join(self._projects_dir(), name)
+        os.makedirs(path, exist_ok=True)
+
+    def rename_project(self, project, new_name):
+        new_path = os.path.join(self._projects_dir(), new_name)
+        os.rename(project.path, new_path)
+
 
 class HistoryReader:
     def __init__(self):
