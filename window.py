@@ -129,11 +129,16 @@ class AppWindow(Adw.ApplicationWindow):
 
     def _restore_session(self):
         """Restore projects that were running at the last committed close."""
+        if self._settings.multiplexer == 'zellij':
+            self._restore_zellij_session()
+            return
+        # --- direct-claude mode (original behaviour) ---
         if not self._settings.resume_projects:
             return
         open_paths, focused_path = load_session(SESSION_FILE)
         active = filter_active_paths(open_paths, self._store.load_projects())
         focused, background = plan_restore(open_paths, focused_path, active)
+        self._sidebar.set_active_only(bool(active))
         if focused:
             self._on_project_activated(self._sidebar, focused)
         for path in background:
@@ -141,6 +146,17 @@ class AppWindow(Adw.ApplicationWindow):
             tv = self._get_or_create_terminal(project)
             if tv._child_pid is None:
                 tv.spawn_claude(project_name=project.name)
+
+    def _restore_zellij_session(self):
+        """In zellij mode: find live pm-* sessions and mark matching projects detached."""
+        import zellij as z
+        live = []
+        for project in self._store.load_projects():
+            sname = z.session_name(project.name)
+            if z.session_exists(sname):
+                self._sidebar.set_project_state(project.path, 'detached')
+                live.append(project)
+        self._sidebar.set_active_only(bool(live))
 
     def _setup_shortcuts(self):
         controller = Gtk.ShortcutController.new()
