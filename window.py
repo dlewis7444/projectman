@@ -137,8 +137,10 @@ class AppWindow(Adw.ApplicationWindow):
         if focused:
             self._on_project_activated(self._sidebar, focused)
         for path in background:
-            tv = self._get_or_create_terminal(active[path])
-            tv.spawn_claude(project_name=active[path].name)
+            project = active[path]
+            tv = self._get_or_create_terminal(project)
+            if tv._child_pid is None:
+                tv.spawn_claude(project_name=project.name)
 
     def _setup_shortcuts(self):
         controller = Gtk.ShortcutController.new()
