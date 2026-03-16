@@ -88,7 +88,7 @@ class Sidebar(Gtk.Box):
         if not self._active_only:
             return True
         if isinstance(row, ProjectRow):
-            return row._process_running
+            return row._process_state in ('attached', 'detached')
         return True
 
     def _populate(self):
@@ -96,7 +96,7 @@ class Sidebar(Gtk.Box):
             self._listbox.remove(self._new_project_row)
             self._new_project_row = None
         # Preserve process running state across rebuilds
-        running_state = {path: row._process_running for path, row in self._rows.items()}
+        running_state = {path: row._process_state for path, row in self._rows.items()}
 
         self._rows.clear()
         while True:
@@ -108,7 +108,7 @@ class Sidebar(Gtk.Box):
         for proj in self._store.load_projects():
             row = ProjectRow(proj, self._history, self._watcher)
             if proj.path in running_state:
-                row._process_running = running_state[proj.path]
+                row._process_state = running_state[proj.path]
                 row.update_status()
             row.connect('session-activated',
                         lambda r, p, sid, pp=proj.path: self.emit('session-activated', pp, sid))
@@ -236,7 +236,7 @@ class ProjectRow(Gtk.ListBoxRow):
         self._watcher = watcher
         self._expanded = False
         self._sessions_loaded = False
-        self._process_running = False
+        self._process_state = 'inactive'
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_child(outer)
@@ -384,18 +384,28 @@ class ProjectRow(Gtk.ListBoxRow):
         elif isinstance(row, SessionHistoryRow):
             self.emit('session-activated', self._project.path, row._session.session_id)
 
-    def set_process_running(self, running):
-        self._process_running = running
-        self._deactivate_action.set_enabled(running)
-        self._restart_btn.set_sensitive(running)
+    def set_process_state(self, state: str):
+        """state: 'inactive' | 'attached' | 'detached'"""
+        self._process_state = state
+        self._deactivate_action.set_enabled(state == 'attached')
+        self._restart_btn.set_sensitive(state == 'attached')
+        if state == 'detached':
+            self._name_label.add_css_class('project-row-detached')
+            self._name_label.set_tooltip_text('Detached zellij session')
+        else:
+            self._name_label.remove_css_class('project-row-detached')
+            self._name_label.set_tooltip_text('')
         self.update_status()
 
     def update_status(self):
         for s in ('status-stopped', 'status-idle', 'status-active',
                   'status-working', 'status-notification'):
             self._status_dot.remove_css_class(s)
-        if not self._process_running:
+        if self._process_state == 'inactive':
             self._status_dot.add_css_class('status-stopped')
+            return
+        if self._process_state == 'detached':
+            self._status_dot.add_css_class('status-idle')
             return
         self._status_dot.add_css_class(
             f'status-{self._watcher.get_project_status(self._project)}'

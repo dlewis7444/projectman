@@ -25,3 +25,6 @@ row.active-project { background: alpha(@accent_color, 0.15); border-radius: 6px;
 /* Project row action buttons — visible on hover */
 .project-row-actions { opacity: 0; transition: opacity 150ms; }
 row:hover .project-row-actions { opacity: 1; }
+
+/* Detached zellij session — greyed italic label */
+.project-row-detached { color: alpha(currentColor, 0.5); font-style: italic; }
