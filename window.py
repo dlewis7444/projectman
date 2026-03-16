@@ -167,7 +167,7 @@ class AppWindow(Adw.ApplicationWindow):
                 tv.spawn_claude(project_name=project.name)
 
     def _restore_zellij_session(self):
-        """In zellij mode: find live pm-* sessions and mark matching projects detached."""
+        """In zellij mode: find live pm-* sessions, mark detached, re-open last-focused."""
         import zellij as z
         live = []
         for project in self._store.load_projects():
@@ -176,6 +176,22 @@ class AppWindow(Adw.ApplicationWindow):
                 self._sidebar.set_project_state(project.path, 'detached')
                 live.append(project)
         self._sidebar.set_active_only(bool(live))
+
+        if not live or not self._settings.resume_projects:
+            return
+
+        open_paths, focused_path = load_session(SESSION_FILE)
+        live_paths = {p.path for p in live}
+
+        restore_path = focused_path if focused_path and focused_path in live_paths else None
+        if restore_path is None:
+            for path in open_paths:
+                if path in live_paths:
+                    restore_path = path
+                    break
+
+        if restore_path:
+            self._on_project_activated(self._sidebar, restore_path)
 
     def _setup_shortcuts(self):
         controller = Gtk.ShortcutController.new()
@@ -231,7 +247,11 @@ class AppWindow(Adw.ApplicationWindow):
         if tv._child_pid is None:
             if self._settings.multiplexer == 'zellij':
                 import zellij as z
-                tv.spawn_zellij(z.session_name(project.name))
+                sname = z.session_name(project.name)
+                if z.session_exists(sname):
+                    tv.spawn_zellij(sname)
+                else:
+                    tv.spawn_claude(project_name=project.name)
             else:
                 tv.spawn_claude(project_name=project.name)
         tv.get_terminal().grab_focus()
@@ -327,10 +347,21 @@ class AppWindow(Adw.ApplicationWindow):
         tv.get_terminal().grab_focus()
 
     def _on_project_open_zellij(self, sidebar, path):
-        """Explicit 'Open in Zellij' — same as project activation in zellij mode."""
+        """Explicit 'Open in Zellij' — always create/attach zellij session."""
         if self._settings.multiplexer != 'zellij':
             return
-        self._on_project_activated(sidebar, path)
+        project = self._find_project(path)
+        if not project:
+            return
+        import zellij as z
+        tv = self._get_or_create_terminal(project)
+        self._stack.set_visible_child_name(path)
+        self._title.set_subtitle(project.name)
+        self._active_path = path
+        sname = z.session_name(project.name)
+        if not (tv._child_pid is not None and tv._is_zellij):
+            tv.spawn_zellij(sname)
+        tv.get_terminal().grab_focus()
 
     def apply_settings(self, settings):
         """Apply updated settings to all running terminals."""
