@@ -155,3 +155,50 @@ def test_filter_empty_open_paths():
 def test_filter_empty_active_projects():
     result = filter_active_paths(['/a'], [])
     assert result == {}
+
+
+# ── collect_session_state ─────────────────────────────────────────────────────
+
+from session import collect_session_state
+
+
+def _tv(pid):
+    """Minimal TerminalView stand-in."""
+    return types.SimpleNamespace(_child_pid=pid)
+
+
+def test_collect_includes_only_running_terminals():
+    terminals = {'/a': _tv(42), '/b': _tv(None)}
+    paths, _ = collect_session_state(terminals, '/a')
+    assert paths == ['/a']
+
+
+def test_collect_focused_path_when_active_is_running():
+    terminals = {'/a': _tv(1)}
+    _, focused = collect_session_state(terminals, '/a')
+    assert focused == '/a'
+
+
+def test_collect_focused_null_when_active_has_no_process():
+    terminals = {'/a': _tv(None), '/b': _tv(1)}
+    _, focused = collect_session_state(terminals, '/a')
+    assert focused is None
+
+
+def test_collect_focused_null_when_active_path_is_none():
+    terminals = {'/a': _tv(1)}
+    _, focused = collect_session_state(terminals, None)
+    assert focused is None
+
+
+def test_collect_empty_when_no_terminals_running():
+    terminals = {'/a': _tv(None), '/b': _tv(None)}
+    paths, focused = collect_session_state(terminals, '/a')
+    assert paths == []
+    assert focused is None
+
+
+def test_collect_empty_terminals():
+    paths, focused = collect_session_state({}, None)
+    assert paths == []
+    assert focused is None

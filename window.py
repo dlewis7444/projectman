@@ -11,6 +11,8 @@ from terminal import TerminalView
 from archive_window import ArchiveWindow
 from shutdown_window import ShutdownWindow
 from model import Project
+from session import save_session, load_session, filter_active_paths, \
+    collect_session_state, SESSION_FILE
 
 
 class AppWindow(Adw.ApplicationWindow):
@@ -76,7 +78,8 @@ class AppWindow(Adw.ApplicationWindow):
         running = {path: tv for path, tv in self._terminals.items()
                    if tv._child_pid is not None}
         if not running:
-            return False  # nothing active, close immediately
+            self._save_session()      # write empty session; restore is a no-op
+            return False
 
         # If any session is actively working (orange dot), confirm first
         working_names = [
@@ -112,7 +115,15 @@ class AppWindow(Adw.ApplicationWindow):
         dialog.present(self)
 
     def _open_shutdown_window(self, running):
+        self._save_session()      # snapshot before SIGTERM
         ShutdownWindow(parent=self, running=running, on_complete=self.destroy)
+
+    def _save_session(self):
+        """Snapshot running terminals to SESSION_FILE (atomic write)."""
+        if not self._settings.resume_projects:
+            return
+        open_paths, focused = collect_session_state(self._terminals, self._active_path)
+        save_session(SESSION_FILE, open_paths, focused)
 
     def _setup_shortcuts(self):
         controller = Gtk.ShortcutController.new()

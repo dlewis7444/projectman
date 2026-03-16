@@ -67,3 +67,20 @@ def filter_active_paths(open_paths, active_projects):
     """
     active = {p.path: p for p in active_projects}
     return {path: active[path] for path in open_paths if path in active}
+
+
+def collect_session_state(terminals, active_path):
+    """Compute (open_paths, focused_path) from AppWindow terminal state.
+
+    terminals   : dict[path → TerminalView-like] (needs ._child_pid attr)
+    active_path : currently visible project path, or None
+    Returns     : (open_paths: list[str], focused_path: str | None)
+    """
+    seen = set()
+    open_paths = []
+    for path, tv in terminals.items():
+        if tv._child_pid is not None and path not in seen:
+            seen.add(path)
+            open_paths.append(path)
+    focused = active_path if active_path in seen else None
+    return open_paths, focused
