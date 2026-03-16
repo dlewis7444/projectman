@@ -7,6 +7,8 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Vte', '3.91')
 from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk, Gio
 
+import zellij
+
 
 def _slugify(name):
     """Convert project name to a safe multiplexer session name."""
@@ -16,8 +18,9 @@ def _slugify(name):
 
 class TerminalView(Gtk.Box):
     __gsignals__ = {
-        'process-exited': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
-        'process-started': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'process-exited':   (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        'process-started':  (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'process-detached': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
     def __init__(self, project, settings):
@@ -26,6 +29,8 @@ class TerminalView(Gtk.Box):
         self._settings = settings
         self._child_pid = None
         self._is_multiplexed = False
+        self._is_zellij = False
+        self._zellij_session = None
         self._font_size = settings.font_size
 
         self._terminal = Vte.Terminal()
@@ -101,11 +106,26 @@ class TerminalView(Gtk.Box):
     def _build_mux_argv(self, mux, session_name):
         if mux == 'tmux':
             return ['tmux', 'new-session', '-A', '-s', session_name]
-        if mux == 'zellij':
-            return ['zellij', 'attach', '--create', session_name]
         if mux == 'screen':
             return ['screen', '-S', session_name, '-D', '-R']
+        # zellij is handled by spawn_zellij; this fallback is for unknown values
         return [mux]
+
+    def spawn_zellij(self, session_name):
+        """Attach to or create a zellij session for this project.
+
+        Uses `zellij attach --create` which is idiomatic: creates the session
+        if absent, attaches if present. The session starts with an empty shell;
+        auto-starting claude inside zellij is deferred (future: KDL layout).
+
+        `session_exists` is a plain os.path.exists() call — non-blocking.
+        """
+        self._kill_child()
+        self._terminal.reset(True, True)
+        self._is_zellij = True
+        self._zellij_session = session_name
+        self._is_multiplexed = True
+        self._spawn(['zellij', 'attach', '--create', session_name])
 
     def deactivate(self):
         """Gracefully stop the child; terminal output is preserved for context."""
@@ -139,6 +159,13 @@ class TerminalView(Gtk.Box):
 
     def _on_child_exited(self, terminal, status):
         self._child_pid = None
+        if self._is_zellij and self._zellij_session:
+            if zellij.session_exists(self._zellij_session):
+                self.emit('process-detached')
+                return
+            # Session is truly gone — clear zellij state before emitting exited
+            self._is_zellij = False
+            self._zellij_session = None
         self.emit('process-exited', status)
 
     def _kill_child(self):
