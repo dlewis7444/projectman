@@ -231,9 +231,25 @@ class AppWindow(Adw.ApplicationWindow):
     # --- deactivate (kill process, keep in sidebar as inactive) ---
 
     def _on_project_deactivate(self, sidebar, path):
-        if path in self._terminals:
-            self._terminals[path].deactivate()
-            # process-exited signal will fire → sidebar.set_project_running(path, False)
+        if self._settings.multiplexer == 'zellij':
+            import zellij as z
+            import subprocess
+            project = self._find_project(path)
+            if project:
+                sname = z.session_name(project.name)
+                if z.session_exists(sname):
+                    subprocess.run(['zellij', 'kill-session', sname],
+                                   capture_output=True)
+                    # Killing the session causes the `zellij attach` VTE child to exit on its own.
+                    # _on_child_exited fires → session_exists returns False → process-exited emitted
+                    # → set_project_state(path, 'inactive') via the signal handler.
+                    # If the project was detached (no VTE child running), force the state update:
+                    if path not in self._terminals or self._terminals[path]._child_pid is None:
+                        self._sidebar.set_project_state(path, 'inactive')
+        else:
+            if path in self._terminals:
+                self._terminals[path].deactivate()
+                # process-exited signal fires → set_project_state(path, 'inactive')
 
     # --- archive (move to .archive, remove terminal) ---
 
@@ -244,6 +260,13 @@ class AppWindow(Adw.ApplicationWindow):
             self._stack.remove(tv)
         project = self._find_project(path)
         if project:
+            if self._settings.multiplexer == 'zellij':
+                import zellij as z
+                import subprocess
+                sname = z.session_name(project.name)
+                if z.session_exists(sname):
+                    subprocess.run(['zellij', 'kill-session', sname],
+                                   capture_output=True)
             self._store.archive(project)
         self._sidebar.refresh()
         self._sync_running_state()
