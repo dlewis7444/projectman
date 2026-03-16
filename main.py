@@ -12,6 +12,9 @@ from window import AppWindow
 from settings import Settings
 
 
+VERSION = '0.1.0'
+
+
 class ProjectManApp(Adw.Application):
     __gsignals__ = {
         'settings-changed': (GObject.SignalFlags.RUN_FIRST, None, ()),
@@ -48,6 +51,14 @@ class ProjectManApp(Adw.Application):
         self.set_accels_for_action('app.zoom-reset', ['<Control>0'])
 
     def _on_activate(self, app):
+        old_dir = os.path.expanduser('~/.projectman')
+        new_dir = os.path.expanduser('~/.ProjectMan')
+        if not os.path.exists(new_dir) and os.path.exists(old_dir):
+            try:
+                os.rename(old_dir, new_dir)
+                print('ProjectMan: migrated ~/.projectman → ~/.ProjectMan', file=sys.stderr)
+            except OSError as e:
+                print(f'ProjectMan: migration failed: {e}', file=sys.stderr)
         self._settings = Settings.load()
         self._store = ProjectStore(self._settings)
         self._history = HistoryReader()
