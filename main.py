@@ -65,11 +65,16 @@ class ProjectManApp(Adw.Application):
         self._history.load()
         self._watcher = StatusWatcher()
         self._watcher.start()
+        from zellij import ZellijWatcher
+        self._zellij_watcher = ZellijWatcher()
+        if self._settings.multiplexer == 'zellij':
+            self._zellij_watcher.start()
         self._projects_watcher = ProjectsWatcher()
         self._projects_watcher.start(self._settings.resolved_projects_dir)
         self._last_projects_dir = self._settings.resolved_projects_dir
         self._window = AppWindow(
-            self, self._store, self._history, self._watcher, self._settings
+            self, self._store, self._history, self._watcher,
+            self._settings, self._zellij_watcher
         )
         self._projects_watcher.connect('projects-changed', self._on_projects_changed)
         self.connect('settings-changed', self._on_settings_changed)
@@ -78,6 +83,10 @@ class ProjectManApp(Adw.Application):
 
     def _on_settings_changed(self, app):
         self._window.apply_settings(self._settings)
+        if self._settings.multiplexer == 'zellij':
+            self._zellij_watcher.start()
+        else:
+            self._zellij_watcher.stop()
         new_dir = self._settings.resolved_projects_dir
         if new_dir != self._last_projects_dir:
             self._projects_watcher.restart(new_dir)
