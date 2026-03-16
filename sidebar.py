@@ -91,6 +91,7 @@ class Sidebar(Gtk.Box):
         return True
 
     def _populate(self):
+        self._new_project_row = None
         # Preserve process running state across rebuilds
         running_state = {path: row._process_running for path, row in self._rows.items()}
 
