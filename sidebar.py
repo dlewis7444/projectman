@@ -92,8 +92,10 @@ class Sidebar(Gtk.Box):
         return True
 
     def _populate(self):
-        if self._new_project_row is not None:
-            self._listbox.remove(self._new_project_row)
+        # Preserve the in-progress new-project entry across rebuilds
+        pending_row = self._new_project_row
+        if pending_row is not None:
+            self._listbox.remove(pending_row)
             self._new_project_row = None
         # Preserve process running state across rebuilds
         running_state = {path: row._process_state for path, row in self._rows.items()}
@@ -126,6 +128,11 @@ class Sidebar(Gtk.Box):
                         lambda r, new_name, p=proj.path: self.emit('project-rename', p, new_name))
             self._listbox.append(row)
             self._rows[proj.path] = row
+
+        if pending_row is not None:
+            self._new_project_row = pending_row
+            self._listbox.prepend(pending_row)
+            GLib.idle_add(pending_row._entry.grab_focus)
 
     def _on_row_activated(self, listbox, row):
         if isinstance(row, ProjectRow):
@@ -218,7 +225,11 @@ class NewProjectEntryRow(Gtk.ListBoxRow):
     def _on_key_pressed(self, ctrl, keyval, keycode, state):
         if keyval == Gdk.KEY_Escape:
             self._on_cancel()
-        return True
+            return True
+        # Stop Enter from bubbling to ListBox (would activate the selected project row)
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            return True
+        return False
 
 
 class ProjectRow(Gtk.ListBoxRow):

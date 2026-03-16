@@ -90,7 +90,7 @@ class AppWindow(Adw.ApplicationWindow):
             currently_attached = tv is not None and tv._child_pid is not None
             if currently_attached:
                 continue  # process-exited will handle this case
-            if z.session_exists(sname):
+            if z.session_alive(sname):
                 self._sidebar.set_project_state(path, 'detached')
             else:
                 self._sidebar.set_project_state(path, 'inactive')
@@ -174,10 +174,11 @@ class AppWindow(Adw.ApplicationWindow):
         _on_project_activated decides per-project whether to attach zellij or spawn claude.
         """
         import zellij as z
+        alive_names = z.alive_session_names()
         live = []
         for project in self._store.load_projects():
             sname = z.session_name(project.name)
-            if z.session_exists(sname):
+            if sname in alive_names:
                 self._sidebar.set_project_state(project.path, 'detached')
                 live.append(project)
 
@@ -208,7 +209,7 @@ class AppWindow(Adw.ApplicationWindow):
             tv = self._get_or_create_terminal(project)
             if tv._child_pid is None:
                 sname = z.session_name(project.name)
-                if z.session_exists(sname):
+                if sname in alive_names:
                     tv.spawn_zellij(sname)
                 else:
                     tv.spawn_claude(project_name=project.name)
@@ -265,13 +266,10 @@ class AppWindow(Adw.ApplicationWindow):
         self._title.set_subtitle(project.name)
         self._active_path = path
         if tv._child_pid is None:
-            if self._settings.multiplexer == 'zellij':
-                import zellij as z
-                sname = z.session_name(project.name)
-                if z.session_exists(sname):
-                    tv.spawn_zellij(sname)
-                else:
-                    tv.spawn_claude(project_name=project.name)
+            import zellij as z
+            sname = z.session_name(project.name)
+            if z.session_alive(sname):
+                tv.spawn_zellij(sname)
             else:
                 tv.spawn_claude(project_name=project.name)
         tv.get_terminal().grab_focus()
