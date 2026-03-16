@@ -4,7 +4,7 @@ import signal
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Vte', '3.91')
-from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk
+from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk, Gio
 
 
 class TerminalView(Gtk.Box):
@@ -28,6 +28,16 @@ class TerminalView(Gtk.Box):
         self._terminal.set_vexpand(True)
         self._terminal.connect('child-exited', self._on_child_exited)
         self._apply_font()
+
+        # URL matching — opens links on click
+        url_regex = GLib.Regex.new(
+            r'https?://\S+|file://\S+',
+            GLib.RegexCompileFlags(0),
+            GLib.RegexMatchFlags(0),
+        )
+        self._url_tag = self._terminal.match_add_regex(url_regex, 0)
+        self._terminal.match_set_cursor_name(self._url_tag, 'pointer')
+
         self.append(self._terminal)
 
         # Intercept Shift+Enter at CAPTURE phase — GTK4/Wayland strips the Shift
@@ -37,12 +47,21 @@ class TerminalView(Gtk.Box):
         key_ctrl.connect('key-pressed', self._on_key_pressed)
         self._terminal.add_controller(key_ctrl)
 
+        click_ctrl = Gtk.GestureClick.new()
+        click_ctrl.connect('released', self._on_terminal_click)
+        self._terminal.add_controller(click_ctrl)
+
     def _on_key_pressed(self, controller, keyval, keycode, state):
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             if state & Gdk.ModifierType.SHIFT_MASK:
                 self._terminal.feed_child(b'\x1b[13;2u')
                 return True
         return False
+
+    def _on_terminal_click(self, gesture, n_press, x, y):
+        url, _tag = self._terminal.match_check_event(gesture.get_last_event(None))
+        if url:
+            Gio.AppInfo.launch_default_for_uri(url, None)
 
     def _apply_font(self):
         desc = Pango.FontDescription.from_string(f'Monospace {self._font_size}')
