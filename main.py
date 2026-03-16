@@ -74,7 +74,7 @@ class ProjectManApp(Adw.Application):
         self._projects_watcher.connect('projects-changed', self._on_projects_changed)
         self.connect('settings-changed', self._on_settings_changed)
         self._window.present()
-        self._window._activate_last_project()
+        self._window._restore_session()
 
     def _on_settings_changed(self, app):
         self._window.apply_settings(self._settings)

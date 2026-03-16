@@ -84,3 +84,18 @@ def collect_session_state(terminals, active_path):
             open_paths.append(path)
     focused = active_path if active_path in seen else None
     return open_paths, focused
+
+
+def plan_restore(open_paths, focused_path, active_map):
+    """Compute what to activate vs spawn in the background during restore.
+
+    open_paths   : deduplicated list from load_session
+    focused_path : path to show in the main pane, or None
+    active_map   : {path: Project} from filter_active_paths
+    Returns      : (focused: str|None, background: list[str])
+                   focused  — path to activate (None if not in active_map)
+                   background — remaining paths in active_map, in open_paths order
+    """
+    focused = focused_path if focused_path and focused_path in active_map else None
+    background = [p for p in open_paths if p in active_map and p != focused_path]
+    return focused, background
