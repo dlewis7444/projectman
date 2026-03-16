@@ -142,9 +142,9 @@ class Sidebar(Gtk.Box):
     def refresh(self):
         self._populate()
 
-    def set_project_running(self, path, running):
+    def set_project_state(self, path, state: str):
         if path in self._rows:
-            self._rows[path].set_process_running(running)
+            self._rows[path].set_process_state(state)
             if self._active_only:
                 self._listbox.invalidate_filter()
 
