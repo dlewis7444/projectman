@@ -59,6 +59,7 @@ class Sidebar(Gtk.Box):
 
         # "Active Only" toggle — hides inactive projects to reduce clutter
         self._active_toggle = Gtk.ToggleButton(label='Active Only')
+        self._active_toggle.add_css_class('flat')
         self._active_toggle.set_margin_start(8)
         self._active_toggle.set_margin_end(8)
         self._active_toggle.set_margin_top(4)
@@ -66,8 +67,8 @@ class Sidebar(Gtk.Box):
         self._active_toggle.connect('toggled', self._on_active_toggled)
         self.append(self._active_toggle)
 
-        # "Archived Projects…" opens popup window
-        archive_btn = Gtk.Button(label='Archived Projects\u2026')
+        # "Archived Projects" opens popup window
+        archive_btn = Gtk.Button(label='Archived Projects')
         archive_btn.add_css_class('flat')
         archive_btn.set_margin_start(8)
         archive_btn.set_margin_end(8)

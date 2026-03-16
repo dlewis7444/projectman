@@ -38,10 +38,8 @@ class TerminalView(Gtk.Box):
         self._apply_font()
 
         # URL matching — opens links on click
-        url_regex = GLib.Regex.new(
-            r'https?://\S+|file://\S+',
-            GLib.RegexCompileFlags(0),
-            GLib.RegexMatchFlags(0),
+        url_regex = Vte.Regex.new_for_match(
+            r'https?://\S+|file://\S+', -1, 0
         )
         self._url_tag = self._terminal.match_add_regex(url_regex, 0)
         self._terminal.match_set_cursor_name(self._url_tag, 'pointer')
@@ -84,33 +82,30 @@ class TerminalView(Gtk.Box):
             args = ['--resume', session_id]
         elif not fresh:
             args = ['-c']
-
-        mux = self._settings.multiplexer
-        if mux != 'none' and project_name:
-            session_name = _slugify(project_name)
-            argv = self._build_mux_argv(mux, session_name, claude_cmd, args)
-            self._is_multiplexed = True
-        else:
-            argv = [claude_cmd] + args
-            self._is_multiplexed = False
+        argv = [claude_cmd] + args
+        self._is_multiplexed = False
         self._spawn(argv)
 
-    def _build_mux_argv(self, mux, session_name, claude_cmd, claude_args):
-        full_claude = [claude_cmd] + claude_args
+    def spawn_multiplexer(self, mux, project_name=None):
+        """Launch a terminal multiplexer, attaching to a named session if possible."""
+        self._kill_child()
+        self._terminal.reset(True, True)
+        if project_name:
+            session_name = _slugify(project_name)
+            argv = self._build_mux_argv(mux, session_name)
+        else:
+            argv = [mux]
+        self._is_multiplexed = True
+        self._spawn(argv)
+
+    def _build_mux_argv(self, mux, session_name):
         if mux == 'tmux':
-            return ['tmux', 'new-session', '-A', '-s', session_name] + full_claude
+            return ['tmux', 'new-session', '-A', '-s', session_name]
         if mux == 'zellij':
             return ['zellij', 'attach', '--create', session_name]
         if mux == 'screen':
-            # Note: -D -R reattaches if session exists; command is ignored on reattach
-            return ['screen', '-S', session_name, '-D', '-R'] + full_claude
-        return full_claude
-
-    def spawn_multiplexer(self, binary):
-        """Launch a terminal multiplexer by binary name (located via PATH)."""
-        self._kill_child()
-        self._terminal.reset(True, True)
-        self._spawn([binary])
+            return ['screen', '-S', session_name, '-D', '-R']
+        return [mux]
 
     def deactivate(self):
         """Gracefully stop the child; terminal output is preserved for context."""
