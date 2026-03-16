@@ -45,8 +45,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._claude_binary_row.set_text(self._settings.claude_binary)
         self._claude_binary_row.set_show_apply_button(True)
         self._claude_binary_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
-        # Adw.EntryRow implements Gtk.Editable; set placeholder via GObject property
-        self._claude_binary_row.set_property('placeholder-text', 'claude  (PATH default)')
+        self._claude_binary_row.set_placeholder_text('claude  (PATH default)')
         self._claude_binary_row.connect('apply', self._on_claude_binary_apply)
         projects_group.add(self._claude_binary_row)
 
