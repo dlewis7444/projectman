@@ -45,7 +45,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._claude_binary_row.set_text(self._settings.claude_binary)
         self._claude_binary_row.set_show_apply_button(True)
         self._claude_binary_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
-        self._claude_binary_row.set_placeholder_text('claude  (PATH default)')
+        self._claude_binary_row.set_tooltip_text('Leave blank to use "claude" from PATH')
         self._claude_binary_row.connect('apply', self._on_claude_binary_apply)
         projects_group.add(self._claude_binary_row)
 
