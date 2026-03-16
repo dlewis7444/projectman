@@ -2,9 +2,9 @@
 .status-dot { min-width: 4px; min-height: 24px; border-radius: 2px; }
 .status-dot.status-stopped      { background: alpha(currentColor, 0.08); }
 .status-dot.status-idle         { background: alpha(currentColor, 0.25); }
-.status-dot.status-active       { background: #4caf50; }
+.status-dot.status-done         { background: #4caf50; }
 .status-dot.status-working      { background: #ff9800; }
-.status-dot.status-notification { background: #f44336; }
+.status-dot.status-waiting      { background: #2196f3; }
 
 /* Active project row highlight */
 row.active-project { background: alpha(@accent_color, 0.15); border-radius: 6px; }
