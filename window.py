@@ -194,7 +194,11 @@ class AppWindow(Adw.ApplicationWindow):
         self._title.set_subtitle(project.name)
         self._active_path = path
         if tv._child_pid is None:
-            tv.spawn_claude(project_name=project.name)
+            if self._settings.multiplexer == 'zellij':
+                import zellij as z
+                tv.spawn_zellij(z.session_name(project.name))
+            else:
+                tv.spawn_claude(project_name=project.name)
         tv.get_terminal().grab_focus()
 
     def _on_session_activated(self, sidebar, path, session_id):
