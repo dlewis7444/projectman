@@ -249,11 +249,14 @@ class ProjectRow(Gtk.ListBoxRow):
             self._sessions_loaded = True
 
     def _load_sessions(self):
+        self._session_listbox.append(NewSessionRow())
         for i, sess in enumerate(self._history.get_sessions(self._project)):
             self._session_listbox.append(SessionHistoryRow(sess, is_default=(i == 0)))
 
     def _on_session_activated(self, listbox, row):
-        if isinstance(row, SessionHistoryRow):
+        if isinstance(row, NewSessionRow):
+            self.emit('project-new-claude')
+        elif isinstance(row, SessionHistoryRow):
             self.emit('session-activated', self._project.path, row._session.session_id)
 
     def set_process_running(self, running):
@@ -271,6 +274,30 @@ class ProjectRow(Gtk.ListBoxRow):
         self._status_dot.add_css_class(
             f'status-{self._watcher.get_project_status(self._project)}'
         )
+
+
+class NewSessionRow(Gtk.ListBoxRow):
+    """Top entry in the session history dropdown — starts a fresh Claude session."""
+    def __init__(self):
+        super().__init__()
+        self.add_css_class('session-history-row')
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_margin_start(8)
+        box.set_margin_end(8)
+        box.set_margin_top(4)
+        box.set_margin_bottom(4)
+
+        icon = Gtk.Image.new_from_icon_name('list-add-symbolic')
+        icon.set_pixel_size(12)
+        box.append(icon)
+
+        label = Gtk.Label(label='New Session\u2026')
+        label.set_halign(Gtk.Align.START)
+        label.add_css_class('session-title')
+        box.append(label)
+
+        self.set_child(box)
 
 
 class SessionHistoryRow(Gtk.ListBoxRow):
