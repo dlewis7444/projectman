@@ -18,6 +18,7 @@ class Sidebar(Gtk.Box):
         'project-new-claude':   (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-zellij':       (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-edit-md':      (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        'project-rename':       (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         'show-archive-window':  (GObject.SignalFlags.RUN_FIRST, None, ()),
         'show-settings':        (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-create':       (GObject.SignalFlags.RUN_FIRST, None, (str,)),
@@ -121,6 +122,8 @@ class Sidebar(Gtk.Box):
                         lambda r, p=proj.path: self.emit('project-zellij', p))
             row.connect('project-edit-md',
                         lambda r, p=proj.path: self.emit('project-edit-md', p))
+            row.connect('project-rename',
+                        lambda r, new_name, p=proj.path: self.emit('project-rename', p, new_name))
             self._listbox.append(row)
             self._rows[proj.path] = row
 
@@ -222,6 +225,7 @@ class ProjectRow(Gtk.ListBoxRow):
         'project-new-claude': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-zellij':     (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-edit-md':    (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'project-rename':     (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self, project, history, watcher):
@@ -253,10 +257,19 @@ class ProjectRow(Gtk.ListBoxRow):
         self._arrow.connect('clicked', self._on_expand_clicked)
         top.append(self._arrow)
 
-        label = Gtk.Label(label=project.name)
-        label.set_halign(Gtk.Align.START)
-        label.set_hexpand(True)
-        top.append(label)
+        self._name_label = Gtk.Label(label=project.name)
+        self._name_label.set_halign(Gtk.Align.START)
+        self._name_label.set_hexpand(True)
+        top.append(self._name_label)
+
+        self._rename_entry = Gtk.Entry()
+        self._rename_entry.set_hexpand(True)
+        self._rename_entry.set_visible(False)
+        self._rename_entry.connect('activate', self._on_rename_activate)
+        rename_key = Gtk.EventControllerKey.new()
+        rename_key.connect('key-pressed', self._on_rename_key)
+        self._rename_entry.add_controller(rename_key)
+        top.append(self._rename_entry)
 
         outer.append(top)
 
@@ -273,6 +286,7 @@ class ProjectRow(Gtk.ListBoxRow):
     def _setup_context_menu(self):
         menu = Gio.Menu()
         menu.append('New Claude Session', 'row.new-claude')
+        menu.append('Rename',             'row.rename')
         menu.append('Deactivate',         'row.deactivate')
         menu.append('Open Bash',          'row.bash')
         menu.append('Open in Multiplexer', 'row.zellij')
@@ -295,6 +309,10 @@ class ProjectRow(Gtk.ListBoxRow):
         _add('zellij',   'project-zellij')
         _add('edit-md',  'project-edit-md')
         _add('archive',  'project-archive')
+
+        rename_action = Gio.SimpleAction.new('rename', None)
+        rename_action.connect('activate', lambda a, p: self._enter_rename_mode())
+        ag.add_action(rename_action)
 
         self.insert_action_group('row', ag)
 
@@ -351,6 +369,31 @@ class ProjectRow(Gtk.ListBoxRow):
         self._status_dot.add_css_class(
             f'status-{self._watcher.get_project_status(self._project)}'
         )
+
+    def _enter_rename_mode(self):
+        self._rename_entry.set_text(self._project.name)
+        self._rename_entry.select_region(0, -1)
+        self._name_label.set_visible(False)
+        self._rename_entry.set_visible(True)
+        self._rename_entry.grab_focus()
+
+    def _exit_rename_mode(self):
+        self._rename_entry.set_visible(False)
+        self._name_label.set_visible(True)
+
+    def _on_rename_activate(self, entry):
+        name = entry.get_text().strip()
+        valid = (name and '/' not in name
+                 and not name.startswith('.') and name != self._project.name)
+        self._exit_rename_mode()
+        if valid:
+            self.emit('project-rename', name)
+
+    def _on_rename_key(self, ctrl, keyval, keycode, state):
+        if keyval == Gdk.KEY_Escape:
+            self._exit_rename_mode()
+            return True
+        return False
 
 
 class NewSessionRow(Gtk.ListBoxRow):
