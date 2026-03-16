@@ -96,6 +96,13 @@ class ShutdownWindow(Adw.Window):
 
         outer.append(listbox)
 
+        # Update status labels for multiplexed sessions
+        for path, tv in running.items():
+            if getattr(tv, '_is_multiplexed', False):
+                if path in self._row_widgets:
+                    _ind, status_lbl = self._row_widgets[path]
+                    status_lbl.set_label('detaching\u2026')
+
         # Button row
         btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         btn_box.set_halign(Gtk.Align.END)
@@ -117,15 +124,20 @@ class ShutdownWindow(Adw.Window):
         toolbar_view.set_content(outer)
         self.set_content(toolbar_view)
 
-        # Connect signals BEFORE sending SIGTERM so we don't miss fast exits
+        # Separate multiplexed from non-multiplexed sessions
         for path, tv in running.items():
-            hid = tv.connect('process-exited',
-                             lambda t, s, p=path: self._on_process_done(p))
-            self._handler_ids[path] = (tv, hid)
-            tv.deactivate()   # SIGTERM
+            if getattr(tv, '_is_multiplexed', False):
+                # Detach immediately — the VTE PTY closing handles it; no SIGTERM needed
+                self._on_process_done(path)
+            else:
+                hid = tv.connect('process-exited',
+                                 lambda t, s, p=path: self._on_process_done(p))
+                self._handler_ids[path] = (tv, hid)
+                tv.deactivate()   # SIGTERM
 
-        # Unlock Force Shutdown after 5 s if anything is still running
-        self._force_timeout_id = GLib.timeout_add(5000, self._enable_force)
+        # Unlock Force Shutdown after 5 s if anything non-multiplexed is still running
+        if self._remaining:
+            self._force_timeout_id = GLib.timeout_add(5000, self._enable_force)
 
         self.present()
 
@@ -164,7 +176,11 @@ class ShutdownWindow(Adw.Window):
     def _finish(self):
         self._cleanup()
         self.destroy()
-        self._on_complete()   # destroy the main PM window
+        GLib.timeout_add(500, self._do_complete)
+
+    def _do_complete(self):
+        self._on_complete()
+        return False
 
     def _cleanup(self):
         for tv, hid in self._handler_ids.values():
