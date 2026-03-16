@@ -222,7 +222,7 @@ class StatusWatcher(GObject.GObject):
                 except (OSError, json.JSONDecodeError):
                     continue
         except Exception:
-            pass  # PermissionError or missing dir — keep previous status
+            return  # PermissionError or missing dir — keep previous status
         self._status = new_status
         self.emit('status-changed')
 
