@@ -244,7 +244,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._stack.set_visible_child_name(path)
         self._title.set_subtitle(project.name)
         self._active_path = path
-        tv.spawn_multiplexer(self._settings.multiplexer)
+        tv.spawn_multiplexer(self._settings.multiplexer, project.name)
         tv.get_terminal().grab_focus()
 
     def apply_settings(self, settings):
@@ -262,7 +262,7 @@ class AppWindow(Adw.ApplicationWindow):
             self._settings, self.get_application(), self
         )
         self._settings_win.connect(
-            'destroy', lambda w: setattr(self, '_settings_win', None)
+            'closed', lambda w: setattr(self, '_settings_win', None)
         )
 
     def _activate_last_project(self):
