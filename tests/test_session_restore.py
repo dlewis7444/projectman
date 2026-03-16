@@ -2,7 +2,7 @@ import json
 import os
 import types
 import pytest
-from session import save_session, load_session, filter_active_paths
+from session import save_session, load_session, filter_active_paths, collect_session_state
 
 
 # ── save_session ──────────────────────────────────────────────────────────────
@@ -120,6 +120,11 @@ def _proj(path):
     return p
 
 
+def _tv(pid):
+    """Minimal TerminalView stand-in."""
+    return types.SimpleNamespace(_child_pid=pid)
+
+
 def test_filter_returns_only_matching_active_projects():
     active = [_proj('/a'), _proj('/b')]
     result = filter_active_paths(['/a', '/b', '/c'], active)
@@ -158,14 +163,6 @@ def test_filter_empty_active_projects():
 
 
 # ── collect_session_state ─────────────────────────────────────────────────────
-
-from session import collect_session_state
-
-
-def _tv(pid):
-    """Minimal TerminalView stand-in."""
-    return types.SimpleNamespace(_child_pid=pid)
-
 
 def test_collect_includes_only_running_terminals():
     terminals = {'/a': _tv(42), '/b': _tv(None)}
