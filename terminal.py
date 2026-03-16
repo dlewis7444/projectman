@@ -91,26 +91,6 @@ class TerminalView(Gtk.Box):
         self._is_multiplexed = False
         self._spawn(argv)
 
-    def spawn_multiplexer(self, mux, project_name=None):
-        """Launch a terminal multiplexer, attaching to a named session if possible."""
-        self._kill_child()
-        self._terminal.reset(True, True)
-        if project_name:
-            session_name = _slugify(project_name)
-            argv = self._build_mux_argv(mux, session_name)
-        else:
-            argv = [mux]
-        self._is_multiplexed = True
-        self._spawn(argv)
-
-    def _build_mux_argv(self, mux, session_name):
-        if mux == 'tmux':
-            return ['tmux', 'new-session', '-A', '-s', session_name]
-        if mux == 'screen':
-            return ['screen', '-S', session_name, '-D', '-R']
-        # zellij is handled by spawn_zellij; this fallback is for unknown values
-        return [mux]
-
     def spawn_zellij(self, session_name):
         """Attach to or create a zellij session for this project.
 

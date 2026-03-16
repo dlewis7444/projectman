@@ -52,7 +52,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.connect('project-archive',     self._on_project_archive)
         self._sidebar.connect('project-deactivate',  self._on_project_deactivate)
         self._sidebar.connect('project-new-claude',  self._on_project_new_claude)
-        self._sidebar.connect('project-zellij',      self._on_project_open_multiplexer)
+        self._sidebar.connect('project-zellij',      self._on_project_open_zellij)
         self._sidebar.connect('project-edit-md',     self._on_project_edit_md)
         self._sidebar.connect('show-archive-window', self._on_show_archive_window)
         self._sidebar.connect('show-settings',       self._on_open_settings)
@@ -326,18 +326,11 @@ class AppWindow(Adw.ApplicationWindow):
         tv.spawn_claude(fresh=True, project_name=project.name)
         tv.get_terminal().grab_focus()
 
-    def _on_project_open_multiplexer(self, sidebar, path):
-        if not self._settings.multiplexer or self._settings.multiplexer == 'none':
+    def _on_project_open_zellij(self, sidebar, path):
+        """Explicit 'Open in Zellij' — same as project activation in zellij mode."""
+        if self._settings.multiplexer != 'zellij':
             return
-        project = self._find_project(path)
-        if not project:
-            return
-        tv = self._get_or_create_terminal(project)
-        self._stack.set_visible_child_name(path)
-        self._title.set_subtitle(project.name)
-        self._active_path = path
-        tv.spawn_multiplexer(self._settings.multiplexer, project.name)
-        tv.get_terminal().grab_focus()
+        self._on_project_activated(sidebar, path)
 
     def apply_settings(self, settings):
         """Apply updated settings to all running terminals."""
