@@ -21,3 +21,7 @@ row.active-project { background: alpha(@accent_color, 0.15); border-radius: 6px;
 
 /* Resource bar separator */
 .resource-bar { border-top: 1px solid alpha(currentColor, 0.12); padding: 6px 12px; }
+
+/* Project row action buttons — visible on hover */
+.project-row-actions { opacity: 0; transition: opacity 150ms; }
+row:hover .project-row-actions { opacity: 1; }

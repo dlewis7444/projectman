@@ -274,6 +274,34 @@ class ProjectRow(Gtk.ListBoxRow):
         self._rename_entry.add_controller(rename_focus)
         top.append(self._rename_entry)
 
+        # Action buttons — visible on hover
+        actions_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        actions_box.add_css_class('project-row-actions')
+
+        self._restart_btn = Gtk.Button.new_from_icon_name('view-refresh-symbolic')
+        self._restart_btn.add_css_class('flat')
+        self._restart_btn.set_valign(Gtk.Align.CENTER)
+        self._restart_btn.set_tooltip_text('Restart Claude (new session)')
+        self._restart_btn.set_sensitive(False)  # only enabled when process running
+        self._restart_btn.connect('clicked', lambda b: self.emit('project-new-claude'))
+        actions_box.append(self._restart_btn)
+
+        archive_btn = Gtk.Button.new_from_icon_name('mail-archive-symbolic')
+        archive_btn.add_css_class('flat')
+        archive_btn.set_valign(Gtk.Align.CENTER)
+        archive_btn.set_tooltip_text('Archive project')
+        archive_btn.connect('clicked', lambda b: self.emit('project-archive'))
+        actions_box.append(archive_btn)
+
+        new_session_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
+        new_session_btn.add_css_class('flat')
+        new_session_btn.set_valign(Gtk.Align.CENTER)
+        new_session_btn.set_tooltip_text('New Claude session')
+        new_session_btn.connect('clicked', lambda b: self.emit('project-new-claude'))
+        actions_box.append(new_session_btn)
+
+        top.append(actions_box)
+
         outer.append(top)
 
         self._revealer = Gtk.Revealer()
@@ -358,6 +386,7 @@ class ProjectRow(Gtk.ListBoxRow):
     def set_process_running(self, running):
         self._process_running = running
         self._deactivate_action.set_enabled(running)
+        self._restart_btn.set_sensitive(running)
         self.update_status()
 
     def update_status(self):
@@ -459,6 +488,15 @@ class SessionHistoryRow(Gtk.ListBoxRow):
         box.append(ts)
 
         self.set_child(box)
+
+        # Full title tooltip
+        full_title = session.title if session.title else '(untitled)'
+        try:
+            dt = datetime.fromtimestamp(session.last_active / 1000)
+            tooltip = f'{full_title}\n{dt.strftime("%Y-%m-%d %H:%M")}'
+        except (ValueError, OSError):
+            tooltip = full_title
+        self.set_tooltip_text(tooltip)
 
 
 class ResourceBar(Gtk.Box):
