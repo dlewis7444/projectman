@@ -217,8 +217,7 @@ class NewProjectEntryRow(Gtk.ListBoxRow):
     def _on_key_pressed(self, ctrl, keyval, keycode, state):
         if keyval == Gdk.KEY_Escape:
             self._on_cancel()
-            return True
-        return False
+        return True
 
 
 class ProjectRow(Gtk.ListBoxRow):
