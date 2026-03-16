@@ -125,7 +125,9 @@ class AppWindow(Adw.ApplicationWindow):
 
     def _on_f5(self, widget, args):
         if self._active_path and self._active_path in self._terminals:
-            self._terminals[self._active_path].spawn_claude()
+            project = self._find_project(self._active_path)
+            pname = project.name if project else None
+            self._terminals[self._active_path].spawn_claude(project_name=pname)
         return True
 
     def _get_or_create_terminal(self, project):
@@ -162,7 +164,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._title.set_subtitle(project.name)
         self._active_path = path
         if tv._child_pid is None:
-            tv.spawn_claude()
+            tv.spawn_claude(project_name=project.name)
         tv.get_terminal().grab_focus()
 
     def _on_session_activated(self, sidebar, path, session_id):
@@ -173,7 +175,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._stack.set_visible_child_name(path)
         self._title.set_subtitle(project.name)
         self._active_path = path
-        tv.spawn_claude(session_id=session_id)
+        tv.spawn_claude(session_id=session_id, project_name=project.name)
         tv.get_terminal().grab_focus()
 
     # --- deactivate (kill process, keep in sidebar as inactive) ---
@@ -229,7 +231,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._stack.set_visible_child_name(path)
         self._title.set_subtitle(project.name)
         self._active_path = path
-        tv.spawn_claude(fresh=True)
+        tv.spawn_claude(fresh=True, project_name=project.name)
         tv.get_terminal().grab_focus()
 
     def _on_project_open_multiplexer(self, sidebar, path):

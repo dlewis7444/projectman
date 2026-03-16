@@ -15,7 +15,7 @@ class Settings:
     font_size: int = 11
     scrollback_lines: int = 10000
     audible_bell: bool = False
-    multiplexer: str = 'zellij'
+    multiplexer: str = 'none'
 
     @property
     def resolved_projects_dir(self) -> str:
