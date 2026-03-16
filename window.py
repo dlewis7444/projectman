@@ -10,6 +10,7 @@ from sidebar import Sidebar
 from terminal import TerminalView
 from archive_window import ArchiveWindow
 from shutdown_window import ShutdownWindow
+from model import Project
 
 
 class AppWindow(Adw.ApplicationWindow):
@@ -301,7 +302,10 @@ class AppWindow(Adw.ApplicationWindow):
         subprocess.Popen([editor, claude_md], cwd=path)
 
     def _on_project_create(self, sidebar, name):
-        self._store.create_project(name)
+        try:
+            self._store.create_project(name)
+        except OSError:
+            return
         self._sidebar.refresh()
 
     def _on_project_rename(self, sidebar, old_path, new_name):
@@ -320,9 +324,11 @@ class AppWindow(Adw.ApplicationWindow):
             self._stack.remove(tv)
             self._stack.add_named(tv, new_path)
             self._terminals[new_path] = tv
+            tv._project = Project(name=new_name, path=new_path)
 
         if self._active_path == old_path:
             self._active_path = new_path
             self._title.set_subtitle(new_name)
 
         self._sidebar.refresh()
+        self._sync_running_state()
