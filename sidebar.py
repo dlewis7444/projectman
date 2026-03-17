@@ -16,7 +16,7 @@ class Sidebar(Gtk.Box):
         'project-deactivate':   (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-new-claude':   (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-zellij':       (GObject.SignalFlags.RUN_FIRST, None, (str,)),
-        'project-edit-md':      (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        'project-ntfy-toggle':  (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-rename':       (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         'show-archive-window':  (GObject.SignalFlags.RUN_FIRST, None, ()),
         'show-settings':        (GObject.SignalFlags.RUN_FIRST, None, ()),
@@ -134,8 +134,8 @@ class Sidebar(Gtk.Box):
                         lambda r, p=proj.path: self.emit('project-new-claude', p))
             row.connect('project-zellij',
                         lambda r, p=proj.path: self.emit('project-zellij', p))
-            row.connect('project-edit-md',
-                        lambda r, p=proj.path: self.emit('project-edit-md', p))
+            row.connect('project-ntfy-toggle',
+                        lambda r, p=proj.path: self.emit('project-ntfy-toggle', p))
             row.connect('project-rename',
                         lambda r, new_name, p=proj.path: self.emit('project-rename', p, new_name))
             self._listbox.append(row)
@@ -186,6 +186,14 @@ class Sidebar(Gtk.Box):
             if self._active_only:
                 self._listbox.invalidate_filter()
             self._update_count_label()
+
+    def set_ntfy_enabled(self, enabled):
+        for row in self._rows.values():
+            row.update_ntfy_visibility(enabled)
+
+    def get_ntfy_active_paths(self):
+        return {path for path, row in self._rows.items()
+                if row._ntfy_action.get_state().get_boolean()}
 
     def start_polling(self):
         self._resource_bar.start_polling()
@@ -268,7 +276,7 @@ class ProjectRow(Gtk.ListBoxRow):
         'project-deactivate': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-new-claude': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-zellij':     (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'project-edit-md':    (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'project-ntfy-toggle': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-rename':     (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
@@ -366,13 +374,12 @@ class ProjectRow(Gtk.ListBoxRow):
         self._setup_context_menu()
 
     def _setup_context_menu(self):
-        menu = Gio.Menu()
-        menu.append('New Claude Session', 'row.new-claude')
-        menu.append('Rename',             'row.rename')
-        menu.append('Deactivate',         'row.deactivate')
-        menu.append('Open in Zellij', 'row.zellij')
-        menu.append('Edit CLAUDE.md',     'row.edit-md')
-        menu.append('Archive',            'row.archive')
+        self._menu = Gio.Menu()
+        self._menu.append('New Session',        'row.new-claude')
+        self._menu.append('New Zellij Session', 'row.zellij')
+        self._menu.append('Rename',             'row.rename')
+        self._menu.append('Deactivate',         'row.deactivate')
+        self._menu.append('Archive',            'row.archive')
 
         ag = Gio.SimpleActionGroup()
 
@@ -385,18 +392,23 @@ class ProjectRow(Gtk.ListBoxRow):
 
         self._new_claude_action = _add('new-claude', 'project-new-claude')
         self._deactivate_action = _add('deactivate', 'project-deactivate')
-        self._deactivate_action.set_enabled(False)  # enabled only when process is running
+        self._deactivate_action.set_enabled(False)
         _add('zellij',   'project-zellij')
-        _add('edit-md',  'project-edit-md')
         _add('archive',  'project-archive')
 
         rename_action = Gio.SimpleAction.new('rename', None)
         rename_action.connect('activate', lambda a, p: self._enter_rename_mode())
         ag.add_action(rename_action)
 
+        self._ntfy_action = Gio.SimpleAction.new_stateful(
+            'ntfy-done', None, GLib.Variant('b', False)
+        )
+        self._ntfy_action.connect('activate', self._on_ntfy_activate)
+        ag.add_action(self._ntfy_action)
+
         self.insert_action_group('row', ag)
 
-        self._popover = Gtk.PopoverMenu.new_from_model(menu)
+        self._popover = Gtk.PopoverMenu.new_from_model(self._menu)
         self._popover.set_parent(self)
         self._popover.set_has_arrow(False)
 
@@ -404,6 +416,34 @@ class ProjectRow(Gtk.ListBoxRow):
         click.set_button(3)
         click.connect('pressed', self._on_right_click)
         self.add_controller(click)
+
+    def _on_ntfy_activate(self, action, param):
+        new_state = not action.get_state().get_boolean()
+        action.set_state(GLib.Variant('b', new_state))
+        self.emit('project-ntfy-toggle')
+
+    def update_ntfy_visibility(self, enabled):
+        ntfy_label = 'Ntfy on Done'
+        present = False
+        for i in range(self._menu.get_n_items()):
+            v = self._menu.get_item_attribute_value(i, 'label', GLib.VariantType('s'))
+            if v and v.get_string() == ntfy_label:
+                present = True
+                break
+        if enabled and not present:
+            self._menu.insert(2, ntfy_label, 'row.ntfy-done')
+            self._popover = Gtk.PopoverMenu.new_from_model(self._menu)
+            self._popover.set_parent(self)
+            self._popover.set_has_arrow(False)
+        elif not enabled and present:
+            for i in range(self._menu.get_n_items()):
+                v = self._menu.get_item_attribute_value(i, 'label', GLib.VariantType('s'))
+                if v and v.get_string() == ntfy_label:
+                    self._menu.remove(i)
+                    break
+            self._popover = Gtk.PopoverMenu.new_from_model(self._menu)
+            self._popover.set_parent(self)
+            self._popover.set_has_arrow(False)
 
     def _on_right_click(self, gesture, n_press, x, y):
         rect = Gdk.Rectangle()
