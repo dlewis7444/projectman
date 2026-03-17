@@ -4,7 +4,7 @@ import subprocess
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw
+from gi.repository import Gtk, Adw, Gdk
 
 from sidebar import Sidebar
 from terminal import TerminalView
@@ -26,6 +26,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._settings = settings
         self._terminals = {}
         self._active_path = None
+        self._mru = []          # most-recently-used project paths, index 0 = current
         self._archive_win = None
         self._settings_win = None
         self._zellij_watcher = zellij_watcher
@@ -44,6 +45,14 @@ class AppWindow(Adw.ApplicationWindow):
         projects_lbl = Gtk.Label(label='PROJECTS')
         projects_lbl.add_css_class('pm-sidebar-title')
         sidebar_head.append(projects_lbl)
+
+        self._search_entry = Gtk.SearchEntry()
+        self._search_entry.set_placeholder_text('Filter…')
+        self._search_entry.set_max_width_chars(14)
+        self._search_entry.connect('search-changed', self._on_search_changed)
+        self._search_entry.connect('stop-search', self._on_search_stop)
+        sidebar_head.append(self._search_entry)
+
         self._pin_btn = Gtk.ToggleButton()
         self._pin_btn.set_active(True)
         self._pin_btn.set_icon_name('sidebar-show-symbolic')
@@ -232,20 +241,49 @@ class AppWindow(Adw.ApplicationWindow):
                 else:
                     tv.spawn_claude(project_name=project.name)
 
+    def _push_mru(self, path):
+        self._mru = [path] + [p for p in self._mru if p != path]
+
     def _setup_shortcuts(self):
-        controller = Gtk.ShortcutController.new()
-        controller.set_scope(Gtk.ShortcutScope.MANAGED)
-        controller.add_shortcut(Gtk.Shortcut.new(
-            Gtk.ShortcutTrigger.parse_string('F5'),
-            Gtk.CallbackAction.new(self._on_f5),
-        ))
-        self.add_controller(controller)
+        key_ctrl = Gtk.EventControllerKey.new()
+        key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        key_ctrl.connect('key-pressed', self._on_key_pressed)
+        self.add_controller(key_ctrl)
+
+    def _on_key_pressed(self, controller, keyval, keycode, state):
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        if keyval == Gdk.KEY_F5:
+            return self._on_f5()
+        if ctrl and keyval == Gdk.KEY_Tab:
+            return self._on_ctrl_tab()
+        return False
+
+    def _on_ctrl_tab(self):
+        self._debug(f'ctrl+tab mru={[os.path.basename(p) for p in self._mru]}')
+        if len(self._mru) >= 2:
+            self._switch_to_project(self._mru[1])
+        return True
+
+    def _debug(self, msg):
+        if self._settings.debug_logging:
+            print(f'[DBG] {msg}', flush=True)
+
+    def _on_search_changed(self, entry):
+        self._sidebar.set_filter_text(entry.get_text())
+
+    def _on_search_stop(self, entry):
+        entry.set_text('')
+        if self._active_path and self._active_path in self._terminals:
+            self._terminals[self._active_path].get_terminal().grab_focus()
 
     def _on_sidebar_pin_toggled(self, btn):
-        if btn.get_active():
+        pinned = btn.get_active()
+        self._search_entry.set_visible(pinned)
+        if pinned:
             self._paned.set_shrink_start_child(False)
             self._paned.set_position(self._sidebar_pos)
         else:
+            self._search_entry.set_text('')
             self._sidebar_pos = self._paned.get_position()
             self._paned.set_shrink_start_child(True)
             self._paned.set_position(0)
@@ -254,7 +292,7 @@ class AppWindow(Adw.ApplicationWindow):
         if self._pin_btn.get_active():
             self._sidebar_pos = paned.get_position()
 
-    def _on_f5(self, widget, args):
+    def _on_f5(self):
         if self._active_path and self._active_path in self._terminals:
             project = self._find_project(self._active_path)
             pname = project.name if project else None
@@ -288,7 +326,7 @@ class AppWindow(Adw.ApplicationWindow):
 
     # --- project activation ---
 
-    def _on_project_activated(self, sidebar, path):
+    def _switch_to_project(self, path):
         project = self._find_project(path)
         if not project:
             return
@@ -296,6 +334,8 @@ class AppWindow(Adw.ApplicationWindow):
         self._stack.set_visible_child_name(path)
         self._title.set_subtitle(project.name)
         self._active_path = path
+        self._push_mru(path)
+        self._sidebar.select_project(path)
         if tv._child_pid is None:
             import zellij as z
             sname = z.session_name(project.name)
@@ -305,6 +345,9 @@ class AppWindow(Adw.ApplicationWindow):
                 tv.spawn_claude(project_name=project.name)
         tv.get_terminal().grab_focus()
 
+    def _on_project_activated(self, sidebar, path):
+        self._switch_to_project(path)
+
     def _on_session_activated(self, sidebar, path, session_id):
         project = self._find_project(path)
         if not project:
@@ -313,6 +356,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._stack.set_visible_child_name(path)
         self._title.set_subtitle(project.name)
         self._active_path = path
+        self._push_mru(path)
         tv.spawn_claude(session_id=session_id, project_name=project.name)
         tv.get_terminal().grab_focus()
 
@@ -392,6 +436,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._stack.set_visible_child_name(path)
         self._title.set_subtitle(project.name)
         self._active_path = path
+        self._push_mru(path)
         tv.spawn_claude(fresh=True, project_name=project.name)
         tv.get_terminal().grab_focus()
 
@@ -407,6 +452,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._stack.set_visible_child_name(path)
         self._title.set_subtitle(project.name)
         self._active_path = path
+        self._push_mru(path)
         sname = z.session_name(project.name)
         if not (tv._child_pid is not None and tv._is_zellij):
             tv.spawn_zellij(sname)
@@ -462,6 +508,7 @@ class AppWindow(Adw.ApplicationWindow):
 
         if self._active_path == old_path:
             self._active_path = new_path
+            self._mru = [new_path if p == old_path else p for p in self._mru]
             self._title.set_subtitle(new_name)
 
         self._sidebar.refresh()
