@@ -106,3 +106,7 @@ listbox.shutdown-list > row:hover {
 label.shutdown-project-name {
     color: #0a2540;
 }
+
+/* expand arrow */
+.expand-arrow { color: alpha(#00b4d8, 0.6); }
+.expand-arrow:hover { color: #90d5f0; }
