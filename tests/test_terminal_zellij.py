@@ -1,7 +1,7 @@
 # tests/test_terminal_zellij.py
 """
 Tests for TerminalView's zellij detach detection.
-These tests call _on_child_exited directly with mocked session_exists,
+These tests call _on_child_exited directly with mocked session_alive,
 so they do NOT need a real display.  However, TerminalView.__init__ does
 construct a Vte.Terminal widget, which requires a display.  Run with:
   DISPLAY=:0 pytest tests/test_terminal_zellij.py
@@ -43,7 +43,7 @@ def test_child_exited_session_alive_emits_detached():
     tv.connect('process-detached', lambda t: detached_fired.append(True))
     tv.connect('process-exited',   lambda t, s: exited_fired.append(True))
 
-    with patch('terminal.zellij.session_exists', return_value=True):
+    with patch('terminal.zellij.session_alive', return_value=True):
         tv._on_child_exited(tv._terminal, 0)
 
     assert detached_fired == [True]
@@ -61,7 +61,7 @@ def test_child_exited_session_gone_emits_exited():
     tv.connect('process-detached', lambda t: detached_fired.append(True))
     tv.connect('process-exited',   lambda t, s: exited_fired.append(True))
 
-    with patch('terminal.zellij.session_exists', return_value=False):
+    with patch('terminal.zellij.session_alive', return_value=False):
         tv._on_child_exited(tv._terminal, 0)
 
     assert detached_fired == []
