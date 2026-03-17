@@ -21,7 +21,7 @@ class ProjectManApp(Adw.Application):
     }
 
     def __init__(self, debug_flag=False):
-        super().__init__(application_id='com.lewislab.ProjectMan')
+        super().__init__(application_id='io.github.projectman')
         self._debug_flag = debug_flag
         self.connect('startup', self._on_startup)
         self.connect('activate', self._on_activate)
