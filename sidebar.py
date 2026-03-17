@@ -262,11 +262,9 @@ class NewProjectEntryRow(Gtk.ListBoxRow):
     def _on_key_pressed(self, ctrl, keyval, keycode, state):
         if keyval == Gdk.KEY_Escape:
             self._on_cancel()
-            return True
-        # Stop Enter from bubbling to ListBox (would activate the selected project row)
-        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-            return True
-        return False
+        # Always consume — prevents keys from bubbling to ListBox, which causes
+        # focus to shift away from the Entry and back, selecting all text on re-focus.
+        return True
 
 
 class ProjectRow(Gtk.ListBoxRow):
