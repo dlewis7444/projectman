@@ -25,6 +25,7 @@ class Sidebar(Gtk.Box):
 
     def __init__(self, store, history, watcher):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.add_css_class('pm-sidebar')
         self._store = store
         self._history = history
         self._watcher = watcher
