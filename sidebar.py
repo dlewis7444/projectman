@@ -23,7 +23,7 @@ class Sidebar(Gtk.Box):
         'project-create':       (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
-    def __init__(self, store, history, watcher):
+    def __init__(self, store, history, watcher, version=''):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.add_css_class('pm-sidebar')
         self._store = store
@@ -85,7 +85,8 @@ class Sidebar(Gtk.Box):
         self.append(archive_btn)
 
         self._resource_bar = ResourceBar(
-            on_settings_clicked=lambda: self.emit('show-settings')
+            on_settings_clicked=lambda: self.emit('show-settings'),
+            version=version,
         )
         self.append(self._resource_bar)
 
@@ -635,21 +636,24 @@ class SessionHistoryRow(Gtk.ListBoxRow):
 
 
 class ResourceBar(Gtk.Box):
-    def __init__(self, on_settings_clicked=None):
-        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+    def __init__(self, on_settings_clicked=None, version=''):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.add_css_class('resource-bar')
 
         self._reader = ResourceReader()
+
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+
         self._cpu_label = Gtk.Label(label='CPU: \u2014')
         self._cpu_label.set_halign(Gtk.Align.START)
         self._cpu_label.add_css_class('caption')
-        self.append(self._cpu_label)
+        top.append(self._cpu_label)
 
         self._ram_label = Gtk.Label(label='RAM: \u2014')
         self._ram_label.set_halign(Gtk.Align.START)
         self._ram_label.add_css_class('caption')
         self._ram_label.set_hexpand(True)
-        self.append(self._ram_label)
+        top.append(self._ram_label)
 
         gear = Gtk.Button.new_from_icon_name('emblem-system-symbolic')
         gear.add_css_class('flat')
@@ -658,7 +662,16 @@ class ResourceBar(Gtk.Box):
         gear.set_tooltip_text('Settings')
         if on_settings_clicked is not None:
             gear.connect('clicked', lambda b: on_settings_clicked())
-        self.append(gear)
+        top.append(gear)
+
+        self.append(top)
+
+        if version:
+            ver_label = Gtk.Label(label=f'ProjectMan v{version}')
+            ver_label.set_halign(Gtk.Align.CENTER)
+            ver_label.add_css_class('dim-label')
+            ver_label.add_css_class('caption')
+            self.append(ver_label)
 
     def start_polling(self):
         self._reader.read()
