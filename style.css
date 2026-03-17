@@ -2,6 +2,9 @@
    Colors live in themes/argonaut.css, themes/candyland.css, etc.
    ─────────────────────────────────────────────────────────────────── */
 
+/* ── Sidebar minimum drag width (pin collapses to 0 via shrink) ───── */
+.pm-sidebar { min-width: 80px; }
+
 /* ── Status dot: 4px wide Gtk.Box widget ─────────────────────────── */
 .status-dot { min-width: 4px; min-height: 24px; border-radius: 2px; }
 
@@ -11,11 +14,11 @@
     margin: 2px 6px;
 }
 
-/* ── Sidebar section header ───────────────────────────────────────── */
-.sidebar-header {
+/* ── Sidebar title in the app header bar ─────────────────────────── */
+.pm-sidebar-title {
     font-size: 11px; font-weight: 700; text-transform: uppercase;
     letter-spacing: 0.08em;
-    margin: 12px 12px 4px 12px;
+    margin-end: 4px;
 }
 
 /* ── Session rows indented under project ──────────────────────────── */

@@ -39,12 +39,28 @@ class AppWindow(Adw.ApplicationWindow):
         self._header = Adw.HeaderBar()
         self._title = Adw.WindowTitle(title='ProjectMan', subtitle='')
         self._header.set_title_widget(self._title)
+
+        sidebar_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        projects_lbl = Gtk.Label(label='PROJECTS')
+        projects_lbl.add_css_class('pm-sidebar-title')
+        sidebar_head.append(projects_lbl)
+        self._pin_btn = Gtk.ToggleButton()
+        self._pin_btn.set_active(True)
+        self._pin_btn.set_icon_name('sidebar-show-symbolic')
+        self._pin_btn.add_css_class('flat')
+        self._pin_btn.set_tooltip_text('Pin sidebar')
+        self._pin_btn.connect('toggled', self._on_sidebar_pin_toggled)
+        sidebar_head.append(self._pin_btn)
+        self._header.pack_start(sidebar_head)
+
         toolbar_view.add_top_bar(self._header)
 
+        self._sidebar_pos = settings.sidebar_width
         self._paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self._paned.set_position(220)
+        self._paned.set_position(settings.sidebar_width)
         self._paned.set_resize_start_child(False)
         self._paned.set_shrink_start_child(False)
+        self._paned.connect('notify::position', self._on_paned_position_notify)
 
         self._sidebar = Sidebar(store, history, watcher)
         self._sidebar.connect('project-activated',   self._on_project_activated)
@@ -96,6 +112,8 @@ class AppWindow(Adw.ApplicationWindow):
                 self._sidebar.set_project_state(path, 'inactive')
 
     def _on_close_request(self, window):
+        self._settings.sidebar_width = self._sidebar_pos
+        self._settings.save()
         running = {path: tv for path, tv in self._terminals.items()
                    if tv._child_pid is not None}
         if not running:
@@ -222,6 +240,19 @@ class AppWindow(Adw.ApplicationWindow):
             Gtk.CallbackAction.new(self._on_f5),
         ))
         self.add_controller(controller)
+
+    def _on_sidebar_pin_toggled(self, btn):
+        if btn.get_active():
+            self._paned.set_shrink_start_child(False)
+            self._paned.set_position(self._sidebar_pos)
+        else:
+            self._sidebar_pos = self._paned.get_position()
+            self._paned.set_shrink_start_child(True)
+            self._paned.set_position(0)
+
+    def _on_paned_position_notify(self, paned, _param):
+        if self._pin_btn.get_active():
+            self._sidebar_pos = paned.get_position()
 
     def _on_f5(self, widget, args):
         if self._active_path and self._active_path in self._terminals:
