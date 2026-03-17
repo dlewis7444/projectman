@@ -45,6 +45,14 @@ class AppWindow(Adw.ApplicationWindow):
         projects_lbl = Gtk.Label(label='PROJECTS')
         projects_lbl.add_css_class('pm-sidebar-title')
         sidebar_head.append(projects_lbl)
+
+        self._search_entry = Gtk.SearchEntry()
+        self._search_entry.set_placeholder_text('Filter…')
+        self._search_entry.set_max_width_chars(14)
+        self._search_entry.connect('search-changed', self._on_search_changed)
+        self._search_entry.connect('stop-search', self._on_search_stop)
+        sidebar_head.append(self._search_entry)
+
         self._pin_btn = Gtk.ToggleButton()
         self._pin_btn.set_active(True)
         self._pin_btn.set_icon_name('sidebar-show-symbolic')
@@ -260,11 +268,22 @@ class AppWindow(Adw.ApplicationWindow):
         if self._settings.debug_logging:
             print(f'[DBG] {msg}', flush=True)
 
+    def _on_search_changed(self, entry):
+        self._sidebar.set_filter_text(entry.get_text())
+
+    def _on_search_stop(self, entry):
+        entry.set_text('')
+        if self._active_path and self._active_path in self._terminals:
+            self._terminals[self._active_path].get_terminal().grab_focus()
+
     def _on_sidebar_pin_toggled(self, btn):
-        if btn.get_active():
+        pinned = btn.get_active()
+        self._search_entry.set_visible(pinned)
+        if pinned:
             self._paned.set_shrink_start_child(False)
             self._paned.set_position(self._sidebar_pos)
         else:
+            self._search_entry.set_text('')
             self._sidebar_pos = self._paned.get_position()
             self._paned.set_shrink_start_child(True)
             self._paned.set_position(0)
