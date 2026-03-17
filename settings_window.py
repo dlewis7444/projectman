@@ -231,6 +231,8 @@ class SettingsWindow(Adw.PreferencesDialog):
 
     def _on_debug_toggled(self, row, _param):
         self._settings.debug_logging = row.get_active()
+        if self._settings.debug_logging:
+            print('[DBG] debug logging enabled', flush=True)
         self._save_and_notify()
 
     def _on_multiplexer_changed(self, row, _param):
