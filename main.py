@@ -64,8 +64,7 @@ class ProjectManApp(Adw.Application):
             except OSError as e:
                 print(f'ProjectMan: migration failed: {e}', file=sys.stderr)
         self._settings = Settings.load()
-        if self._debug_flag:
-            self._settings.debug_logging = True
+        self._settings.debug_logging = self._debug_flag
         self._store = ProjectStore(self._settings)
         self._history = HistoryReader()
         self._history.load()
