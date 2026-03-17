@@ -29,6 +29,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._mru = []          # most-recently-used project paths, index 0 = current
         self._archive_win = None
         self._settings_win = None
+        self._prev_status: dict = {}
         self._zellij_watcher = zellij_watcher
         zellij_watcher.connect('sessions-changed', self._on_zellij_sessions_changed)
 
@@ -78,7 +79,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.connect('project-deactivate',  self._on_project_deactivate)
         self._sidebar.connect('project-new-claude',  self._on_project_new_claude)
         self._sidebar.connect('project-zellij',      self._on_project_open_zellij)
-        self._sidebar.connect('project-edit-md',     self._on_project_edit_md)
+        self._sidebar.connect('project-ntfy-toggle', self._on_ntfy_toggle)
         self._sidebar.connect('show-archive-window', self._on_show_archive_window)
         self._sidebar.connect('show-settings',       self._on_open_settings)
         self._sidebar.connect('project-create', self._on_project_create)
@@ -98,7 +99,7 @@ class AppWindow(Adw.ApplicationWindow):
         toolbar_view.set_content(self._paned)
         self.set_content(toolbar_view)
 
-        watcher.connect('status-changed', lambda w: self._sidebar.refresh_status())
+        watcher.connect('status-changed', self._on_status_changed)
         self.connect('close-request', self._on_close_request)
         self._sidebar.start_polling()
         self._setup_shortcuts()
@@ -466,6 +467,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._settings = settings
         for tv in self._terminals.values():
             tv.apply_settings(settings)
+        self._sidebar.set_ntfy_enabled(settings.ntfy_enabled)
 
     def _on_open_settings(self, *args):
         if self._settings_win is not None:
@@ -479,10 +481,35 @@ class AppWindow(Adw.ApplicationWindow):
             'closed', lambda w: setattr(self, '_settings_win', None)
         )
 
-    def _on_project_edit_md(self, sidebar, path):
-        editor = os.environ.get('VISUAL') or os.environ.get('EDITOR') or 'vi'
-        claude_md = os.path.join(path, 'CLAUDE.md')
-        subprocess.Popen([editor, claude_md], cwd=path)
+    def _on_ntfy_toggle(self, sidebar, path):
+        pass  # state lives on ProjectRow._ntfy_action; re-checked on status change
+
+    def _on_status_changed(self, watcher):
+        self._sidebar.refresh_status()
+        self._check_ntfy()
+
+    def _check_ntfy(self):
+        if not self._settings.ntfy_enabled or not self._settings.ntfy_topic:
+            return
+        ntfy_paths = self._sidebar.get_ntfy_active_paths()
+        for path in ntfy_paths:
+            project = self._find_project(path)
+            if not project:
+                continue
+            new_state = self._watcher.get_project_status(project)
+            old_state = self._prev_status.get(path, '')
+            if old_state != 'done' and new_state == 'done':
+                self._send_ntfy(project.name)
+            self._prev_status[path] = new_state
+
+    def _send_ntfy(self, project_name):
+        topic = self._settings.ntfy_topic
+        subprocess.Popen([
+            'curl', '-s',
+            '-H', f'Title: {project_name}',
+            '-d', 'Claude finished',
+            f'https://ntfy.sh/{topic}'
+        ])
 
     def _on_project_create(self, sidebar, name):
         try:
