@@ -15,7 +15,7 @@ headerbar {
 }
 
 .pm-sidebar {
-    background-color: #cde8f5;
+    background-color: #daeef8;
     color: #0a2540;
     border-right: 1px solid alpha(#0077b6, 0.15);
     box-shadow: 3px 0 14px alpha(#0077b6, 0.07);
@@ -23,7 +23,7 @@ headerbar {
 
 .pm-sidebar scrolledwindow,
 .pm-sidebar list.navigation-sidebar {
-    background-color: #cde8f5;
+    background-color: #daeef8;
 }
 
 .pm-sidebar list.navigation-sidebar row:hover {
@@ -56,7 +56,7 @@ row.active-project {
 
 .resource-bar {
     border-top: 1px solid alpha(#0077b6, 0.14);
-    background-color: #cde8f5;
+    background-color: #daeef8;
     color: alpha(#0a2540, 0.55);
 }
 
@@ -91,4 +91,18 @@ button.suggested-action {
     color: #ffffff;
     border: none;
     box-shadow: 0 3px 12px alpha(#0077b6, 0.40);
+}
+
+/* Shutdown window project list — explicit light surface */
+listbox.shutdown-list {
+    background-color: #eaf5fc;
+}
+listbox.shutdown-list > row {
+    background-color: #f4fafd;
+}
+listbox.shutdown-list > row:hover {
+    background-color: #daeef8;
+}
+label.shutdown-project-name {
+    color: #0a2540;
 }

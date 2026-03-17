@@ -29,6 +29,24 @@ _TERMINAL_PALETTES = {
             '#a5b4fc', '#d8b4fe', '#a5f3fc', '#ffffff',
         ],
     },
+    'phosphor': {
+        'fg': '#33ff00', 'bg': '#060808', 'cursor': '#33ff00', 'cursor_fg': '#060808',
+        'palette': [
+            '#060808', '#1a7a00', '#33ff00', '#ffb300',
+            '#00e5ff', '#1a7a3a', '#00cc88', '#33ff00',
+            '#0d1a0d', '#22aa00', '#55ff33', '#ffc933',
+            '#33eeff', '#44ff99', '#00ffcc', '#aaffaa',
+        ],
+    },
+    'salt-spray': {
+        'fg': '#90d5f0', 'bg': '#012a4a', 'cursor': '#00b4d8', 'cursor_fg': '#012a4a',
+        'palette': [
+            '#011a2e', '#e05555', '#1a9a6a', '#d4841a',  # 0-3: black, red, green, yellow
+            '#0077b6', '#7a5aaa', '#00b4d8', '#90d5f0',  # 4-7: blue, mag, cyan, white
+            '#1a4a7a', '#e74c3c', '#3aaed4', '#f4a124',  # 8-11: dim, bred, bgrn, byel
+            '#48cae4', '#9a6ac8', '#90e0ef', '#cce8f6',  # 12-15: bblu, bmag, bcyn, bwht
+        ],
+    },
 }
 
 
@@ -99,7 +117,16 @@ class TerminalView(Gtk.Box):
         self._path_tag = self._terminal.match_add_regex(path_regex, 0)
         self._terminal.match_set_cursor_name(self._path_tag, 'pointer')
 
-        self.append(self._terminal)
+        scrollbar = Gtk.Scrollbar(
+            orientation=Gtk.Orientation.VERTICAL,
+            adjustment=self._terminal.get_vadjustment(),
+        )
+        term_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        term_box.set_hexpand(True)
+        term_box.set_vexpand(True)
+        term_box.append(self._terminal)
+        term_box.append(scrollbar)
+        self.append(term_box)
 
         # Intercept Shift+Enter at CAPTURE phase — GTK4/Wayland strips the Shift
         # modifier before VTE sees it; feed kitty keyboard protocol sequence directly.
