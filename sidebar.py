@@ -144,7 +144,7 @@ class Sidebar(Gtk.Box):
         if pending_row is not None:
             self._new_project_row = pending_row
             self._listbox.prepend(pending_row)
-            GLib.idle_add(pending_row._entry.grab_focus)
+            GLib.idle_add(lambda: pending_row._entry.grab_focus() and False)
 
         self._update_count_label()
 
@@ -252,7 +252,7 @@ class NewProjectEntryRow(Gtk.ListBoxRow):
 
         box.append(self._entry)
         self.set_child(box)
-        GLib.idle_add(self._entry.grab_focus)
+        GLib.idle_add(lambda: self._entry.grab_focus() and False)
 
     def _on_activate(self, entry):
         name = entry.get_text().strip()
@@ -262,9 +262,12 @@ class NewProjectEntryRow(Gtk.ListBoxRow):
     def _on_key_pressed(self, ctrl, keyval, keycode, state):
         if keyval == Gdk.KEY_Escape:
             self._on_cancel()
-        # Always consume — prevents keys from bubbling to ListBox, which causes
-        # focus to shift away from the Entry and back, selecting all text on re-focus.
-        return True
+            return True
+        # Consume Enter so it doesn't bubble to ListBox and activate a project row
+        # after _on_activate has already committed and removed this row.
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            return True
+        return False
 
 
 class ProjectRow(Gtk.ListBoxRow):
