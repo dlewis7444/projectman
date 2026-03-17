@@ -131,7 +131,7 @@ class SettingsWindow(Adw.PreferencesDialog):
 
         app_dir = os.path.dirname(os.path.abspath(__file__))
         themes_dir = os.path.join(app_dir, 'themes')
-        _THEME_LABELS = {'argonaut': 'Argonaut Dark', 'candyland': 'Candyland'}
+        _THEME_LABELS = {'argonaut': 'Argonaut Dark', 'candyland': 'Candyland', 'phosphor': 'Phosphor (Green CRT)', 'salt-spray': 'Salt Spray'}
         self._theme_names = []
         theme_labels = []
         if os.path.isdir(themes_dir):

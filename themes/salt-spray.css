@@ -1,0 +1,94 @@
+/* ── Salt Spray — Ocean & Beach, bright day looking out over sea and sky ── */
+/*
+ * A light theme built from the palette of a clear beach morning:
+ * pale sky above, deep Atlantic below, white foam at the break,
+ * everything bleached bright by full sun. Cool, airy, alive.
+ */
+
+window.background { background-color: #eaf5fc; color: #0a2540; }
+
+headerbar {
+    background-color: #0077b6;
+    color: #ffffff;
+    box-shadow: inset 0 -1px alpha(#023e8a, 0.35),
+                0 2px 10px alpha(#023e8a, 0.18);
+}
+
+.pm-sidebar {
+    background-color: #cde8f5;
+    color: #0a2540;
+    border-right: 1px solid alpha(#0077b6, 0.15);
+    box-shadow: 3px 0 14px alpha(#0077b6, 0.07);
+}
+
+.pm-sidebar scrolledwindow,
+.pm-sidebar list.navigation-sidebar {
+    background-color: #cde8f5;
+}
+
+.pm-sidebar list.navigation-sidebar row:hover {
+    background-color: alpha(#0077b6, 0.10);
+}
+
+.pm-sidebar list.navigation-sidebar row:selected {
+    background-color: alpha(#0096c7, 0.22);
+}
+
+row.active-project {
+    background: alpha(#0096c7, 0.16);
+    border-left: 2px solid #0096c7;
+}
+
+/* Status dots — bright and clear as signal flags on open water */
+.status-dot.status-stopped { background: alpha(#0a2540, 0.10); }
+.status-dot.status-idle    { background: alpha(#0a2540, 0.26); }
+.status-dot.status-done    { background: #00b4d8; box-shadow: 0 0 6px alpha(#00b4d8, 0.55); }
+.status-dot.status-working { background: #f4a124; box-shadow: 0 0 6px alpha(#f4a124, 0.50); }
+.status-dot.status-waiting { background: #023e8a; box-shadow: 0 0 6px alpha(#023e8a, 0.45); }
+
+.sidebar-header {
+    color: alpha(#0a2540, 0.48);
+    letter-spacing: 0.09em;
+}
+
+.session-title { color: alpha(#0a2540, 0.72); }
+.session-default-badge { color: #0077b6; }
+
+.resource-bar {
+    border-top: 1px solid alpha(#0077b6, 0.14);
+    background-color: #cde8f5;
+    color: alpha(#0a2540, 0.55);
+}
+
+.project-row-detached { color: alpha(#0a2540, 0.46); }
+
+.pm-sidebar button.circular { color: alpha(#0a2540, 0.55); }
+.pm-sidebar button.circular:hover {
+    color: #0077b6;
+}
+
+/* Rounded pill buttons — smooth like a pebble worn by the tide */
+.pm-sidebar-btn {
+    background-color: alpha(#0077b6, 0.10);
+    border: 1px solid alpha(#0077b6, 0.22);
+    color: #0a2540;
+}
+.pm-sidebar-btn:hover {
+    background-color: alpha(#0077b6, 0.18);
+    border-color: alpha(#0077b6, 0.42);
+    box-shadow: 0 2px 8px alpha(#0077b6, 0.14);
+}
+.pm-sidebar-btn:checked {
+    background-color: #0077b6;
+    border-color: #0077b6;
+    color: #ffffff;
+    box-shadow: 0 3px 12px alpha(#0077b6, 0.38),
+                inset 0 1px alpha(#ffffff, 0.20);
+}
+
+button.suggested-action {
+    background-color: #0077b6;
+    color: #ffffff;
+    border: none;
+    box-shadow: 0 3px 12px alpha(#0077b6, 0.40);
+}
