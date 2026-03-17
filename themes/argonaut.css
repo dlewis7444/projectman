@@ -29,9 +29,9 @@ row.active-project { background: alpha(#008df8, 0.15); }
 
 .status-dot.status-stopped { background: alpha(currentColor, 0.08); }
 .status-dot.status-idle    { background: alpha(currentColor, 0.25); }
-.status-dot.status-done    { background: #8ce10b; }
-.status-dot.status-working { background: #ffb900; }
-.status-dot.status-waiting { background: #008df8; }
+.status-dot.status-done    { background: #8ce10b; box-shadow: 0 0 6px alpha(#8ce10b, 0.65); }
+.status-dot.status-working { background: #ffb900; box-shadow: 0 0 6px alpha(#ffb900, 0.60); }
+.status-dot.status-waiting { background: #008df8; box-shadow: 0 0 6px alpha(#008df8, 0.55); }
 
 .sidebar-header { color: alpha(currentColor, 0.5); }
 

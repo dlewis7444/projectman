@@ -280,11 +280,6 @@ class ProjectRow(Gtk.ListBoxRow):
         top.set_margin_top(4)
         top.set_margin_bottom(4)
 
-        self._status_dot = Gtk.Box()
-        self._status_dot.add_css_class('status-dot')
-        self._status_dot.add_css_class('status-stopped')
-        top.append(self._status_dot)
-
         self._arrow = Gtk.Button()
         self._arrow.add_css_class('flat')
         self._arrow.add_css_class('expand-arrow')
@@ -293,6 +288,12 @@ class ProjectRow(Gtk.ListBoxRow):
         self._arrow.set_child(self._arrow_label)
         self._arrow.connect('clicked', self._on_expand_clicked)
         top.append(self._arrow)
+
+        self._status_dot = Gtk.Box()
+        self._status_dot.add_css_class('status-dot')
+        self._status_dot.add_css_class('status-stopped')
+        self._status_dot.set_valign(Gtk.Align.CENTER)
+        top.append(self._status_dot)
 
         self._name_label = Gtk.Label(label=project.name)
         self._name_label.set_halign(Gtk.Align.START)
