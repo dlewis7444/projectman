@@ -83,6 +83,7 @@ cp "$SCRIPT_DIR"/*.py    "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/style.css" "$INSTALL_DIR/"
 cp -r "$SCRIPT_DIR/themes" "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/ProjectMan.jpg" "$INSTALL_DIR/"
+cp -r "$SCRIPT_DIR/icons" "$INSTALL_DIR/"
 
 # ── wrapper script ─────────────────────────────────────────────────────────────
 info "Creating $BIN_DIR/projectman ..."
@@ -101,7 +102,7 @@ cat > "$DESKTOP_DIR/projectman.desktop" <<EOF
 Name=ProjectMan
 Comment=Manage Claude Code sessions
 Exec=$BIN_DIR/projectman
-Icon=$INSTALL_DIR/ProjectMan.jpg
+Icon=io.github.projectman
 Type=Application
 Categories=Development;
 Terminal=false
@@ -109,6 +110,13 @@ StartupNotify=true
 EOF
 command -v update-desktop-database &>/dev/null && \
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+
+# ── install icon to hicolor theme ──────────────────────────────────────────────
+info "Installing icon ..."
+mkdir -p "$HOME/.local/share/icons/hicolor/scalable/apps"
+cp "$INSTALL_DIR/icons/scalable/apps/io.github.projectman.svg" \
+   "$HOME/.local/share/icons/hicolor/scalable/apps/"
+gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
 # ── hook script ────────────────────────────────────────────────────────────────
 info "Installing hook script to $HOOK_DEST ..."

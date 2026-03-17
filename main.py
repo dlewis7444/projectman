@@ -12,7 +12,7 @@ from window import AppWindow
 from settings import Settings
 
 
-VERSION = '0.1.2'
+VERSION = '0.1.3'
 
 
 class ProjectManApp(Adw.Application):
@@ -40,6 +40,11 @@ class ProjectManApp(Adw.Application):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
         self._theme_provider = None
+
+        icon_theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+        icon_theme.add_search_path(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'icons'
+        ))
 
         for name, method in [
             ('zoom-in', '_zoom_in'),
@@ -79,7 +84,7 @@ class ProjectManApp(Adw.Application):
         self._last_projects_dir = self._settings.resolved_projects_dir
         self._window = AppWindow(
             self, self._store, self._history, self._watcher,
-            self._settings, self._zellij_watcher
+            self._settings, self._zellij_watcher, version=VERSION
         )
         self._load_theme_css()
         self._projects_watcher.connect('projects-changed', self._on_projects_changed)

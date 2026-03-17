@@ -18,12 +18,13 @@ from session import (
 
 
 class AppWindow(Adw.ApplicationWindow):
-    def __init__(self, app, store, history, watcher, settings, zellij_watcher):
+    def __init__(self, app, store, history, watcher, settings, zellij_watcher, version=''):
         super().__init__(application=app)
         self._store = store
         self._history = history
         self._watcher = watcher
         self._settings = settings
+        self._version = version
         self._terminals = {}
         self._active_path = None
         self._mru = []          # most-recently-used project paths, index 0 = current
@@ -35,6 +36,7 @@ class AppWindow(Adw.ApplicationWindow):
 
         self.set_default_size(1200, 750)
         self.set_title('ProjectMan')
+        self.set_icon_name('io.github.projectman')
 
         toolbar_view = Adw.ToolbarView()
 
@@ -269,6 +271,12 @@ class AppWindow(Adw.ApplicationWindow):
         if self._settings.debug_logging:
             print(f'[DBG] {msg}', flush=True)
 
+    def _set_active_project(self, name):
+        if self._version and name:
+            self._title.set_subtitle(f'v{self._version} // {name}')
+        else:
+            self._title.set_subtitle(name or '')
+
     def _on_search_changed(self, entry):
         self._sidebar.set_filter_text(entry.get_text())
 
@@ -333,7 +341,7 @@ class AppWindow(Adw.ApplicationWindow):
             return
         tv = self._get_or_create_terminal(project)
         self._stack.set_visible_child_name(path)
-        self._title.set_subtitle(project.name)
+        self._set_active_project(project.name)
         self._active_path = path
         self._push_mru(path)
         self._sidebar.select_project(path)
@@ -358,7 +366,7 @@ class AppWindow(Adw.ApplicationWindow):
             return
         tv = self._get_or_create_terminal(project)
         self._stack.set_visible_child_name(path)
-        self._title.set_subtitle(project.name)
+        self._set_active_project(project.name)
         self._active_path = path
         self._push_mru(path)
         tv.spawn_claude(session_id=session_id, project_name=project.name)
@@ -409,7 +417,7 @@ class AppWindow(Adw.ApplicationWindow):
         if self._active_path == path:
             self._stack.set_visible_child_name('__placeholder__')
             self._active_path = None
-            self._title.set_subtitle('')
+            self._set_active_project(None)
 
     # --- archive popup ---
 
@@ -438,7 +446,7 @@ class AppWindow(Adw.ApplicationWindow):
             return
         tv = self._get_or_create_terminal(project)
         self._stack.set_visible_child_name(path)
-        self._title.set_subtitle(project.name)
+        self._set_active_project(project.name)
         self._active_path = path
         self._push_mru(path)
         tv.spawn_claude(fresh=True, project_name=project.name)
@@ -454,7 +462,7 @@ class AppWindow(Adw.ApplicationWindow):
         import zellij as z
         tv = self._get_or_create_terminal(project)
         self._stack.set_visible_child_name(path)
-        self._title.set_subtitle(project.name)
+        self._set_active_project(project.name)
         self._active_path = path
         self._push_mru(path)
         sname = z.session_name(project.name)
@@ -539,7 +547,7 @@ class AppWindow(Adw.ApplicationWindow):
         if self._active_path == old_path:
             self._active_path = new_path
             self._mru = [new_path if p == old_path else p for p in self._mru]
-            self._title.set_subtitle(new_name)
+            self._set_active_project(new_name)
 
         self._sidebar.refresh()
         self._sync_running_state()
