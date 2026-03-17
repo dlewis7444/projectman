@@ -637,7 +637,7 @@ class SessionHistoryRow(Gtk.ListBoxRow):
 
 class ResourceBar(Gtk.Box):
     def __init__(self, on_settings_clicked=None, version=''):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.add_css_class('resource-bar')
 
         self._reader = ResourceReader()
@@ -668,9 +668,8 @@ class ResourceBar(Gtk.Box):
 
         if version:
             ver_label = Gtk.Label(label=f'ProjectMan v{version}')
-            ver_label.set_halign(Gtk.Align.CENTER)
-            ver_label.add_css_class('dim-label')
-            ver_label.add_css_class('caption')
+            ver_label.set_halign(Gtk.Align.START)
+            ver_label.add_css_class('pm-version-label')
             self.append(ver_label)
 
     def start_polling(self):

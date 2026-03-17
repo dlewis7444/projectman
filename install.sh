@@ -21,6 +21,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     rm -rf  "$INSTALL_DIR"
     rm -f   "$BIN_DIR/projectman"
     rm -f   "$DESKTOP_DIR/projectman.desktop"
+    rm -f   "$DESKTOP_DIR/io.github.projectman.desktop"
     command -v update-desktop-database &>/dev/null && \
         update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
     echo ""
@@ -97,7 +98,7 @@ chmod +x "$BIN_DIR/projectman"
 # ── desktop entry ──────────────────────────────────────────────────────────────
 info "Installing desktop entry ..."
 mkdir -p "$DESKTOP_DIR"
-cat > "$DESKTOP_DIR/projectman.desktop" <<EOF
+cat > "$DESKTOP_DIR/io.github.projectman.desktop" <<EOF
 [Desktop Entry]
 Name=ProjectMan
 Comment=Manage Claude Code sessions
@@ -107,6 +108,7 @@ Type=Application
 Categories=Development;
 Terminal=false
 StartupNotify=true
+StartupWMClass=io.github.projectman
 EOF
 command -v update-desktop-database &>/dev/null && \
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true

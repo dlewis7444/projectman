@@ -28,6 +28,7 @@
 
 /* ── Resource bar ─────────────────────────────────────────────────── */
 .resource-bar { padding: 6px 12px; }
+.pm-version-label { font-size: 10px; opacity: 0.45; }
 
 /* ── Project row action buttons — visible on hover ───────────────── */
 .project-row-actions { opacity: 0; transition: opacity 150ms; }
