@@ -16,8 +16,16 @@ class ArchiveWindow(Adw.Window):
         self.set_modal(False)
         self.connect('close-request', lambda w: w.destroy() or True)
 
+        self._filter_text = ''
+
         toolbar_view = Adw.ToolbarView()
-        toolbar_view.add_top_bar(Adw.HeaderBar())
+        header = Adw.HeaderBar()
+        self._search_entry = Gtk.SearchEntry()
+        self._search_entry.set_placeholder_text('Filter…')
+        self._search_entry.connect('search-changed', self._on_search_changed)
+        self._search_entry.connect('stop-search', lambda e: e.set_text(''))
+        header.set_title_widget(self._search_entry)
+        toolbar_view.add_top_bar(header)
 
         # Empty state
         self._empty = Adw.StatusPage()
@@ -31,6 +39,7 @@ class ArchiveWindow(Adw.Window):
         self._listbox = Gtk.ListBox()
         self._listbox.add_css_class('boxed-list')
         self._listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._listbox.set_filter_func(self._filter_row)
         self._listbox.set_margin_top(12)
         self._listbox.set_margin_bottom(12)
         self._listbox.set_margin_start(12)
@@ -97,7 +106,17 @@ class ArchiveWindow(Adw.Window):
         box.append(btn)
 
         row.set_child(box)
+        row._project = project
         return row
+
+    def _filter_row(self, row):
+        if not self._filter_text:
+            return True
+        return hasattr(row, '_project') and self._filter_text in row._project.name.lower()
+
+    def _on_search_changed(self, entry):
+        self._filter_text = entry.get_text().lower()
+        self._listbox.invalidate_filter()
 
     def _restore(self, project):
         self._on_restore(project)
