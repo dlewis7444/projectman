@@ -334,14 +334,14 @@ class ProjectRow(Gtk.ListBoxRow):
         self._restart_btn.set_valign(Gtk.Align.CENTER)
         self._restart_btn.set_tooltip_text('Restart Claude (new session)')
         self._restart_btn.set_sensitive(False)  # only enabled when process running
-        self._restart_btn.connect('clicked', lambda b: self.emit('project-new-claude'))
+        self._restart_btn.connect('clicked', lambda b: self._show_confirm_popover(b, lambda: self.emit('project-new-claude')))
         actions_box.append(self._restart_btn)
 
         archive_btn = Gtk.Button.new_from_icon_name('mail-archive-symbolic')
         archive_btn.add_css_class('flat')
         archive_btn.set_valign(Gtk.Align.CENTER)
         archive_btn.set_tooltip_text('Archive project')
-        archive_btn.connect('clicked', lambda b: self.emit('project-archive'))
+        archive_btn.connect('clicked', lambda b: self._show_confirm_popover(b, lambda: self.emit('project-archive')))
         actions_box.append(archive_btn)
 
         self._new_session_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
@@ -413,6 +413,22 @@ class ProjectRow(Gtk.ListBoxRow):
         rect.height = 1
         self._popover.set_pointing_to(rect)
         self._popover.popup()
+
+    def _show_confirm_popover(self, trigger_btn, action_fn):
+        popover = Gtk.Popover()
+        popover.set_parent(trigger_btn)
+        popover.set_position(Gtk.PositionType.BOTTOM)
+        popover.set_has_arrow(True)
+        popover.connect('closed', lambda p: p.unparent())
+        confirm_btn = Gtk.Button(label='Confirm')
+        confirm_btn.add_css_class('destructive-action')
+        confirm_btn.set_margin_top(4)
+        confirm_btn.set_margin_bottom(4)
+        confirm_btn.set_margin_start(4)
+        confirm_btn.set_margin_end(4)
+        confirm_btn.connect('clicked', lambda _b: (action_fn(), popover.popdown()))
+        popover.set_child(confirm_btn)
+        popover.popup()
 
     def _on_expand_clicked(self, button):
         self._expanded = not self._expanded
