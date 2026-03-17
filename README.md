@@ -35,6 +35,7 @@ running `claude` (or `zellij attach`) per project. Projects are directories unde
 **Other requirements:**
 - Python 3.10+
 - [`claude` CLI](https://claude.ai/code) installed and on your PATH
+- Node.js (for the hook script that powers live status indicators)
 
 **Optional:** `zellij` for multiplexed terminal sessions.
 
@@ -96,10 +97,6 @@ Add the following to `~/.claude/settings.json` (create the file if it doesn't ex
   }
 }
 ```
-
-> **Tip:** If status dots don't update, `node` may not be on Claude Code's PATH. Replace
-> `node` with the full path from `which node` (e.g. `/usr/bin/node`), and replace
-> `~/.claude/...` with the expanded absolute path (e.g. `/home/yourname/.claude/...`).
 
 You can also edit this file from within ProjectMan via **Settings → Claude JSON**.
 

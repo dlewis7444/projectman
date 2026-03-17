@@ -61,6 +61,17 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
     exit 1
 fi
 
+if ! command -v node &>/dev/null; then
+    error "Node.js not found. Install Node.js and try again."
+    echo ""
+    echo "  Fedora / RHEL:   sudo dnf install nodejs"
+    echo "  Ubuntu / Debian: sudo apt install nodejs"
+    echo "  Arch:            sudo pacman -S nodejs"
+    echo "  Or via nvm:      https://github.com/nvm-sh/nvm"
+    echo ""
+    exit 1
+fi
+
 if ! command -v claude &>/dev/null; then
     warn "'claude' CLI not found in PATH. Install it before running ProjectMan."
 fi
