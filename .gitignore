@@ -3,6 +3,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .superpowers/
-docs/superpowers/
+docs/
 visual-companion/
 CLAUDE.md
