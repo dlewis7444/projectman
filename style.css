@@ -39,6 +39,10 @@ row:hover .project-row-actions { opacity: 1; }
 /* ── Session expand arrow button — compact, label-based ──────────── */
 .expand-arrow { padding: 0 1px; min-width: 0; }
 
+/* ── Terminal right-click context menu ───────────────────────────── */
+.term-context-menu { padding: 4px; }
+.term-context-menu button.flat { padding: 4px 10px; min-height: 0; }
+
 /* ── Bottom sidebar buttons — pill shape ─────────────────────────── */
 .pm-sidebar-btn {
     border-radius: 20px;
