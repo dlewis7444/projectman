@@ -55,6 +55,7 @@ class ShutdownWindow(Adw.Window):
         # Per-project rows
         listbox = Gtk.ListBox()
         listbox.add_css_class('boxed-list')
+        listbox.add_css_class('shutdown-list')
         listbox.set_selection_mode(Gtk.SelectionMode.NONE)
 
         for path, tv in running.items():
@@ -83,6 +84,7 @@ class ShutdownWindow(Adw.Window):
             name_lbl = Gtk.Label(label=name)
             name_lbl.set_halign(Gtk.Align.START)
             name_lbl.set_hexpand(True)
+            name_lbl.add_css_class('shutdown-project-name')
             box.append(name_lbl)
 
             status_lbl = Gtk.Label(label='shutting down\u2026')
