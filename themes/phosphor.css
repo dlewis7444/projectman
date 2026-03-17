@@ -1,0 +1,94 @@
+/* ── Phosphor — 1980s Green CRT terminal theme ──────────────────────── */
+/*
+ * Inspired by the P39 phosphor of IBM 5151 and clone green-screen monitors.
+ * Pure black, electric green, blocky — like booting into DOS at 3 AM.
+ */
+
+window.background { background-color: #060808; color: #33ff00; }
+
+headerbar {
+    background-color: #040606;
+    color: #33ff00;
+    box-shadow: inset 0 -1px alpha(#33ff00, 0.18);
+}
+
+.pm-sidebar {
+    background-color: #040606;
+    color: #33ff00;
+    border-right: 1px solid alpha(#33ff00, 0.15);
+}
+
+.pm-sidebar scrolledwindow,
+.pm-sidebar list.navigation-sidebar {
+    background-color: #040606;
+}
+
+.pm-sidebar list.navigation-sidebar row:hover {
+    background-color: alpha(#33ff00, 0.07);
+}
+
+.pm-sidebar list.navigation-sidebar row:selected {
+    background-color: alpha(#33ff00, 0.18);
+}
+
+row.active-project {
+    background: alpha(#33ff00, 0.14);
+    border-left: 2px solid #33ff00;
+}
+
+/* Status dots — glow like a hot phosphor spot */
+.status-dot.status-stopped { background: alpha(#33ff00, 0.07); }
+.status-dot.status-idle    { background: alpha(#33ff00, 0.22); }
+.status-dot.status-done    { background: #33ff00; box-shadow: 0 0 7px alpha(#33ff00, 0.75); }
+.status-dot.status-working { background: #ffb300; box-shadow: 0 0 7px alpha(#ffb300, 0.70); }
+.status-dot.status-waiting { background: #00e5ff; box-shadow: 0 0 7px alpha(#00e5ff, 0.65); }
+
+.sidebar-header {
+    color: alpha(#33ff00, 0.40);
+    font-family: "Courier New", "Courier", monospace;
+    letter-spacing: 0.10em;
+}
+
+.session-title { color: alpha(#33ff00, 0.70); }
+.session-default-badge { color: #33ff00; }
+
+.resource-bar {
+    border-top: 1px solid alpha(#33ff00, 0.15);
+    background-color: #040606;
+    color: alpha(#33ff00, 0.50);
+}
+
+.project-row-detached { color: alpha(#33ff00, 0.45); }
+
+.pm-sidebar button.circular { color: alpha(#33ff00, 0.55); }
+.pm-sidebar button.circular:hover {
+    color: #33ff00;
+    box-shadow: 0 0 8px alpha(#33ff00, 0.30);
+}
+
+/* Blocky pill buttons — sharp corners, phosphor green border */
+.pm-sidebar-btn {
+    background-color: alpha(#33ff00, 0.06);
+    border: 1px solid alpha(#33ff00, 0.28);
+    color: alpha(#33ff00, 0.75);
+    border-radius: 2px;
+}
+.pm-sidebar-btn:hover {
+    background-color: alpha(#33ff00, 0.13);
+    border-color: alpha(#33ff00, 0.60);
+    color: #33ff00;
+    box-shadow: 0 0 10px alpha(#33ff00, 0.20), inset 0 0 6px alpha(#33ff00, 0.05);
+}
+.pm-sidebar-btn:checked {
+    background-color: alpha(#33ff00, 0.20);
+    border-color: #33ff00;
+    color: #33ff00;
+    box-shadow: 0 0 12px alpha(#33ff00, 0.30), inset 0 0 8px alpha(#33ff00, 0.08);
+}
+
+button.suggested-action {
+    background-color: alpha(#33ff00, 0.18);
+    color: #33ff00;
+    border: 1px solid #33ff00;
+    box-shadow: 0 0 10px alpha(#33ff00, 0.25);
+}
