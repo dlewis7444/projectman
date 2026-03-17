@@ -60,6 +60,8 @@ class ArchiveWindow(Adw.Window):
             self._listbox.remove(row)
 
         projects = self._store.load_archived()
+        n = len(projects)
+        self.set_title(f'{n} Archived Projects' if n else 'Archived Projects')
         if not projects:
             self._listbox.set_visible(False)
             self._empty.set_visible(True)
