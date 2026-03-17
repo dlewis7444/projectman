@@ -131,18 +131,6 @@ class TerminalView(Gtk.Box):
         self._debug(f'click n_press={n_press} x={x:.1f} y={y:.1f} ctrl={ctrl}')
         if not ctrl:
             return
-        # GestureClick coordinates on Wayland/GTK4 are root-window-relative,
-        # not VTE-widget-relative.  Subtract VTE's position in the root widget.
-        try:
-            root = self._terminal.get_root()
-            coords = self._terminal.translate_coordinates(root, 0, 0)
-            if coords:
-                vte_x, vte_y = coords[-2], coords[-1]
-                x -= vte_x
-                y -= vte_y
-                self._debug(f'adjusted x={x:.1f} y={y:.1f} (vte_origin={vte_x:.0f},{vte_y:.0f})')
-        except Exception as e:
-            self._debug(f'translate_coordinates failed: {e}')
         self._open_url_at_coords(x, y)
 
     def _open_url_at_coords(self, x, y):
@@ -177,11 +165,6 @@ class TerminalView(Gtk.Box):
                 return False
             line = lines[row_from_top]
             self._debug(f'line={repr(line[:80])}')
-            # Dump all non-empty lines so we can see the full buffer layout
-            for i, l in enumerate(lines):
-                stripped = l.strip()
-                if stripped:
-                    self._debug(f'  buf[{i:02d}]={repr(stripped[:70])}')
         except Exception as e:
             self._debug(f'text extraction error: {e}')
             return False
