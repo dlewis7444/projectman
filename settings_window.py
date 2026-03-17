@@ -77,6 +77,25 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._debug_row.connect('notify::active', self._on_debug_toggled)
         dev_group.add(self._debug_row)
 
+        # Group: Notifications
+        notif_group = Adw.PreferencesGroup(title='Notifications')
+        page.add(notif_group)
+
+        self._ntfy_row = Adw.SwitchRow(
+            title='Enable ntfy.sh notifications',
+            subtitle='May need to authorize in your ntfy.sh account',
+        )
+        self._ntfy_row.set_active(self._settings.ntfy_enabled)
+        self._ntfy_row.connect('notify::active', self._on_ntfy_toggled)
+        notif_group.add(self._ntfy_row)
+
+        self._ntfy_topic_row = Adw.EntryRow(title='Topic')
+        self._ntfy_topic_row.set_text(self._settings.ntfy_topic)
+        self._ntfy_topic_row.set_show_apply_button(True)
+        self._ntfy_topic_row.set_sensitive(self._settings.ntfy_enabled)
+        self._ntfy_topic_row.connect('apply', self._on_ntfy_topic_apply)
+        notif_group.add(self._ntfy_topic_row)
+
     def _build_terminal_page(self):
         page = Adw.PreferencesPage(
             title='Terminal', icon_name='utilities-terminal-symbolic'
@@ -233,6 +252,15 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._settings.debug_logging = row.get_active()
         if self._settings.debug_logging:
             print('[DBG] debug logging enabled', flush=True)
+        self._save_and_notify()
+
+    def _on_ntfy_toggled(self, row, _param):
+        self._settings.ntfy_enabled = row.get_active()
+        self._ntfy_topic_row.set_sensitive(self._settings.ntfy_enabled)
+        self._save_and_notify()
+
+    def _on_ntfy_topic_apply(self, row):
+        self._settings.ntfy_topic = row.get_text().strip()
         self._save_and_notify()
 
     def _on_multiplexer_changed(self, row, _param):
