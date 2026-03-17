@@ -1,0 +1,86 @@
+/* ── Candyland / Kawaii / Sakura color theme ──────────────────────── */
+window.background { background-color: #1a0a1e; color: #fce4f7; }
+
+headerbar {
+    background-color: alpha(#241230, 0.92);
+    color: #fce4f7;
+    box-shadow: inset 0 -1px alpha(#ff6eb4, 0.25);
+}
+
+.pm-sidebar {
+    background-color: alpha(#241230, 0.85);
+    color: #fce4f7;
+    border-right: 1px solid alpha(#ffb7dd, 0.2);
+    box-shadow: inset 0 1px alpha(#ffb7dd, 0.12),
+                3px 0 16px alpha(#c084fc, 0.10);
+}
+
+.pm-sidebar scrolledwindow,
+.pm-sidebar list.navigation-sidebar {
+    background-color: alpha(#2a1538, 0.7);
+}
+
+.pm-sidebar list.navigation-sidebar row:hover {
+    background-color: alpha(#c084fc, 0.15);
+    box-shadow: inset 0 1px alpha(#ffb7dd, 0.20),
+                inset 0 -1px alpha(#1a0a1e, 0.40);
+}
+
+.pm-sidebar list.navigation-sidebar row:selected {
+    background-color: alpha(#ff6eb4, 0.28);
+    box-shadow: 0 0 14px alpha(#ff6eb4, 0.30),
+                inset 0 1px alpha(#ffb7dd, 0.30),
+                inset 0 -1px alpha(#1a0a1e, 0.30);
+}
+
+row.active-project { background: alpha(#c084fc, 0.15); }
+
+.status-dot.status-stopped { background: alpha(#fce4f7, 0.08); }
+.status-dot.status-idle    { background: alpha(#fce4f7, 0.25); }
+.status-dot.status-done    { background: #ff6eb4; box-shadow: 0 0 8px alpha(#ff6eb4, 0.50); }
+.status-dot.status-working { background: #ffaa6e; box-shadow: 0 0 8px alpha(#ffaa6e, 0.50); }
+.status-dot.status-waiting { background: #c084fc; box-shadow: 0 0 8px alpha(#c084fc, 0.50); }
+
+.sidebar-header { color: alpha(#ffb7dd, 0.7); }
+
+.session-title { color: #fce4f7; }
+.session-default-badge { color: #ff6eb4; opacity: 0.9; }
+
+.resource-bar {
+    border-top: 1px solid alpha(#ffb7dd, 0.15);
+    background-color: alpha(#1a0a1e, 0.5);
+}
+
+.project-row-detached { color: alpha(#c084fc, 0.6); }
+
+.pm-sidebar button.circular { color: alpha(#c084fc, 0.8); }
+.pm-sidebar button.circular:hover {
+    color: #ff6eb4;
+    box-shadow: 0 0 8px alpha(#ff6eb4, 0.25);
+}
+
+/* Jelly candy pill buttons — visible background at rest, gel reflections */
+.pm-sidebar-btn {
+    background-color: alpha(#ff6eb4, 0.12);
+    border: 1px solid alpha(#ffb7dd, 0.25);
+    color: #fce4f7;
+    box-shadow: inset 0 1px 2px alpha(#ffb7dd, 0.20),
+                inset 0 -1px 2px alpha(#1a0a1e, 0.30);
+}
+.pm-sidebar-btn:hover {
+    background-color: alpha(#ff6eb4, 0.28);
+    border-color: alpha(#ffb7dd, 0.50);
+    box-shadow: inset 0 2px 4px alpha(#ffb7dd, 0.35),
+                inset 0 -2px 4px alpha(#1a0a1e, 0.30),
+                0 0 12px alpha(#ff6eb4, 0.30);
+}
+.pm-sidebar-btn:checked {
+    background-color: alpha(#ff6eb4, 0.38);
+    border-color: alpha(#ff6eb4, 0.65);
+    color: #fce4f7;
+    box-shadow: inset 0 2px 4px alpha(#ffb7dd, 0.45),
+                inset 0 -2px 4px alpha(#1a0a1e, 0.35),
+                0 0 16px alpha(#ff6eb4, 0.45);
+}
+
+button.suggested-action { background-color: #ff6eb4; color: #1a0a1e; }

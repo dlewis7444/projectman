@@ -175,10 +175,11 @@ class ShutdownWindow(Adw.Window):
 
     def _finish(self):
         self._cleanup()
-        self.destroy()
-        GLib.timeout_add(500, self._do_complete)
+        # Show all-done state for 1 s before closing
+        GLib.timeout_add(1000, self._do_close)
 
-    def _do_complete(self):
+    def _do_close(self):
+        self.destroy()
         self._on_complete()
         return False
 

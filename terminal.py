@@ -1,4 +1,5 @@
 import os
+import re
 import signal
 
 import gi
@@ -7,6 +8,28 @@ gi.require_version('Vte', '3.91')
 from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk, Gio
 
 import zellij
+
+
+_TERMINAL_PALETTES = {
+    'argonaut': {
+        'fg': '#fffaf4', 'bg': '#0e1019', 'cursor': '#ff0018', 'cursor_fg': '#0e1019',
+        'palette': [
+            '#232323', '#ff000f', '#8ce10b', '#ffb900',
+            '#008df8', '#6d43a6', '#00d8eb', '#ffffff',
+            '#444444', '#ff2740', '#abe15b', '#ffd242',
+            '#0092ff', '#9a5feb', '#67fff0', '#ffffff',
+        ],
+    },
+    'candyland': {
+        'fg': '#fce4f7', 'bg': '#1a0a1e', 'cursor': '#ff6eb4', 'cursor_fg': '#1a0a1e',
+        'palette': [
+            '#1a0a1e', '#ff5c8a', '#6ee7b7', '#ffcc66',
+            '#7cacf8', '#c084fc', '#67e8f9', '#fce4f7',
+            '#4a2d5e', '#ff8fab', '#a7f3d0', '#fde68a',
+            '#a5b4fc', '#d8b4fe', '#a5f3fc', '#ffffff',
+        ],
+    },
+}
 
 
 def _ensure_zellij_shell_wrapper():
@@ -63,25 +86,33 @@ class TerminalView(Gtk.Box):
         self._apply_font()
         self._apply_colors()
 
-        # URL matching — opens links on click
+        # URL/path matching — opens links on click
+        # PCRE2_MULTILINE (0x400) required by VTE's match_add_regex
         url_regex = Vte.Regex.new_for_match(
-            r'https?://\S+|file://\S+', -1, 0
+            r'https?://\S+|file://\S+', -1, 0x400
         )
         self._url_tag = self._terminal.match_add_regex(url_regex, 0)
         self._terminal.match_set_cursor_name(self._url_tag, 'pointer')
+
+        # Plain absolute paths — converted to file:// on click
+        path_regex = Vte.Regex.new_for_match(r'/[^\s]+', -1, 0x400)
+        self._path_tag = self._terminal.match_add_regex(path_regex, 0)
+        self._terminal.match_set_cursor_name(self._path_tag, 'pointer')
 
         self.append(self._terminal)
 
         # Intercept Shift+Enter at CAPTURE phase — GTK4/Wayland strips the Shift
         # modifier before VTE sees it; feed kitty keyboard protocol sequence directly.
-        key_ctrl = Gtk.EventControllerKey.new()
-        key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        key_ctrl.connect('key-pressed', self._on_key_pressed)
-        self._terminal.add_controller(key_ctrl)
+        self._key_ctrl = Gtk.EventControllerKey.new()
+        self._key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        self._key_ctrl.connect('key-pressed', self._on_key_pressed)
+        self._terminal.add_controller(self._key_ctrl)
 
-        click_ctrl = Gtk.GestureClick.new()
-        click_ctrl.connect('released', self._on_terminal_click)
-        self._terminal.add_controller(click_ctrl)
+        # Ctrl+click opens URLs/paths — VTE doesn't claim modified clicks
+        self._click_gesture = Gtk.GestureClick.new()
+        self._click_gesture.set_button(1)
+        self._click_gesture.connect('pressed', self._on_ctrl_click)
+        self._terminal.add_controller(self._click_gesture)
 
     def _on_key_pressed(self, controller, keyval, keycode, state):
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
@@ -90,10 +121,65 @@ class TerminalView(Gtk.Box):
                 return True
         return False
 
-    def _on_terminal_click(self, gesture, n_press, x, y):
-        url, _tag = self._terminal.match_check_event(gesture.get_last_event(None))
-        if url:
-            Gio.AppInfo.launch_default_for_uri(url, None)
+    def _debug(self, msg):
+        if self._settings.debug_logging:
+            print(f'[DBG] {msg}', flush=True)
+
+    def _on_ctrl_click(self, gesture, n_press, x, y):
+        state = gesture.get_current_event_state()
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        self._debug(f'click n_press={n_press} x={x:.1f} y={y:.1f} ctrl={ctrl}')
+        if not ctrl:
+            return
+        self._open_url_at_coords(x, y)
+
+    def _open_url_at_coords(self, x, y):
+        char_w = self._terminal.get_char_width()
+        self._debug(f'char_w={char_w}')
+        if char_w <= 0:
+            return False
+        col = int(x / char_w)
+        # Use allocated height / row_count for true row pitch (get_char_height
+        # excludes line spacing, causing a systematic downward offset)
+        row_count = self._terminal.get_row_count()
+        widget_h = self._terminal.get_allocated_height()
+        char_h = self._terminal.get_char_height()
+        if row_count <= 0 or widget_h <= 0:
+            return False
+        row_height = widget_h / row_count
+        row_from_top = int(y / row_height)
+        self._debug(f'widget_h={widget_h} row_count={row_count} char_h={char_h} row_height={row_height:.2f}')
+        self._debug(f'col={col} row_from_top={row_from_top}')
+        try:
+            visible_rows = self._terminal.get_row_count()
+            result = self._terminal.get_text_range_format(
+                Vte.Format.TEXT, 0, 0, visible_rows - 1, self._terminal.get_column_count()
+            )
+            text = result[0] if isinstance(result, tuple) else result
+            if not text:
+                self._debug('empty text')
+                return False
+            lines = text.split('\n')
+            if row_from_top >= len(lines):
+                self._debug(f'row_from_top={row_from_top} >= lines={len(lines)}')
+                return False
+            line = lines[row_from_top]
+            self._debug(f'line={repr(line[:80])}')
+        except Exception as e:
+            self._debug(f'text extraction error: {e}')
+            return False
+        url_pat = re.compile(r'https?://\S+|file://\S+|/[^\s]+')
+        matches = list(url_pat.finditer(line))
+        self._debug(f'matches={[(m.group(), m.start(), m.end()) for m in matches]}')
+        for m in matches:
+            if m.start() <= col <= m.end():
+                url = re.sub(r'[)\].,;!?\'"]+$', '', m.group())
+                uri = ('file://' + url) if url.startswith('/') else url
+                self._debug(f'launching {uri}')
+                Gio.AppInfo.launch_default_for_uri(uri, None)
+                return True
+        self._debug(f'no match at col={col}')
+        return False
 
     def _apply_font(self):
         desc = Pango.FontDescription.from_string(f'Monospace {self._font_size}')
@@ -105,29 +191,14 @@ class TerminalView(Gtk.Box):
             c.parse(hex_str)
             return c
 
-        fg = rgba('#fffaf4')
-        bg = rgba('#0e1019')
-        palette = [
-            rgba('#232323'),  #  0 black
-            rgba('#ff000f'),  #  1 red
-            rgba('#8ce10b'),  #  2 green
-            rgba('#ffb900'),  #  3 yellow
-            rgba('#008df8'),  #  4 blue
-            rgba('#6d43a6'),  #  5 magenta
-            rgba('#00d8eb'),  #  6 cyan
-            rgba('#ffffff'),  #  7 white
-            rgba('#444444'),  #  8 bright black
-            rgba('#ff2740'),  #  9 bright red
-            rgba('#abe15b'),  # 10 bright green
-            rgba('#ffd242'),  # 11 bright yellow
-            rgba('#0092ff'),  # 12 bright blue
-            rgba('#9a5feb'),  # 13 bright magenta
-            rgba('#67fff0'),  # 14 bright cyan
-            rgba('#ffffff'),  # 15 bright white
-        ]
+        theme = getattr(self._settings, 'theme', 'argonaut')
+        p = _TERMINAL_PALETTES.get(theme, _TERMINAL_PALETTES['argonaut'])
+        fg = rgba(p['fg'])
+        bg = rgba(p['bg'])
+        palette = [rgba(h) for h in p['palette']]
         self._terminal.set_colors(fg, bg, palette)
-        self._terminal.set_color_cursor(rgba('#ff0018'))
-        self._terminal.set_color_cursor_foreground(rgba('#0e1019'))
+        self._terminal.set_color_cursor(rgba(p['cursor']))
+        self._terminal.set_color_cursor_foreground(rgba(p['cursor_fg']))
 
     def spawn_claude(self, session_id=None, fresh=False, project_name=None):
         self._kill_child()
@@ -248,6 +319,7 @@ class TerminalView(Gtk.Box):
         self._settings = settings
         self._font_size = settings.font_size
         self._apply_font()
+        self._apply_colors()
         self._terminal.set_scrollback_lines(settings.scrollback_lines)
         self._terminal.set_audible_bell(settings.audible_bell)
 
