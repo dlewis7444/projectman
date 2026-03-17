@@ -18,6 +18,7 @@ class Settings:
     multiplexer: str = 'none'
     theme: str = 'argonaut'
     debug_logging: bool = False
+    sidebar_width: int = 220
 
     @property
     def resolved_projects_dir(self) -> str:

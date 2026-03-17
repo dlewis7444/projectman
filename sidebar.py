@@ -3,7 +3,7 @@ from datetime import datetime
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Gio, GLib, GObject, Gdk
+from gi.repository import Gtk, Gio, GLib, GObject, Gdk, Pango
 
 from model import ResourceReader
 
@@ -33,20 +33,16 @@ class Sidebar(Gtk.Box):
         self._new_project_row = None
         self._active_only = False
 
-        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        header_box.add_css_class('sidebar-header')  # margin + font cascade to children
-        header = Gtk.Label(label='PROJECTS')
-        header.set_halign(Gtk.Align.START)
-        header.set_hexpand(True)
-        header_box.append(header)
         add_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
         add_btn.add_css_class('flat')
         add_btn.add_css_class('circular')
-        add_btn.set_valign(Gtk.Align.CENTER)
+        add_btn.set_halign(Gtk.Align.END)
+        add_btn.set_margin_top(6)
+        add_btn.set_margin_end(8)
+        add_btn.set_margin_bottom(2)
         add_btn.set_tooltip_text('New Project')
         add_btn.connect('clicked', self._on_add_project)
-        header_box.append(add_btn)
-        self.append(header_box)
+        self.append(add_btn)
 
         self._scrolled = Gtk.ScrolledWindow()
         self._scrolled.set_vexpand(True)
@@ -298,6 +294,7 @@ class ProjectRow(Gtk.ListBoxRow):
         self._name_label = Gtk.Label(label=project.name)
         self._name_label.set_halign(Gtk.Align.START)
         self._name_label.set_hexpand(True)
+        self._name_label.set_ellipsize(Pango.EllipsizeMode.END)
         top.append(self._name_label)
 
         self._rename_entry = Gtk.Entry()
