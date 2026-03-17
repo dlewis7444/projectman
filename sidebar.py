@@ -32,6 +32,7 @@ class Sidebar(Gtk.Box):
         self._rows = {}
         self._new_project_row = None
         self._active_only = False
+        self._filter_text = ''
 
         add_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
         add_btn.add_css_class('flat')
@@ -91,11 +92,16 @@ class Sidebar(Gtk.Box):
         self._populate()
 
     def _filter_row(self, row):
-        if not self._active_only:
-            return True
         if isinstance(row, ProjectRow):
-            return row._process_state in ('attached', 'detached')
+            if self._active_only and row._process_state not in ('attached', 'detached'):
+                return False
+            if self._filter_text and self._filter_text not in row._project.name.lower():
+                return False
         return True
+
+    def set_filter_text(self, text):
+        self._filter_text = text.lower()
+        self._listbox.invalidate_filter()
 
     def _populate(self):
         # Preserve the in-progress new-project entry across rebuilds
@@ -169,6 +175,10 @@ class Sidebar(Gtk.Box):
 
     def set_active_only(self, active):
         self._active_toggle.set_active(active)
+
+    def select_project(self, path):
+        if path in self._rows:
+            self._listbox.select_row(self._rows[path])
 
     def set_project_state(self, path, state: str):
         if path in self._rows:
