@@ -274,8 +274,8 @@ class ProjectRow(Gtk.ListBoxRow):
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_child(outer)
 
-        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        top.set_margin_start(8)
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        top.set_margin_start(4)
         top.set_margin_end(8)
         top.set_margin_top(4)
         top.set_margin_bottom(4)
