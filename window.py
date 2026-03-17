@@ -346,6 +346,9 @@ class AppWindow(Adw.ApplicationWindow):
         tv.get_terminal().grab_focus()
 
     def _on_project_activated(self, sidebar, path):
+        if self._search_entry.get_text():
+            self._search_entry.set_text('')
+        self._sidebar.set_active_only(True)
         self._switch_to_project(path)
 
     def _on_session_activated(self, sidebar, path, session_id):
