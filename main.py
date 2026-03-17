@@ -26,6 +26,8 @@ class ProjectManApp(Adw.Application):
         self.connect('activate', self._on_activate)
 
     def _on_startup(self, app):
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+
         provider = Gtk.CssProvider()
         css_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), 'style.css'

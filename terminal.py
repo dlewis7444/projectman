@@ -61,6 +61,7 @@ class TerminalView(Gtk.Box):
         self._terminal.set_vexpand(True)
         self._terminal.connect('child-exited', self._on_child_exited)
         self._apply_font()
+        self._apply_colors()
 
         # URL matching — opens links on click
         url_regex = Vte.Regex.new_for_match(
@@ -97,6 +98,36 @@ class TerminalView(Gtk.Box):
     def _apply_font(self):
         desc = Pango.FontDescription.from_string(f'Monospace {self._font_size}')
         self._terminal.set_font(desc)
+
+    def _apply_colors(self):
+        def rgba(hex_str):
+            c = Gdk.RGBA()
+            c.parse(hex_str)
+            return c
+
+        fg = rgba('#fffaf4')
+        bg = rgba('#0e1019')
+        palette = [
+            rgba('#232323'),  #  0 black
+            rgba('#ff000f'),  #  1 red
+            rgba('#8ce10b'),  #  2 green
+            rgba('#ffb900'),  #  3 yellow
+            rgba('#008df8'),  #  4 blue
+            rgba('#6d43a6'),  #  5 magenta
+            rgba('#00d8eb'),  #  6 cyan
+            rgba('#ffffff'),  #  7 white
+            rgba('#444444'),  #  8 bright black
+            rgba('#ff2740'),  #  9 bright red
+            rgba('#abe15b'),  # 10 bright green
+            rgba('#ffd242'),  # 11 bright yellow
+            rgba('#0092ff'),  # 12 bright blue
+            rgba('#9a5feb'),  # 13 bright magenta
+            rgba('#67fff0'),  # 14 bright cyan
+            rgba('#ffffff'),  # 15 bright white
+        ]
+        self._terminal.set_colors(fg, bg, palette)
+        self._terminal.set_color_cursor(rgba('#ff0018'))
+        self._terminal.set_color_cursor_foreground(rgba('#0e1019'))
 
     def spawn_claude(self, session_id=None, fresh=False, project_name=None):
         self._kill_child()
