@@ -117,7 +117,16 @@ class TerminalView(Gtk.Box):
         self._path_tag = self._terminal.match_add_regex(path_regex, 0)
         self._terminal.match_set_cursor_name(self._path_tag, 'pointer')
 
-        self.append(self._terminal)
+        scrollbar = Gtk.Scrollbar(
+            orientation=Gtk.Orientation.VERTICAL,
+            adjustment=self._terminal.get_vadjustment(),
+        )
+        term_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        term_box.set_hexpand(True)
+        term_box.set_vexpand(True)
+        term_box.append(self._terminal)
+        term_box.append(scrollbar)
+        self.append(term_box)
 
         # Intercept Shift+Enter at CAPTURE phase — GTK4/Wayland strips the Shift
         # modifier before VTE sees it; feed kitty keyboard protocol sequence directly.
