@@ -42,7 +42,7 @@ running `claude` (or `zellij attach`) per project. Projects are directories unde
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/projectman.git
+git clone https://github.com/dlewis7444/projectman.git
 cd projectman
 ./install.sh
 ```
