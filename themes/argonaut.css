@@ -1,0 +1,51 @@
+/* ── Argonaut Dark color theme ────────────────────────────────────── */
+window.background { background-color: #0e1019; color: #fffaf4; }
+
+headerbar {
+    background-color: #0e151d;
+    color: #fffaf4;
+    box-shadow: inset 0 -1px alpha(#fffaf4, 0.10);
+}
+
+.pm-sidebar {
+    background-color: #0e151d;
+    color: #fffaf4;
+}
+
+.pm-sidebar scrolledwindow,
+.pm-sidebar list.navigation-sidebar {
+    background-color: #0e151d;
+}
+
+.pm-sidebar list.navigation-sidebar row:hover {
+    background-color: alpha(#fffaf4, 0.06);
+}
+
+.pm-sidebar list.navigation-sidebar row:selected {
+    background-color: alpha(#008df8, 0.20);
+}
+
+row.active-project { background: alpha(#008df8, 0.15); }
+
+.status-dot.status-stopped { background: alpha(currentColor, 0.08); }
+.status-dot.status-idle    { background: alpha(currentColor, 0.25); }
+.status-dot.status-done    { background: #8ce10b; }
+.status-dot.status-working { background: #ffb900; }
+.status-dot.status-waiting { background: #008df8; }
+
+.sidebar-header { color: alpha(currentColor, 0.5); }
+
+.session-default-badge { color: #008df8; }
+
+.resource-bar { border-top: 1px solid alpha(currentColor, 0.12); }
+
+.project-row-detached { color: alpha(currentColor, 0.5); }
+
+.pm-sidebar button.circular { color: alpha(#fffaf4, 0.7); }
+.pm-sidebar button.circular:hover { color: #fffaf4; }
+
+.pm-sidebar-btn:hover { background-color: alpha(#fffaf4, 0.08); }
+.pm-sidebar-btn:checked {
+    background-color: alpha(#008df8, 0.15);
+    color: #008df8;
+}

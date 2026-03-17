@@ -16,6 +16,8 @@ class Settings:
     scrollback_lines: int = 10000
     audible_bell: bool = False
     multiplexer: str = 'none'
+    theme: str = 'argonaut'
+    debug_logging: bool = False
 
     @property
     def resolved_projects_dir(self) -> str:

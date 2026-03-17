@@ -65,6 +65,18 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._resume_row.connect('notify::active', self._on_resume_toggled)
         startup_group.add(self._resume_row)
 
+        # Group: Developer
+        dev_group = Adw.PreferencesGroup(title='Developer')
+        page.add(dev_group)
+
+        self._debug_row = Adw.SwitchRow(
+            title='Debug Logging',
+            subtitle='Print debug output to stdout (also enabled by --debug flag)',
+        )
+        self._debug_row.set_active(self._settings.debug_logging)
+        self._debug_row.connect('notify::active', self._on_debug_toggled)
+        dev_group.add(self._debug_row)
+
     def _build_terminal_page(self):
         page = Adw.PreferencesPage(
             title='Terminal', icon_name='utilities-terminal-symbolic'
@@ -113,6 +125,30 @@ class SettingsWindow(Adw.PreferencesDialog):
         )
         self.add(page)
 
+        # Theme group
+        theme_group = Adw.PreferencesGroup(title='Theme')
+        page.add(theme_group)
+
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        themes_dir = os.path.join(app_dir, 'themes')
+        _THEME_LABELS = {'argonaut': 'Argonaut Dark', 'candyland': 'Candyland'}
+        self._theme_names = []
+        theme_labels = []
+        if os.path.isdir(themes_dir):
+            for fname in sorted(os.listdir(themes_dir)):
+                if fname.endswith('.css'):
+                    name = fname[:-4]
+                    self._theme_names.append(name)
+                    theme_labels.append(_THEME_LABELS.get(name, name.title()))
+
+        self._theme_row = Adw.ComboRow(title='Color Theme')
+        self._theme_row.set_model(Gtk.StringList.new(theme_labels))
+        current = self._settings.theme
+        if current in self._theme_names:
+            self._theme_row.set_selected(self._theme_names.index(current))
+        self._theme_row.connect('notify::selected', self._on_theme_changed)
+        theme_group.add(self._theme_row)
+
         # Hook Script group
         hook_group = Adw.PreferencesGroup(title='Hook Script')
         page.add(hook_group)
@@ -132,11 +168,11 @@ class SettingsWindow(Adw.PreferencesDialog):
         page.add(colors_group)
 
         status_colors = [
-            ('stopped',  'Stopped',  'alpha(currentColor, 0.08)'),
-            ('idle',     'Idle',     'alpha(currentColor, 0.25)'),
-            ('done',     'Done',     '#8ce10b'),
-            ('working',  'Working',  '#ffb900'),
-            ('waiting',  'Waiting',  '#008df8'),
+            ('stopped',  'Stopped',  'alpha(#fce4f7, 0.08)'),
+            ('idle',     'Idle',     'alpha(#fce4f7, 0.25)'),
+            ('done',     'Done',     '#ff6eb4 (hot pink)'),
+            ('working',  'Working',  '#ffaa6e (peach)'),
+            ('waiting',  'Waiting',  '#c084fc (lavender)'),
         ]
         for _key, label, color in status_colors:
             row = Adw.ActionRow(title=label)
@@ -185,6 +221,16 @@ class SettingsWindow(Adw.PreferencesDialog):
 
     def _on_bell_toggled(self, row, _param):
         self._settings.audible_bell = row.get_active()
+        self._save_and_notify()
+
+    def _on_theme_changed(self, row, _param):
+        idx = row.get_selected()
+        if 0 <= idx < len(self._theme_names):
+            self._settings.theme = self._theme_names[idx]
+            self._save_and_notify()
+
+    def _on_debug_toggled(self, row, _param):
+        self._settings.debug_logging = row.get_active()
         self._save_and_notify()
 
     def _on_multiplexer_changed(self, row, _param):

@@ -20,8 +20,9 @@ class ProjectManApp(Adw.Application):
         'settings-changed': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
-    def __init__(self):
+    def __init__(self, debug_flag=False):
         super().__init__(application_id='com.lewislab.ProjectMan')
+        self._debug_flag = debug_flag
         self.connect('startup', self._on_startup)
         self.connect('activate', self._on_activate)
 
@@ -38,6 +39,7 @@ class ProjectManApp(Adw.Application):
             provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
+        self._theme_provider = None
 
         for name, method in [
             ('zoom-in', '_zoom_in'),
@@ -62,6 +64,8 @@ class ProjectManApp(Adw.Application):
             except OSError as e:
                 print(f'ProjectMan: migration failed: {e}', file=sys.stderr)
         self._settings = Settings.load()
+        if self._debug_flag:
+            self._settings.debug_logging = True
         self._store = ProjectStore(self._settings)
         self._history = HistoryReader()
         self._history.load()
@@ -78,12 +82,30 @@ class ProjectManApp(Adw.Application):
             self, self._store, self._history, self._watcher,
             self._settings, self._zellij_watcher
         )
+        self._load_theme_css()
         self._projects_watcher.connect('projects-changed', self._on_projects_changed)
         self.connect('settings-changed', self._on_settings_changed)
         self._window.present()
         self._window._restore_session()
 
+    def _load_theme_css(self):
+        display = Gdk.Display.get_default()
+        if self._theme_provider is not None:
+            Gtk.StyleContext.remove_provider_for_display(display, self._theme_provider)
+        self._theme_provider = Gtk.CssProvider()
+        theme_name = self._settings.theme
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        theme_path = os.path.join(app_dir, 'themes', f'{theme_name}.css')
+        if os.path.exists(theme_path):
+            self._theme_provider.load_from_path(theme_path)
+        Gtk.StyleContext.add_provider_for_display(
+            display,
+            self._theme_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+        )
+
     def _on_settings_changed(self, app):
+        self._load_theme_css()
         self._window.apply_settings(self._settings)
         if self._settings.multiplexer == 'zellij':
             self._zellij_watcher.start()
@@ -122,8 +144,10 @@ class ProjectManApp(Adw.Application):
 
 
 def main():
-    app = ProjectManApp()
-    app.run(sys.argv)
+    debug_flag = '--debug' in sys.argv
+    argv = [a for a in sys.argv if a != '--debug']
+    app = ProjectManApp(debug_flag)
+    app.run(argv)
 
 
 if __name__ == '__main__':
