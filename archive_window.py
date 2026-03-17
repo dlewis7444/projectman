@@ -1,7 +1,7 @@
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw
+from gi.repository import Gtk, Adw, Gdk
 
 
 class ArchiveWindow(Adw.Window):
@@ -15,6 +15,9 @@ class ArchiveWindow(Adw.Window):
         self.set_transient_for(parent)
         self.set_modal(False)
         self.connect('close-request', lambda w: w.destroy() or True)
+        key_ctrl = Gtk.EventControllerKey.new()
+        key_ctrl.connect('key-pressed', self._on_key_pressed)
+        self.add_controller(key_ctrl)
 
         self._filter_text = ''
 
@@ -23,7 +26,7 @@ class ArchiveWindow(Adw.Window):
         self._search_entry = Gtk.SearchEntry()
         self._search_entry.set_placeholder_text('Filter…')
         self._search_entry.connect('search-changed', self._on_search_changed)
-        self._search_entry.connect('stop-search', lambda e: e.set_text(''))
+        self._search_entry.connect('stop-search', self._on_search_stop)
         header.set_title_widget(self._search_entry)
         toolbar_view.add_top_bar(header)
 
@@ -108,6 +111,18 @@ class ArchiveWindow(Adw.Window):
         row.set_child(box)
         row._project = project
         return row
+
+    def _on_key_pressed(self, controller, keyval, keycode, state):
+        if keyval == Gdk.KEY_Escape:
+            self.destroy()
+            return True
+        return False
+
+    def _on_search_stop(self, entry):
+        if entry.get_text():
+            entry.set_text('')
+        else:
+            self.destroy()
 
     def _filter_row(self, row):
         if not self._filter_text:
