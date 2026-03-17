@@ -141,10 +141,20 @@ class TerminalView(Gtk.Box):
         self._click_gesture.connect('pressed', self._on_ctrl_click)
         self._terminal.add_controller(self._click_gesture)
 
+        # Right-click context menu
+        self._rclick_gesture = Gtk.GestureClick.new()
+        self._rclick_gesture.set_button(3)
+        self._rclick_gesture.connect('pressed', self._on_right_click)
+        self._terminal.add_controller(self._rclick_gesture)
+
     def _on_key_pressed(self, controller, keyval, keycode, state):
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             if state & Gdk.ModifierType.SHIFT_MASK:
                 self._terminal.feed_child(b'\x1b[13;2u')
+                return True
+        if keyval in (Gdk.KEY_c, Gdk.KEY_C):
+            if (state & Gdk.ModifierType.CONTROL_MASK) and (state & Gdk.ModifierType.SHIFT_MASK):
+                self._terminal.copy_clipboard_format(Vte.Format.TEXT)
                 return True
         return False
 
@@ -160,53 +170,89 @@ class TerminalView(Gtk.Box):
             return
         self._open_url_at_coords(x, y)
 
-    def _open_url_at_coords(self, x, y):
+    def _url_at(self, x, y):
+        """Return URL/path string at pixel coords (x, y), or None."""
         char_w = self._terminal.get_char_width()
-        self._debug(f'char_w={char_w}')
         if char_w <= 0:
-            return False
+            return None
         col = int(x / char_w)
-        # Use allocated height / row_count for true row pitch (get_char_height
-        # excludes line spacing, causing a systematic downward offset)
         row_count = self._terminal.get_row_count()
         widget_h = self._terminal.get_allocated_height()
-        char_h = self._terminal.get_char_height()
         if row_count <= 0 or widget_h <= 0:
-            return False
-        row_height = widget_h / row_count
-        row_from_top = int(y / row_height)
-        self._debug(f'widget_h={widget_h} row_count={row_count} char_h={char_h} row_height={row_height:.2f}')
-        self._debug(f'col={col} row_from_top={row_from_top}')
+            return None
+        row_from_top = int(y / (widget_h / row_count))
         try:
-            visible_rows = self._terminal.get_row_count()
             result = self._terminal.get_text_range_format(
-                Vte.Format.TEXT, 0, 0, visible_rows - 1, self._terminal.get_column_count()
+                Vte.Format.TEXT, 0, 0, row_count - 1, self._terminal.get_column_count()
             )
             text = result[0] if isinstance(result, tuple) else result
             if not text:
-                self._debug('empty text')
-                return False
+                return None
             lines = text.split('\n')
             if row_from_top >= len(lines):
-                self._debug(f'row_from_top={row_from_top} >= lines={len(lines)}')
-                return False
+                return None
             line = lines[row_from_top]
-            self._debug(f'line={repr(line[:80])}')
-        except Exception as e:
-            self._debug(f'text extraction error: {e}')
-            return False
-        url_pat = re.compile(r'https?://\S+|file://\S+|/[^\s]+')
-        matches = list(url_pat.finditer(line))
-        self._debug(f'matches={[(m.group(), m.start(), m.end()) for m in matches]}')
-        for m in matches:
+        except Exception:
+            return None
+        for m in re.finditer(r'https?://\S+|file://\S+|/[^\s]+', line):
             if m.start() <= col <= m.end():
-                url = re.sub(r'[)\].,;!?\'"]+$', '', m.group())
-                uri = ('file://' + url) if url.startswith('/') else url
-                self._debug(f'launching {uri}')
-                Gio.AppInfo.launch_default_for_uri(uri, None)
-                return True
-        self._debug(f'no match at col={col}')
-        return False
+                return re.sub(r'[)\].,;!?\'"]+$', '', m.group())
+        return None
+
+    def _open_url_at_coords(self, x, y):
+        url = self._url_at(x, y)
+        if not url:
+            self._debug(f'no match at ({x:.0f}, {y:.0f})')
+            return False
+        uri = ('file://' + url) if url.startswith('/') else url
+        self._debug(f'launching {uri}')
+        Gio.AppInfo.launch_default_for_uri(uri, None)
+        return True
+
+    def _on_right_click(self, gesture, n_press, x, y):
+        url = self._url_at(x, y)
+        self._show_context_menu(int(x), int(y), url)
+
+    def _show_context_menu(self, x, y, url):
+        popover = Gtk.Popover()
+        popover.set_parent(self._terminal)
+        popover.set_has_arrow(False)
+        rect = Gdk.Rectangle()
+        rect.x, rect.y, rect.width, rect.height = x, y, 1, 1
+        popover.set_pointing_to(rect)
+        popover.connect('closed', lambda p: p.unparent())
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        box.add_css_class('term-context-menu')
+        box.set_size_request(160, -1)
+
+        def item(label, callback, sensitive=True):
+            btn = Gtk.Button()
+            lbl = Gtk.Label(label=label)
+            lbl.set_halign(Gtk.Align.START)
+            btn.set_child(lbl)
+            btn.add_css_class('flat')
+            btn.set_sensitive(sensitive)
+            btn.set_halign(Gtk.Align.FILL)
+            btn.connect('clicked', lambda _b, cb=callback: (cb(), popover.popdown()))
+            return btn
+
+        has_sel = self._terminal.get_has_selection()
+        box.append(item('Copy', lambda: self._terminal.copy_clipboard_format(Vte.Format.TEXT), has_sel))
+        box.append(item('Paste', self._terminal.paste_clipboard))
+        box.append(item('Select All', self._terminal.select_all))
+
+        if url:
+            box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+            uri = ('file://' + url) if url.startswith('/') else url
+            box.append(item('Open URL', lambda u=uri: Gio.AppInfo.launch_default_for_uri(u, None)))
+            box.append(item('Copy URL', lambda u=url: self._set_clipboard(u)))
+
+        popover.set_child(box)
+        popover.popup()
+
+    def _set_clipboard(self, text):
+        Gdk.Display.get_default().get_clipboard().set(text)
 
     def _apply_font(self):
         desc = Pango.FontDescription.from_string(f'Monospace {self._font_size}')
