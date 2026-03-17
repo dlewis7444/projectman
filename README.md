@@ -86,7 +86,9 @@ Add the following to `~/.claude/settings.json` (create the file if it doesn't ex
   "hooks": {
     "PreToolUse":        [{"hooks": [{"type": "command", "command": "node ~/.claude/projectman/hook.js"}]}],
     "PostToolUse":       [{"hooks": [{"type": "command", "command": "node ~/.claude/projectman/hook.js"}]}],
+    "PostToolUseFailure":[{"hooks": [{"type": "command", "command": "node ~/.claude/projectman/hook.js"}]}],
     "UserPromptSubmit":  [{"hooks": [{"type": "command", "command": "node ~/.claude/projectman/hook.js"}]}],
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "node ~/.claude/projectman/hook.js"}]}],
     "Notification":      [{"hooks": [{"type": "command", "command": "node ~/.claude/projectman/hook.js"}]}],
     "Stop":              [{"hooks": [{"type": "command", "command": "node ~/.claude/projectman/hook.js"}]}],
     "SessionStart":      [{"hooks": [{"type": "command", "command": "node ~/.claude/projectman/hook.js"}]}],
@@ -94,6 +96,10 @@ Add the following to `~/.claude/settings.json` (create the file if it doesn't ex
   }
 }
 ```
+
+> **Tip:** If status dots don't update, `node` may not be on Claude Code's PATH. Replace
+> `node` with the full path from `which node` (e.g. `/usr/bin/node`), and replace
+> `~/.claude/...` with the expanded absolute path (e.g. `/home/yourname/.claude/...`).
 
 You can also edit this file from within ProjectMan via **Settings → Claude JSON**.
 
