@@ -180,9 +180,9 @@ class Sidebar(Gtk.Box):
         if path in self._rows:
             self._listbox.select_row(self._rows[path])
 
-    def set_project_state(self, path, state: str):
+    def set_project_state(self, path, state: str, is_zellij: bool = None):
         if path in self._rows:
-            self._rows[path].set_process_state(state)
+            self._rows[path].set_process_state(state, is_zellij=is_zellij)
             if self._active_only:
                 self._listbox.invalidate_filter()
             self._update_count_label()
@@ -280,6 +280,8 @@ class ProjectRow(Gtk.ListBoxRow):
         self._expanded = False
         self._sessions_loaded = False
         self._process_state = 'inactive'
+        self._is_zellij = False
+        self._new_session_row = None
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_child(outer)
@@ -342,12 +344,12 @@ class ProjectRow(Gtk.ListBoxRow):
         archive_btn.connect('clicked', lambda b: self.emit('project-archive'))
         actions_box.append(archive_btn)
 
-        new_session_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
-        new_session_btn.add_css_class('flat')
-        new_session_btn.set_valign(Gtk.Align.CENTER)
-        new_session_btn.set_tooltip_text('New Claude session')
-        new_session_btn.connect('clicked', lambda b: self.emit('project-new-claude'))
-        actions_box.append(new_session_btn)
+        self._new_session_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
+        self._new_session_btn.add_css_class('flat')
+        self._new_session_btn.set_valign(Gtk.Align.CENTER)
+        self._new_session_btn.set_tooltip_text('New Claude session')
+        self._new_session_btn.connect('clicked', lambda b: self.emit('project-new-claude'))
+        actions_box.append(self._new_session_btn)
 
         top.append(actions_box)
 
@@ -381,7 +383,7 @@ class ProjectRow(Gtk.ListBoxRow):
             ag.add_action(action)
             return action
 
-        _add('new-claude', 'project-new-claude')
+        self._new_claude_action = _add('new-claude', 'project-new-claude')
         self._deactivate_action = _add('deactivate', 'project-deactivate')
         self._deactivate_action.set_enabled(False)  # enabled only when process is running
         _add('zellij',   'project-zellij')
@@ -421,7 +423,10 @@ class ProjectRow(Gtk.ListBoxRow):
             self._sessions_loaded = True
 
     def _load_sessions(self):
-        self._session_listbox.append(NewSessionRow())
+        self._new_session_row = NewSessionRow()
+        self._new_session_row.set_sensitive(not self._is_zellij)
+        self._new_session_row.set_activatable(not self._is_zellij)
+        self._session_listbox.append(self._new_session_row)
         for i, sess in enumerate(self._history.get_sessions(self._project)):
             self._session_listbox.append(SessionHistoryRow(sess, is_default=(i == 0)))
 
@@ -431,11 +436,22 @@ class ProjectRow(Gtk.ListBoxRow):
         elif isinstance(row, SessionHistoryRow):
             self.emit('session-activated', self._project.path, row._session.session_id)
 
-    def set_process_state(self, state: str):
+    def set_process_state(self, state: str, is_zellij: bool = None):
         """state: 'inactive' | 'attached' | 'detached'"""
         self._process_state = state
+        if is_zellij is not None:
+            self._is_zellij = is_zellij
+        elif state == 'detached':
+            self._is_zellij = True
+        elif state == 'inactive':
+            self._is_zellij = False
         self._deactivate_action.set_enabled(state == 'attached')
         self._restart_btn.set_sensitive(state == 'attached')
+        self._new_session_btn.set_sensitive(not self._is_zellij)
+        self._new_claude_action.set_enabled(not self._is_zellij)
+        if self._new_session_row is not None:
+            self._new_session_row.set_sensitive(not self._is_zellij)
+            self._new_session_row.set_activatable(not self._is_zellij)
         if state == 'detached':
             self._name_label.add_css_class('project-row-detached')
             self._name_label.set_tooltip_text('Detached zellij session')

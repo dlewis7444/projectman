@@ -303,11 +303,11 @@ class AppWindow(Adw.ApplicationWindow):
         if project.path not in self._terminals:
             tv = TerminalView(project, self._settings)
             tv.connect('process-started',
-                       lambda t, p=project.path: self._sidebar.set_project_state(p, 'attached'))
+                       lambda t, p=project.path: self._sidebar.set_project_state(p, 'attached', is_zellij=t._is_zellij))
             tv.connect('process-exited',
-                       lambda t, s, p=project.path: self._sidebar.set_project_state(p, 'inactive'))
+                       lambda t, s, p=project.path: self._sidebar.set_project_state(p, 'inactive', is_zellij=False))
             tv.connect('process-detached',
-                       lambda t, p=project.path: self._sidebar.set_project_state(p, 'detached'))
+                       lambda t, p=project.path: self._sidebar.set_project_state(p, 'detached', is_zellij=True))
             self._terminals[project.path] = tv
             self._stack.add_named(tv, project.path)
         return self._terminals[project.path]
@@ -316,7 +316,7 @@ class AppWindow(Adw.ApplicationWindow):
         """Re-apply process running flags after a sidebar refresh."""
         for path, tv in self._terminals.items():
             if tv._child_pid is not None:
-                self._sidebar.set_project_state(path, 'attached')
+                self._sidebar.set_project_state(path, 'attached', is_zellij=tv._is_zellij)
 
     def _find_project(self, path):
         for p in self._store.load_projects() + self._store.load_archived():
