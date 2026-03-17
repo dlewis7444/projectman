@@ -26,6 +26,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._settings = settings
         self._terminals = {}
         self._active_path = None
+        self._mru = []          # most-recently-used project paths, index 0 = current
         self._archive_win = None
         self._settings_win = None
         self._zellij_watcher = zellij_watcher
@@ -232,6 +233,9 @@ class AppWindow(Adw.ApplicationWindow):
                 else:
                     tv.spawn_claude(project_name=project.name)
 
+    def _push_mru(self, path):
+        self._mru = [path] + [p for p in self._mru if p != path]
+
     def _setup_shortcuts(self):
         controller = Gtk.ShortcutController.new()
         controller.set_scope(Gtk.ShortcutScope.MANAGED)
@@ -239,7 +243,16 @@ class AppWindow(Adw.ApplicationWindow):
             Gtk.ShortcutTrigger.parse_string('F5'),
             Gtk.CallbackAction.new(self._on_f5),
         ))
+        controller.add_shortcut(Gtk.Shortcut.new(
+            Gtk.ShortcutTrigger.parse_string('<Control>Tab'),
+            Gtk.CallbackAction.new(self._on_ctrl_tab),
+        ))
         self.add_controller(controller)
+
+    def _on_ctrl_tab(self, widget, args):
+        if len(self._mru) >= 2:
+            self._switch_to_project(self._mru[1])
+        return True
 
     def _on_sidebar_pin_toggled(self, btn):
         if btn.get_active():
@@ -288,7 +301,7 @@ class AppWindow(Adw.ApplicationWindow):
 
     # --- project activation ---
 
-    def _on_project_activated(self, sidebar, path):
+    def _switch_to_project(self, path):
         project = self._find_project(path)
         if not project:
             return
@@ -296,6 +309,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._stack.set_visible_child_name(path)
         self._title.set_subtitle(project.name)
         self._active_path = path
+        self._push_mru(path)
         if tv._child_pid is None:
             import zellij as z
             sname = z.session_name(project.name)
@@ -305,6 +319,9 @@ class AppWindow(Adw.ApplicationWindow):
                 tv.spawn_claude(project_name=project.name)
         tv.get_terminal().grab_focus()
 
+    def _on_project_activated(self, sidebar, path):
+        self._switch_to_project(path)
+
     def _on_session_activated(self, sidebar, path, session_id):
         project = self._find_project(path)
         if not project:
@@ -313,6 +330,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._stack.set_visible_child_name(path)
         self._title.set_subtitle(project.name)
         self._active_path = path
+        self._push_mru(path)
         tv.spawn_claude(session_id=session_id, project_name=project.name)
         tv.get_terminal().grab_focus()
 
@@ -392,6 +410,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._stack.set_visible_child_name(path)
         self._title.set_subtitle(project.name)
         self._active_path = path
+        self._push_mru(path)
         tv.spawn_claude(fresh=True, project_name=project.name)
         tv.get_terminal().grab_focus()
 
@@ -407,6 +426,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._stack.set_visible_child_name(path)
         self._title.set_subtitle(project.name)
         self._active_path = path
+        self._push_mru(path)
         sname = z.session_name(project.name)
         if not (tv._child_pid is not None and tv._is_zellij):
             tv.spawn_zellij(sname)
@@ -462,6 +482,7 @@ class AppWindow(Adw.ApplicationWindow):
 
         if self._active_path == old_path:
             self._active_path = new_path
+            self._mru = [new_path if p == old_path else p for p in self._mru]
             self._title.set_subtitle(new_name)
 
         self._sidebar.refresh()
