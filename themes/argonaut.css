@@ -49,3 +49,7 @@ row.active-project { background: alpha(#008df8, 0.15); }
     background-color: alpha(#008df8, 0.15);
     color: #008df8;
 }
+
+/* expand arrow */
+.expand-arrow { color: alpha(#fffaf4, 0.4); }
+.expand-arrow:hover { color: #8ce10b; }

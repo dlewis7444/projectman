@@ -92,3 +92,7 @@ button.suggested-action {
     border: 1px solid #33ff00;
     box-shadow: 0 0 10px alpha(#33ff00, 0.25);
 }
+
+/* expand arrow */
+.expand-arrow { color: alpha(#33ff00, 0.5); }
+.expand-arrow:hover { color: #33ff00; }

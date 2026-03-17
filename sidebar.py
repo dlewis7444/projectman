@@ -285,9 +285,12 @@ class ProjectRow(Gtk.ListBoxRow):
         self._status_dot.add_css_class('status-stopped')
         top.append(self._status_dot)
 
-        self._arrow = Gtk.Button.new_from_icon_name('pan-end-symbolic')
+        self._arrow = Gtk.Button()
         self._arrow.add_css_class('flat')
+        self._arrow.add_css_class('expand-arrow')
         self._arrow.set_valign(Gtk.Align.CENTER)
+        self._arrow_label = Gtk.Label(label='\u203a')
+        self._arrow.set_child(self._arrow_label)
         self._arrow.connect('clicked', self._on_expand_clicked)
         top.append(self._arrow)
 
@@ -401,8 +404,7 @@ class ProjectRow(Gtk.ListBoxRow):
     def _on_expand_clicked(self, button):
         self._expanded = not self._expanded
         self._revealer.set_reveal_child(self._expanded)
-        icon = 'pan-down-symbolic' if self._expanded else 'pan-end-symbolic'
-        self._arrow.set_icon_name(icon)
+        self._arrow_label.set_label('\u2304' if self._expanded else '\u203a')
         if self._expanded and not self._sessions_loaded:
             self._load_sessions()
             self._sessions_loaded = True

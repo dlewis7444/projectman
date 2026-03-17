@@ -84,3 +84,7 @@ row.active-project { background: alpha(#c084fc, 0.15); }
 }
 
 button.suggested-action { background-color: #ff6eb4; color: #1a0a1e; }
+
+/* expand arrow */
+.expand-arrow { color: alpha(#c084fc, 0.6); }
+.expand-arrow:hover { color: #ff6eb4; }
