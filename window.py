@@ -316,6 +316,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._title.set_subtitle(project.name)
         self._active_path = path
         self._push_mru(path)
+        self._sidebar.select_project(path)
         if tv._child_pid is None:
             import zellij as z
             sname = z.session_name(project.name)

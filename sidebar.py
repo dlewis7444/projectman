@@ -170,6 +170,10 @@ class Sidebar(Gtk.Box):
     def set_active_only(self, active):
         self._active_toggle.set_active(active)
 
+    def select_project(self, path):
+        if path in self._rows:
+            self._listbox.select_row(self._rows[path])
+
     def set_project_state(self, path, state: str):
         if path in self._rows:
             self._rows[path].set_process_state(state)
