@@ -74,7 +74,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._paned.set_shrink_start_child(False)
         self._paned.connect('notify::position', self._on_paned_position_notify)
 
-        self._sidebar = Sidebar(store, history, watcher)
+        self._sidebar = Sidebar(store, history, watcher, version=self._version)
         self._sidebar.connect('project-activated',   self._on_project_activated)
         self._sidebar.connect('session-activated',   self._on_session_activated)
         self._sidebar.connect('project-archive',     self._on_project_archive)
@@ -272,10 +272,7 @@ class AppWindow(Adw.ApplicationWindow):
             print(f'[DBG] {msg}', flush=True)
 
     def _set_active_project(self, name):
-        if self._version and name:
-            self._title.set_subtitle(f'v{self._version} // {name}')
-        else:
-            self._title.set_subtitle(name or '')
+        self._title.set_subtitle(name or '')
 
     def _on_search_changed(self, entry):
         self._sidebar.set_filter_text(entry.get_text())
