@@ -238,7 +238,7 @@ class AppWindow(Adw.ApplicationWindow):
 
     def _setup_shortcuts(self):
         controller = Gtk.ShortcutController.new()
-        controller.set_scope(Gtk.ShortcutScope.MANAGED)
+        controller.set_scope(Gtk.ShortcutScope.GLOBAL)
         controller.add_shortcut(Gtk.Shortcut.new(
             Gtk.ShortcutTrigger.parse_string('F5'),
             Gtk.CallbackAction.new(self._on_f5),
@@ -250,9 +250,14 @@ class AppWindow(Adw.ApplicationWindow):
         self.add_controller(controller)
 
     def _on_ctrl_tab(self, widget, args):
+        self._debug(f'ctrl+tab mru={[os.path.basename(p) for p in self._mru]}')
         if len(self._mru) >= 2:
             self._switch_to_project(self._mru[1])
         return True
+
+    def _debug(self, msg):
+        if self._settings.debug_logging:
+            print(f'[DBG] {msg}', flush=True)
 
     def _on_sidebar_pin_toggled(self, btn):
         if btn.get_active():
