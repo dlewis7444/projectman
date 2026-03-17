@@ -58,6 +58,13 @@ class Sidebar(Gtk.Box):
         self._scrolled.set_child(self._listbox)
         self.append(self._scrolled)
 
+        self._count_label = Gtk.Label()
+        self._count_label.add_css_class('dim-label')
+        self._count_label.add_css_class('caption')
+        self._count_label.set_margin_top(4)
+        self._count_label.set_margin_bottom(0)
+        self.append(self._count_label)
+
         # "Active Only" toggle — hides inactive projects to reduce clutter
         self._active_toggle = Gtk.ToggleButton(label='Active Only')
         self._active_toggle.add_css_class('flat')
@@ -137,6 +144,8 @@ class Sidebar(Gtk.Box):
             self._listbox.prepend(pending_row)
             GLib.idle_add(pending_row._entry.grab_focus)
 
+        self._update_count_label()
+
     def _on_row_activated(self, listbox, row):
         if isinstance(row, ProjectRow):
             self.emit('project-activated', row._project.path)
@@ -144,6 +153,16 @@ class Sidebar(Gtk.Box):
     def _on_active_toggled(self, button):
         self._active_only = button.get_active()
         self._listbox.invalidate_filter()
+        self._update_count_label()
+
+    def _update_count_label(self):
+        if self._active_only:
+            n = sum(1 for row in self._rows.values()
+                    if row._process_state in ('attached', 'detached'))
+            self._count_label.set_label(f'{n} active')
+        else:
+            n = len(self._rows)
+            self._count_label.set_label(f'{n} projects')
 
     def refresh_status(self):
         for row in self._rows.values():
@@ -160,6 +179,7 @@ class Sidebar(Gtk.Box):
             self._rows[path].set_process_state(state)
             if self._active_only:
                 self._listbox.invalidate_filter()
+            self._update_count_label()
 
     def start_polling(self):
         self._resource_bar.start_polling()
