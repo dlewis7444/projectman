@@ -4,7 +4,7 @@ import subprocess
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw
+from gi.repository import Gtk, Adw, Gdk
 
 from sidebar import Sidebar
 from terminal import TerminalView
@@ -237,19 +237,20 @@ class AppWindow(Adw.ApplicationWindow):
         self._mru = [path] + [p for p in self._mru if p != path]
 
     def _setup_shortcuts(self):
-        controller = Gtk.ShortcutController.new()
-        controller.set_scope(Gtk.ShortcutScope.GLOBAL)
-        controller.add_shortcut(Gtk.Shortcut.new(
-            Gtk.ShortcutTrigger.parse_string('F5'),
-            Gtk.CallbackAction.new(self._on_f5),
-        ))
-        controller.add_shortcut(Gtk.Shortcut.new(
-            Gtk.ShortcutTrigger.parse_string('<Control>Tab'),
-            Gtk.CallbackAction.new(self._on_ctrl_tab),
-        ))
-        self.add_controller(controller)
+        key_ctrl = Gtk.EventControllerKey.new()
+        key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        key_ctrl.connect('key-pressed', self._on_key_pressed)
+        self.add_controller(key_ctrl)
 
-    def _on_ctrl_tab(self, widget, args):
+    def _on_key_pressed(self, controller, keyval, keycode, state):
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        if keyval == Gdk.KEY_F5:
+            return self._on_f5()
+        if ctrl and keyval == Gdk.KEY_Tab:
+            return self._on_ctrl_tab()
+        return False
+
+    def _on_ctrl_tab(self):
         self._debug(f'ctrl+tab mru={[os.path.basename(p) for p in self._mru]}')
         if len(self._mru) >= 2:
             self._switch_to_project(self._mru[1])
@@ -272,7 +273,7 @@ class AppWindow(Adw.ApplicationWindow):
         if self._pin_btn.get_active():
             self._sidebar_pos = paned.get_position()
 
-    def _on_f5(self, widget, args):
+    def _on_f5(self):
         if self._active_path and self._active_path in self._terminals:
             project = self._find_project(self._active_path)
             pname = project.name if project else None
