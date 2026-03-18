@@ -156,6 +156,10 @@ class TerminalView(Gtk.Box):
             if (state & Gdk.ModifierType.CONTROL_MASK) and (state & Gdk.ModifierType.SHIFT_MASK):
                 self._terminal.copy_clipboard_format(Vte.Format.TEXT)
                 return True
+        if keyval in (Gdk.KEY_v, Gdk.KEY_V):
+            if (state & Gdk.ModifierType.CONTROL_MASK) and (state & Gdk.ModifierType.SHIFT_MASK):
+                self._terminal.paste_clipboard()
+                return True
         return False
 
     def _debug(self, msg):
@@ -327,11 +331,11 @@ class TerminalView(Gtk.Box):
     def deactivate(self):
         """Gracefully stop the child; terminal output is preserved for context."""
         if self._child_pid is not None:
-            try:
-                # Kill the entire process group so bash wrapper + claude child both die.
-                os.killpg(os.getpgid(self._child_pid), signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                pass
+            for pid in (-self._child_pid, self._child_pid):
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except (ProcessLookupError, OSError):
+                    pass
             # child-exited signal will fire and emit process-exited
 
     def _spawn(self, argv, env=None):
@@ -369,10 +373,11 @@ class TerminalView(Gtk.Box):
 
     def _kill_child(self):
         if self._child_pid is not None:
-            try:
-                os.killpg(os.getpgid(self._child_pid), signal.SIGHUP)
-            except (ProcessLookupError, OSError):
-                pass
+            for pid in (-self._child_pid, self._child_pid):
+                try:
+                    os.kill(pid, signal.SIGHUP)
+                except (ProcessLookupError, OSError):
+                    pass
             self._child_pid = None
             self._terminal.reset(True, True)
 
