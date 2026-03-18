@@ -373,8 +373,10 @@ class AppWindow(Adw.ApplicationWindow):
     # --- deactivate (kill process, keep in sidebar as inactive) ---
 
     def _on_project_deactivate(self, sidebar, path):
-        print(f'[DEACT] _on_project_deactivate path={path!r} multiplexer={self._settings.multiplexer!r} in_terminals={path in self._terminals}', flush=True)
-        if self._settings.multiplexer == 'zellij':
+        tv = self._terminals.get(path)
+        if tv is None:
+            return
+        if tv._is_zellij:
             import zellij as z
             import subprocess
             project = self._find_project(path)
@@ -386,13 +388,12 @@ class AppWindow(Adw.ApplicationWindow):
                     # Killing the session causes the `zellij attach` VTE child to exit on its own.
                     # _on_child_exited fires → session_exists returns False → process-exited emitted
                     # → set_project_state(path, 'inactive') via the signal handler.
-                    # If the project was detached (no VTE child running), force the state update:
-                    if path not in self._terminals or self._terminals[path]._child_pid is None:
+                    # If detached (no VTE child), force the state update immediately:
+                    if tv._child_pid is None:
                         self._sidebar.set_project_state(path, 'inactive')
         else:
-            if path in self._terminals:
-                self._terminals[path].deactivate()
-                # process-exited signal fires → set_project_state(path, 'inactive')
+            tv.deactivate()
+            # process-exited signal fires → set_project_state(path, 'inactive')
 
     # --- archive (move to .archive, remove terminal) ---
 
