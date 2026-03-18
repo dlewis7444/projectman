@@ -330,21 +330,12 @@ class TerminalView(Gtk.Box):
 
     def deactivate(self):
         """Gracefully stop the child; terminal output is preserved for context."""
-        print(f'[DEACT] deactivate() child_pid={self._child_pid}', flush=True)
         if self._child_pid is not None:
-            import subprocess
-            try:
-                r = subprocess.run(['ps', '-o', 'pid,pgid,ppid,cmd', '--no-header',
-                                    '-p', str(self._child_pid)], capture_output=True, text=True)
-                print(f'[DEACT] child process info:\n{r.stdout.strip()}', flush=True)
-            except Exception as e:
-                print(f'[DEACT] ps failed: {e}', flush=True)
             for pid in (-self._child_pid, self._child_pid):
                 try:
                     os.kill(pid, signal.SIGTERM)
-                    print(f'[DEACT] os.kill({pid}, SIGTERM) OK', flush=True)
-                except (ProcessLookupError, OSError) as e:
-                    print(f'[DEACT] os.kill({pid}, SIGTERM) => {e}', flush=True)
+                except (ProcessLookupError, OSError):
+                    pass
             # child-exited signal will fire and emit process-exited
 
     def _spawn(self, argv, env=None):
@@ -370,7 +361,6 @@ class TerminalView(Gtk.Box):
             self.emit('process-started')
 
     def _on_child_exited(self, terminal, status):
-        print(f'[DEACT] _on_child_exited status={status}', flush=True)
         self._child_pid = None
         if self._is_zellij and self._zellij_session:
             if zellij.session_alive(self._zellij_session):
