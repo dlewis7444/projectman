@@ -1,12 +1,14 @@
 # ProjectMan
 
-![ProjectMan](ProjectMan.jpg)
+![ProjectMan](images/ProjectMan.jpg)
 
 A GTK4/Adwaita desktop application for managing [Claude Code](https://claude.ai/code) sessions.
 
 ProjectMan displays a project sidebar on the left and an embedded VTE terminal on the right,
 running `claude` (or `zellij attach`) per project. Projects are directories under
 `~/.ProjectMan/projects/` (configurable via Settings).
+
+![Main window](images/screencap_main.jpg)
 
 ## Features
 
@@ -15,6 +17,9 @@ running `claude` (or `zellij attach`) per project. Projects are directories unde
 - Session history with expand/collapse per project
 - Zellij multiplexer integration (optional)
 - Project archive with search
+
+  ![Archive window](images/screencap_archive.jpg)
+
 - Ctrl+Tab to switch between recently active projects
 - Multiple color themes: Argonaut, Candyland, Phosphor, Salt Spray
 - Sidebar pin/collapse with persistent width
@@ -132,6 +137,8 @@ python -m pytest
 ```
 
 ## Configuration
+
+![Settings](images/screencap_settings.jpg)
 
 | Path | Purpose |
 |------|---------|
