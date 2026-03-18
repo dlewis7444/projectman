@@ -83,7 +83,7 @@ mkdir -p "$INSTALL_DIR"
 cp "$SCRIPT_DIR"/*.py    "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/style.css" "$INSTALL_DIR/"
 cp -r "$SCRIPT_DIR/themes" "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/ProjectMan.jpg" "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/images/ProjectMan.jpg" "$INSTALL_DIR/"
 cp -r "$SCRIPT_DIR/icons" "$INSTALL_DIR/"
 
 # ── wrapper script ─────────────────────────────────────────────────────────────
