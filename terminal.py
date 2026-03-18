@@ -328,8 +328,9 @@ class TerminalView(Gtk.Box):
         """Gracefully stop the child; terminal output is preserved for context."""
         if self._child_pid is not None:
             try:
-                os.kill(self._child_pid, signal.SIGTERM)
-            except ProcessLookupError:
+                # Kill the entire process group so bash wrapper + claude child both die.
+                os.killpg(os.getpgid(self._child_pid), signal.SIGTERM)
+            except (ProcessLookupError, OSError):
                 pass
             # child-exited signal will fire and emit process-exited
 
@@ -369,8 +370,8 @@ class TerminalView(Gtk.Box):
     def _kill_child(self):
         if self._child_pid is not None:
             try:
-                os.kill(self._child_pid, signal.SIGHUP)
-            except ProcessLookupError:
+                os.killpg(os.getpgid(self._child_pid), signal.SIGHUP)
+            except (ProcessLookupError, OSError):
                 pass
             self._child_pid = None
             self._terminal.reset(True, True)

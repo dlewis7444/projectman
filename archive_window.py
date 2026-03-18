@@ -14,7 +14,6 @@ class ArchiveWindow(Adw.Window):
         self.set_default_size(480, 400)
         self.set_transient_for(parent)
         self.set_modal(False)
-        self.connect('close-request', lambda w: w.destroy() or True)
         key_ctrl = Gtk.EventControllerKey.new()
         key_ctrl.connect('key-pressed', self._on_key_pressed)
         self.add_controller(key_ctrl)
