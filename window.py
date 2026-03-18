@@ -373,6 +373,7 @@ class AppWindow(Adw.ApplicationWindow):
     # --- deactivate (kill process, keep in sidebar as inactive) ---
 
     def _on_project_deactivate(self, sidebar, path):
+        print(f'[DEACT] _on_project_deactivate path={path!r} multiplexer={self._settings.multiplexer!r} in_terminals={path in self._terminals}', flush=True)
         if self._settings.multiplexer == 'zellij':
             import zellij as z
             import subprocess
