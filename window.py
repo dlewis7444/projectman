@@ -75,6 +75,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._paned.connect('notify::position', self._on_paned_position_notify)
 
         self._sidebar = Sidebar(store, history, watcher, version=self._version)
+        self._sidebar.set_ntfy_enabled(settings.ntfy_enabled)
         self._sidebar.connect('project-activated',   self._on_project_activated)
         self._sidebar.connect('session-activated',   self._on_session_activated)
         self._sidebar.connect('project-archive',     self._on_project_archive)
