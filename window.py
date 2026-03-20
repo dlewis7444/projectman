@@ -1,5 +1,6 @@
 import os
 import subprocess
+import shutil
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -30,6 +31,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._mru = []          # most-recently-used project paths, index 0 = current
         self._archive_win = None
         self._settings_win = None
+        self._paa_win = None
         self._prev_status: dict = {}
         self._zellij_watcher = zellij_watcher
         zellij_watcher.connect('sessions-changed', self._on_zellij_sessions_changed)
@@ -87,6 +89,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.connect('show-settings',       self._on_open_settings)
         self._sidebar.connect('project-create', self._on_project_create)
         self._sidebar.connect('project-rename', self._on_project_rename)
+        self._sidebar.connect('show-paa-window', self._on_show_paa_window)
         self._paned.set_start_child(self._sidebar)
 
         self._stack = Gtk.Stack()
@@ -127,6 +130,9 @@ class AppWindow(Adw.ApplicationWindow):
     def _on_close_request(self, window):
         self._settings.sidebar_width = self._sidebar_pos
         self._settings.save()
+        if self._paa_win is not None:
+            self._paa_win.close()
+            self._paa_win = None
         running = {path: tv for path, tv in self._terminals.items()
                    if tv._child_pid is not None}
         if not running:
@@ -437,6 +443,55 @@ class AppWindow(Adw.ApplicationWindow):
         self._store.restore(project)
         self._sidebar.refresh()
         self._sync_running_state()
+
+    def _on_show_paa_window(self, sidebar):
+        if self._paa_win is not None:
+            self._paa_win.present()
+            return
+
+        paa_dir = os.path.join(
+            self._settings.resolved_projects_dir, '.project-admin-agent'
+        )
+        os.makedirs(paa_dir, exist_ok=True)
+
+        # Copy harness files (always overwrite)
+        src_dir = os.path.join(os.path.dirname(__file__), 'paa')
+        shutil.copy2(os.path.join(src_dir, 'CLAUDE.md'),
+                      os.path.join(paa_dir, 'CLAUDE.md'))
+        shutil.copy2(os.path.join(src_dir, 'gather-context.sh'),
+                      os.path.join(paa_dir, 'gather-context.sh'))
+        os.chmod(os.path.join(paa_dir, 'gather-context.sh'), 0o755)
+
+        # Create USER.md only if missing
+        user_md = os.path.join(paa_dir, 'USER.md')
+        if not os.path.exists(user_md):
+            with open(user_md, 'w') as f:
+                f.write('<!-- Custom instructions for the Projects Admin Agent. -->\n')
+                f.write('<!-- This file is yours \u2014 ProjectMan will never overwrite it. -->\n')
+
+        # Run gather-context.sh
+        result = subprocess.run(
+            [os.path.join(paa_dir, 'gather-context.sh')],
+            cwd=paa_dir, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            import sys
+            print(f'[PAA] gather-context.sh failed: {result.stderr}',
+                  file=sys.stderr)
+            # Write fallback snapshot
+            with open(os.path.join(paa_dir, 'project-snapshot.md'), 'w') as f:
+                f.write('# Project Snapshot\n\n')
+                f.write(f'Error running gather-context.sh:\n```\n{result.stderr}\n```\n')
+
+        from paa_window import PAAWindow
+        self._paa_win = PAAWindow(
+            parent=self, settings=self._settings, store=self._store,
+        )
+        self._paa_win.connect(
+            'destroy', lambda w: setattr(self, '_paa_win', None)
+        )
+        self._paa_win.spawn_claude(paa_dir)
+        self._paa_win.present()
 
     # --- other terminal actions ---
 
