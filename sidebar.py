@@ -21,6 +21,7 @@ class Sidebar(Gtk.Box):
         'show-archive-window':  (GObject.SignalFlags.RUN_FIRST, None, ()),
         'show-settings':        (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-create':       (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        'show-paa-window':      (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
     def __init__(self, store, history, watcher, version=''):
@@ -34,16 +35,28 @@ class Sidebar(Gtk.Box):
         self._active_only = False
         self._filter_text = ''
 
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        btn_row.set_halign(Gtk.Align.END)
+        btn_row.set_margin_top(6)
+        btn_row.set_margin_end(8)
+        btn_row.set_margin_bottom(2)
+
         add_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
         add_btn.add_css_class('flat')
         add_btn.add_css_class('circular')
-        add_btn.set_halign(Gtk.Align.END)
-        add_btn.set_margin_top(6)
-        add_btn.set_margin_end(8)
-        add_btn.set_margin_bottom(2)
         add_btn.set_tooltip_text('New Project')
         add_btn.connect('clicked', self._on_add_project)
-        self.append(add_btn)
+        btn_row.append(add_btn)
+
+        paa_btn = Gtk.Button()
+        paa_btn.set_child(Gtk.Label(label='\u2728'))
+        paa_btn.add_css_class('flat')
+        paa_btn.add_css_class('circular')
+        paa_btn.set_tooltip_text('Projects Admin Agent')
+        paa_btn.connect('clicked', lambda b: self.emit('show-paa-window'))
+        btn_row.append(paa_btn)
+
+        self.append(btn_row)
 
         self._scrolled = Gtk.ScrolledWindow()
         self._scrolled.set_vexpand(True)
