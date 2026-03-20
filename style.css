@@ -49,3 +49,25 @@ row:hover .project-row-actions { opacity: 1; }
     border-radius: 20px;
     margin: 2px 2px;
 }
+
+/* ── PAA (Projects Admin Agent) window ──────────────────────────────── */
+.paa-widget {
+    border: 1px solid alpha(currentColor, 0.15);
+    border-radius: 8px;
+    padding: 12px 16px;
+    min-width: 140px;
+}
+.paa-widget-title {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; opacity: 0.55;
+}
+.paa-widget-count {
+    font-size: 22px; font-weight: 700;
+}
+.paa-widget-sub {
+    font-size: 14px; opacity: 0.55;
+}
+.paa-status-bar {
+    padding: 6px 8px 2px;
+    font-size: 10px; opacity: 0.55;
+}
