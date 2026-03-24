@@ -48,13 +48,16 @@ class Sidebar(Gtk.Box):
         add_btn.connect('clicked', self._on_add_project)
         btn_row.append(add_btn)
 
-        paa_btn = Gtk.Button()
-        paa_btn.set_child(Gtk.Label(label='\u2728'))
-        paa_btn.add_css_class('flat')
-        paa_btn.add_css_class('circular')
-        paa_btn.set_tooltip_text('Projects Admin Agent')
-        paa_btn.connect('clicked', lambda b: self.emit('show-paa-window'))
-        btn_row.append(paa_btn)
+        self._paa_btn = Gtk.Button()
+        self._paa_btn_label = Gtk.Label(label='\u2728')
+        self._paa_btn.set_child(self._paa_btn_label)
+        self._paa_btn.add_css_class('flat')
+        self._paa_btn.add_css_class('circular')
+        self._paa_btn.set_tooltip_text('Projects Admin Agent')
+        self._paa_btn.connect('clicked', lambda b: self.emit('show-paa-window'))
+        btn_row.append(self._paa_btn)
+        self._paa_throb_id = None
+        self._paa_throb_on = True
 
         self.append(btn_row)
 
@@ -211,6 +214,39 @@ class Sidebar(Gtk.Box):
 
     def start_polling(self):
         self._resource_bar.start_polling()
+
+    def set_paa_pending_count(self, count):
+        """Update PAA button badge and throb state."""
+        if count > 0:
+            self._paa_btn_label.set_label(f'\u2728 {count}')
+            self._paa_btn.set_tooltip_text(
+                f'Projects Admin Agent \u2014 {count} pending'
+            )
+            self._start_paa_throb()
+        else:
+            self._paa_btn_label.set_label('\u2728')
+            self._paa_btn.set_tooltip_text('Projects Admin Agent')
+            self._stop_paa_throb()
+
+    def _start_paa_throb(self):
+        if self._paa_throb_id is not None:
+            return
+        self._paa_throb_on = True
+        self._paa_throb_id = GLib.timeout_add(800, self._paa_throb_tick)
+
+    def _paa_throb_tick(self):
+        self._paa_throb_on = not self._paa_throb_on
+        if self._paa_throb_on:
+            self._paa_btn.remove_css_class('paa-btn-dim')
+        else:
+            self._paa_btn.add_css_class('paa-btn-dim')
+        return GLib.SOURCE_CONTINUE
+
+    def _stop_paa_throb(self):
+        if self._paa_throb_id is not None:
+            GLib.source_remove(self._paa_throb_id)
+            self._paa_throb_id = None
+        self._paa_btn.remove_css_class('paa-btn-dim')
 
     def _on_add_project(self, button):
         if self._new_project_row is not None:
