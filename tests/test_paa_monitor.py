@@ -156,3 +156,53 @@ def test_scan_project_clean(tmp_path):
     (proj / 'CLAUDE.md').write_text('# Clean project\n')
     items = scan_project('myproj', str(proj))
     assert len(items) == 0
+
+
+from paa_ledger import Ledger
+from paa_monitor import PAAMonitor
+from settings import Settings
+from model import ProjectStore
+
+
+def test_run_scan_populates_ledger(tmp_path):
+    """run_scan detects issues and adds them to the ledger."""
+    projects_dir = tmp_path / 'projects'
+    projects_dir.mkdir()
+    (projects_dir / 'alpha').mkdir()  # no CLAUDE.md, no .git
+    (projects_dir / 'beta').mkdir()
+    (projects_dir / 'beta' / '.git').mkdir()
+    (projects_dir / 'beta' / 'CLAUDE.md').write_text('# Beta\n')
+
+    settings = Settings(projects_dir=str(projects_dir))
+    store = ProjectStore(settings)
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
+    monitor = PAAMonitor(store, ledger, settings)
+
+    monitor.run_scan()
+
+    assert ledger.pending_count >= 1  # alpha has issues
+    types = {i.type for i in ledger.pending_items()}
+    assert 'missing-claude-md' in types or 'no-git' in types
+
+
+def test_run_scan_sweeps_resolved(tmp_path):
+    """Items auto-resolve when the issue disappears."""
+    projects_dir = tmp_path / 'projects'
+    projects_dir.mkdir()
+    proj = projects_dir / 'alpha'
+    proj.mkdir()
+    # First scan: no CLAUDE.md
+    settings = Settings(projects_dir=str(projects_dir))
+    store = ProjectStore(settings)
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
+    monitor = PAAMonitor(store, ledger, settings)
+    monitor.run_scan()
+    assert ledger.pending_count >= 1
+
+    # Fix the issue
+    (proj / 'CLAUDE.md').write_text('# Alpha\n')
+    (proj / '.git').mkdir()
+
+    # Second scan: should resolve
+    monitor.run_scan()
+    assert ledger.pending_count == 0
