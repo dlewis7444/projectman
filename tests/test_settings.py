@@ -100,3 +100,23 @@ def test_load_ignores_old_resume_last_project_key(tmp_path):
     s = Settings.load(str(path))
     # Old key is ignored; new field uses dataclass default (True)
     assert s.resume_projects is True
+
+
+def test_paa_defaults():
+    s = Settings()
+    assert s.paa_enabled is False
+    assert s.paa_loop_interval_minutes == 30
+    assert s.paa_budget_tokens == 100000
+    assert s.paa_budget_used == 0
+    assert s.paa_budget_unlimited is False
+    assert s.paa_allow_haiku is True
+    assert s.paa_autonomy_level == 'suggest'
+
+
+def test_paa_roundtrip(tmp_path):
+    path = str(tmp_path / 'settings.json')
+    s = Settings(paa_enabled=True, paa_loop_interval_minutes=15)
+    s.save(path)
+    s2 = Settings.load(path)
+    assert s2.paa_enabled is True
+    assert s2.paa_loop_interval_minutes == 15

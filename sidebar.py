@@ -48,13 +48,14 @@ class Sidebar(Gtk.Box):
         add_btn.connect('clicked', self._on_add_project)
         btn_row.append(add_btn)
 
-        paa_btn = Gtk.Button()
-        paa_btn.set_child(Gtk.Label(label='\u2728'))
-        paa_btn.add_css_class('flat')
-        paa_btn.add_css_class('circular')
-        paa_btn.set_tooltip_text('Projects Admin Agent')
-        paa_btn.connect('clicked', lambda b: self.emit('show-paa-window'))
-        btn_row.append(paa_btn)
+        self._paa_btn = Gtk.Button()
+        self._paa_btn_label = Gtk.Label(label='\u2728')
+        self._paa_btn.set_child(self._paa_btn_label)
+        self._paa_btn.add_css_class('flat')
+        self._paa_btn.add_css_class('circular')
+        self._paa_btn.set_tooltip_text('Projects Admin Agent')
+        self._paa_btn.connect('clicked', lambda b: self.emit('show-paa-window'))
+        btn_row.append(self._paa_btn)
 
         self.append(btn_row)
 
@@ -211,6 +212,26 @@ class Sidebar(Gtk.Box):
 
     def start_polling(self):
         self._resource_bar.start_polling()
+
+    def set_paa_pending_count(self, count):
+        """Update PAA button label and tooltip only (no throb change)."""
+        if count > 0:
+            self._paa_btn_label.set_label(f'\u2728 {count}')
+            self._paa_btn.set_tooltip_text(
+                f'Projects Admin Agent \u2014 {count} pending'
+            )
+        else:
+            self._paa_btn_label.set_label('\u2728')
+            self._paa_btn.set_tooltip_text('Projects Admin Agent')
+            self.stop_paa_throb()
+
+    def start_paa_throb(self):
+        """Start the golden glow animation."""
+        self._paa_btn.add_css_class('paa-btn-throb')
+
+    def stop_paa_throb(self):
+        """Stop the golden glow animation."""
+        self._paa_btn.remove_css_class('paa-btn-throb')
 
     def _on_add_project(self, button):
         if self._new_project_row is not None:

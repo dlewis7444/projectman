@@ -13,7 +13,7 @@ from window import AppWindow
 from settings import Settings
 
 
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 
 
 class ProjectManApp(Adw.Application):
@@ -83,15 +83,23 @@ class ProjectManApp(Adw.Application):
         self._projects_watcher = ProjectsWatcher()
         self._projects_watcher.start(self._settings.resolved_projects_dir)
         self._last_projects_dir = self._settings.resolved_projects_dir
+        from paa_ledger import Ledger
+        from paa_monitor import PAAMonitor
+        self._paa_ledger = Ledger()
+        self._paa_ledger.load()
+        self._paa_monitor = PAAMonitor(self._store, self._paa_ledger, self._settings)
         self._window = AppWindow(
             self, self._store, self._history, self._watcher,
-            self._settings, self._zellij_watcher, version=VERSION
+            self._settings, self._zellij_watcher, version=VERSION,
+            paa_ledger=self._paa_ledger, paa_monitor=self._paa_monitor,
         )
         self._load_theme_css()
         self._projects_watcher.connect('projects-changed', self._on_projects_changed)
         self.connect('settings-changed', self._on_settings_changed)
         self._window.present()
         self._window._restore_session()
+        if self._settings.paa_enabled:
+            self._paa_monitor.start()
 
     def _load_theme_css(self):
         display = Gdk.Display.get_default()
@@ -122,11 +130,15 @@ class ProjectManApp(Adw.Application):
             self._window._sidebar.refresh()
             self._window._sync_running_state()
             self._last_projects_dir = new_dir
+        if hasattr(self, '_paa_monitor'):
+            self._paa_monitor.restart()
 
     def _on_projects_changed(self, watcher):
         self._window._sidebar.refresh()
         self._window._sync_running_state()
         self._refresh_paa_snapshot()
+        if hasattr(self, '_paa_monitor') and self._settings.paa_enabled:
+            self._paa_monitor.run_scan()
 
     def _refresh_paa_snapshot(self):
         paa_dir = os.path.join(

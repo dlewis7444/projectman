@@ -211,6 +211,11 @@ class StatusWatcher(GObject.GObject):
                         key = os.path.realpath(cwd)
                     except OSError:
                         continue
+                    # Map worktree paths back to parent project
+                    wt = '/.worktrees/'
+                    wt_idx = key.find(wt)
+                    if wt_idx != -1:
+                        key = key[:wt_idx]
                     new_status[key] = StatusSnapshot(
                         event=data.get('event', ''),
                         cwd=cwd,
