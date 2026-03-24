@@ -6,7 +6,7 @@ from settings import Settings, DEFAULT_SETTINGS_PATH
 
 def test_defaults():
     s = Settings()
-    assert s.projects_dir == '~/.ProjectMan/Projects'
+    assert s.projects_dir == '~/.ProjectMan/projects'
     assert s.claude_binary == ''
     assert s.resume_projects is True
     assert 'resume_last_project' not in Settings.__dataclass_fields__
@@ -18,7 +18,7 @@ def test_defaults():
 
 def test_resolved_projects_dir():
     s = Settings()
-    assert s.resolved_projects_dir == os.path.expanduser('~/.ProjectMan/Projects')
+    assert s.resolved_projects_dir == os.path.expanduser('~/.ProjectMan/projects')
 
 
 def test_resolved_claude_binary_empty():

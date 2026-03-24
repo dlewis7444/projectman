@@ -82,6 +82,7 @@ info "Installing to $INSTALL_DIR ..."
 mkdir -p "$INSTALL_DIR"
 cp "$SCRIPT_DIR"/*.py    "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/style.css" "$INSTALL_DIR/"
+cp -r "$SCRIPT_DIR/paa"    "$INSTALL_DIR/"
 cp -r "$SCRIPT_DIR/themes" "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/images/ProjectMan.jpg" "$INSTALL_DIR/"
 cp -r "$SCRIPT_DIR/icons" "$INSTALL_DIR/"
@@ -98,6 +99,8 @@ chmod +x "$BIN_DIR/projectman"
 # ── desktop entry ──────────────────────────────────────────────────────────────
 info "Installing desktop entry ..."
 mkdir -p "$DESKTOP_DIR"
+# Remove legacy desktop file from older installs (renamed to io.github.projectman)
+rm -f "$DESKTOP_DIR/projectman.desktop"
 cat > "$DESKTOP_DIR/io.github.projectman.desktop" <<EOF
 [Desktop Entry]
 Name=ProjectMan
