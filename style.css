@@ -88,6 +88,7 @@ row:hover .project-row-actions { opacity: 1; }
 .paa-card-type-info { background: alpha(#c084fc, 0.15); }
 .paa-card-type-warning { background: alpha(#ffaa6e, 0.15); }
 .paa-card-type-action { background: alpha(#ff6eb4, 0.15); }
+.paa-card-type-ai { background: alpha(#67e8f9, 0.15); }
 .paa-card-project { font-weight: 700; font-size: 13px; }
 .paa-card-summary { font-size: 12px; }
 .paa-card-evidence {

@@ -8,12 +8,17 @@ _TYPE_LABELS = {
     'missing-claude-md': 'Missing CLAUDE.md',
     'context-drift': 'Context Drift',
     'no-git': 'No Git Repo',
+    # Phase 2 AI checks
+    'ai-semantic-staleness': 'Semantic Staleness',
+    'ai-dependency-outdated': 'Outdated Dependency',
+    'ai-health-concern': 'Health Concern',
 }
 
 _SEVERITY_CSS = {
     'info': 'paa-card-type-info',
     'warning': 'paa-card-type-warning',
     'action-needed': 'paa-card-type-action',
+    'ai-suggestion': 'paa-card-type-ai',
 }
 
 
