@@ -448,6 +448,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._sync_running_state()
 
     def _on_show_paa_window(self, sidebar):
+        self._sidebar.stop_paa_throb()
         if self._paa_win is not None:
             self._paa_win.present()
             return
@@ -459,11 +460,18 @@ class AppWindow(Adw.ApplicationWindow):
             ledger=self._paa_ledger,
             settings=self._settings,
             on_close=lambda: setattr(self, '_paa_win', None),
+            on_action=self._on_paa_card_action,
         )
         self._paa_win.present()
 
+    def _on_paa_card_action(self, pending_count):
+        """Card dismissed/acknowledged — update count but don't throb."""
+        self._sidebar.set_paa_pending_count(pending_count)
+
     def _on_paa_findings_changed(self, monitor, pending_count):
         self._sidebar.set_paa_pending_count(pending_count)
+        if pending_count > 0 and self._paa_win is None:
+            self._sidebar.start_paa_throb()
         if self._paa_win is not None:
             self._paa_win.refresh_from_scan()
 

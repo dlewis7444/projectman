@@ -20,11 +20,12 @@ _SEVERITY_CSS = {
 class PAACardWindow(Adw.Window):
     """Card-based PAA window showing actionable findings."""
 
-    def __init__(self, parent, ledger, settings, on_close=None):
+    def __init__(self, parent, ledger, settings, on_close=None, on_action=None):
         super().__init__()
         self._ledger = ledger
         self._settings = settings
         self._on_close_cb = on_close
+        self._on_action_cb = on_action
         self._closing = False
 
         self.set_title('Projects Admin Agent')
@@ -84,7 +85,8 @@ class PAACardWindow(Adw.Window):
         self._refresh()
 
     def _refresh(self):
-        # Clear cards
+        # Hide before removing to cancel pending tooltip events
+        self._scrolled.set_visible(False)
         while True:
             child = self._card_box.get_first_child()
             if child is None:
@@ -187,11 +189,15 @@ class PAACardWindow(Adw.Window):
     def _on_dismiss(self, item_id):
         self._ledger.update_status(item_id, 'dismissed')
         self._ledger.save()
+        if self._on_action_cb:
+            self._on_action_cb(self._ledger.pending_count)
         GLib.idle_add(self._refresh)
 
     def _on_acknowledge(self, item_id):
         self._ledger.update_status(item_id, 'approved')
         self._ledger.save()
+        if self._on_action_cb:
+            self._on_action_cb(self._ledger.pending_count)
         GLib.idle_add(self._refresh)
 
     def refresh_from_scan(self):
