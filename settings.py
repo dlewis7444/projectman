@@ -26,6 +26,7 @@ class Settings:
     paa_budget_unlimited: bool = False
     paa_allow_haiku: bool = True
     paa_autonomy_level: str = 'suggest'
+    paa_budget_month: str = ''
     ntfy_enabled: bool = False
     ntfy_topic: str = ''
 
