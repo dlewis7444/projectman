@@ -184,7 +184,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         # -- Budget group (Phase 2) --
         budget_group = Adw.PreferencesGroup(
             title='Token Budget',
-            description='AI-powered analysis controls (Phase 2 — not yet active)',
+            description='Controls for AI-powered Haiku analysis',
         )
         page.add(budget_group)
 
@@ -193,14 +193,17 @@ class SettingsWindow(Adw.PreferencesDialog):
             subtitle='Warning: removes cost guardrails for AI analysis',
         )
         self._paa_unlimited_row.set_active(self._settings.paa_budget_unlimited)
-        self._paa_unlimited_row.set_sensitive(False)  # Phase 2
+        self._paa_unlimited_row.set_sensitive(self._settings.paa_enabled)
+        self._paa_unlimited_row.connect('notify::active', self._on_paa_unlimited_toggled)
+        if self._settings.paa_budget_unlimited:
+            self._paa_unlimited_row.add_css_class('error')
         budget_group.add(self._paa_unlimited_row)
 
         self._paa_budget_row = Adw.ActionRow(
             title='Monthly Token Budget',
             subtitle='~$0.03 per 100K tokens at Haiku rates',
         )
-        self._paa_budget_row.set_sensitive(False)  # Phase 2
+        self._paa_budget_row.set_sensitive(self._settings.paa_enabled and not self._settings.paa_budget_unlimited)
         self._paa_budget_scale = Gtk.Scale.new_with_range(
             Gtk.Orientation.HORIZONTAL, 10000, 1000000, 10000
         )
@@ -212,13 +215,14 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_budget_scale.add_mark(100000, Gtk.PositionType.BOTTOM, '100K')
         self._paa_budget_scale.add_mark(500000, Gtk.PositionType.BOTTOM, '500K')
         self._paa_budget_scale.add_mark(1000000, Gtk.PositionType.BOTTOM, '1M')
+        self._paa_budget_scale.connect('value-changed', self._on_paa_budget_changed)
         self._paa_budget_row.add_suffix(self._paa_budget_scale)
         budget_group.add(self._paa_budget_row)
 
         # -- AI Analysis group (Phase 2) --
         ai_group = Adw.PreferencesGroup(
             title='AI Analysis',
-            description='These controls take effect when AI-powered checks are added',
+            description='AI model and autonomy settings',
         )
         page.add(ai_group)
 
@@ -227,7 +231,8 @@ class SettingsWindow(Adw.PreferencesDialog):
             subtitle='Cheaper model for initial analysis passes',
         )
         self._paa_haiku_row.set_active(self._settings.paa_allow_haiku)
-        self._paa_haiku_row.set_sensitive(False)  # Phase 2
+        self._paa_haiku_row.set_sensitive(self._settings.paa_enabled)
+        self._paa_haiku_row.connect('notify::active', self._on_paa_haiku_toggled)
         ai_group.add(self._paa_haiku_row)
 
         self._paa_autonomy_row = Adw.ComboRow(title='Autonomy Level')
@@ -238,7 +243,8 @@ class SettingsWindow(Adw.PreferencesDialog):
         idx = _autonomy_options.index(self._settings.paa_autonomy_level) \
             if self._settings.paa_autonomy_level in _autonomy_options else 0
         self._paa_autonomy_row.set_selected(idx)
-        self._paa_autonomy_row.set_sensitive(False)  # Phase 2
+        self._paa_autonomy_row.set_sensitive(self._settings.paa_enabled)
+        self._paa_autonomy_row.connect('notify::selected', self._on_paa_autonomy_changed)
         ai_group.add(self._paa_autonomy_row)
 
     def _build_appearance_page(self):
@@ -367,13 +373,46 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._save_and_notify()
 
     def _on_paa_enabled_toggled(self, row, _param):
-        self._settings.paa_enabled = row.get_active()
-        self._paa_interval_row.set_sensitive(row.get_active())
+        enabled = row.get_active()
+        self._settings.paa_enabled = enabled
+        self._paa_interval_row.set_sensitive(enabled)
+        self._paa_unlimited_row.set_sensitive(enabled)
+        self._paa_budget_row.set_sensitive(
+            enabled and not self._settings.paa_budget_unlimited
+        )
+        self._paa_haiku_row.set_sensitive(enabled)
+        self._paa_autonomy_row.set_sensitive(enabled)
         self._save_and_notify()
 
     def _on_paa_interval_changed(self, scale):
         self._settings.paa_loop_interval_minutes = int(scale.get_value())
         self._save_and_notify()
+
+    def _on_paa_unlimited_toggled(self, row, _param):
+        self._settings.paa_budget_unlimited = row.get_active()
+        self._paa_budget_row.set_sensitive(
+            self._settings.paa_enabled and not row.get_active()
+        )
+        if row.get_active():
+            self._paa_unlimited_row.add_css_class('error')
+        else:
+            self._paa_unlimited_row.remove_css_class('error')
+        self._save_and_notify()
+
+    def _on_paa_budget_changed(self, scale):
+        self._settings.paa_budget_tokens = int(scale.get_value())
+        self._save_and_notify()
+
+    def _on_paa_haiku_toggled(self, row, _param):
+        self._settings.paa_allow_haiku = row.get_active()
+        self._save_and_notify()
+
+    def _on_paa_autonomy_changed(self, row, _param):
+        options = ['suggest', 'auto-safe', 'full']
+        idx = row.get_selected()
+        if 0 <= idx < len(options):
+            self._settings.paa_autonomy_level = options[idx]
+            self._save_and_notify()
 
     def _on_multiplexer_changed(self, row, _param):
         options = ['none', 'zellij', 'tmux', 'screen']
