@@ -1,6 +1,5 @@
 import os
 import subprocess
-import shutil
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -19,7 +18,7 @@ from session import (
 
 
 class AppWindow(Adw.ApplicationWindow):
-    def __init__(self, app, store, history, watcher, settings, zellij_watcher, version=''):
+    def __init__(self, app, store, history, watcher, settings, zellij_watcher, version='', paa_ledger=None, paa_monitor=None):
         super().__init__(application=app)
         self._store = store
         self._history = history
@@ -34,6 +33,10 @@ class AppWindow(Adw.ApplicationWindow):
         self._paa_win = None
         self._prev_status: dict = {}
         self._zellij_watcher = zellij_watcher
+        self._paa_ledger = paa_ledger
+        self._paa_monitor = paa_monitor
+        if paa_monitor:
+            paa_monitor.connect('findings-changed', self._on_paa_findings_changed)
         zellij_watcher.connect('sessions-changed', self._on_zellij_sessions_changed)
 
         self.set_default_size(1200, 750)
@@ -448,58 +451,21 @@ class AppWindow(Adw.ApplicationWindow):
         if self._paa_win is not None:
             self._paa_win.present()
             return
-
-        paa_dir = os.path.join(
-            self._settings.resolved_projects_dir, '.project-admin-agent'
-        )
-        system_dir = os.path.join(paa_dir, '.system')
-        os.makedirs(system_dir, exist_ok=True)
-
-        # Copy harness files into .system/ (always overwrite)
-        src_dir = os.path.join(os.path.dirname(__file__), 'paa')
-        shutil.copy2(os.path.join(src_dir, 'CLAUDE.md'),
-                      os.path.join(paa_dir, 'CLAUDE.md'))
-        shutil.copy2(os.path.join(src_dir, 'CLAUDE-SUPPLEMENT.md'),
-                      os.path.join(system_dir, 'CLAUDE-SUPPLEMENT.md'))
-        shutil.copy2(os.path.join(src_dir, 'gather-context.sh'),
-                      os.path.join(system_dir, 'gather-context.sh'))
-        os.chmod(os.path.join(system_dir, 'gather-context.sh'), 0o755)
-
-        # Create user-owned files only if missing
-        for fname, content in [
-            ('USER.md',
-             '<!-- Custom instructions for the Projects Admin Agent. -->\n'
-             '<!-- This file is yours \u2014 ProjectMan will never overwrite it. -->\n'),
-            ('paa-journal.md',
-             '<!-- PAA session journal. Written by the agent, never overwritten by PM. -->\n'),
-        ]:
-            fpath = os.path.join(paa_dir, fname)
-            if not os.path.exists(fpath):
-                with open(fpath, 'w') as f:
-                    f.write(content)
-
-        # Run gather-context.sh
-        result = subprocess.run(
-            [os.path.join(system_dir, 'gather-context.sh')],
-            cwd=system_dir, capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            import sys
-            print(f'[PAA] gather-context.sh failed: {result.stderr}',
-                  file=sys.stderr)
-            # Write fallback snapshot
-            with open(os.path.join(system_dir, 'project-snapshot.md'), 'w') as f:
-                f.write('# Project Snapshot\n\n')
-                f.write(f'Error running gather-context.sh:\n```\n{result.stderr}\n```\n')
-
-        from paa_window import PAAWindow
-        self._paa_win = PAAWindow(
-            parent=self, settings=self._settings, store=self._store,
-            watcher=self._watcher,
+        if self._paa_ledger is None:
+            return
+        from paa_card_window import PAACardWindow
+        self._paa_win = PAACardWindow(
+            parent=self,
+            ledger=self._paa_ledger,
+            settings=self._settings,
             on_close=lambda: setattr(self, '_paa_win', None),
         )
-        self._paa_win.spawn_claude(paa_dir)
         self._paa_win.present()
+
+    def _on_paa_findings_changed(self, monitor, pending_count):
+        self._sidebar.set_paa_pending_count(pending_count)
+        if self._paa_win is not None:
+            self._paa_win.refresh_from_scan()
 
     # --- other terminal actions ---
 
