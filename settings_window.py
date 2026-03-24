@@ -16,6 +16,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         self.set_title('Settings')
         self._build_general_page()
         self._build_terminal_page()
+        self._build_paa_page()
         self._build_appearance_page()
         self._build_about_page()
         self._build_claude_json_page()
@@ -137,6 +138,83 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._multiplexer_row.set_selected(selected)
         self._multiplexer_row.connect('notify::selected', self._on_multiplexer_changed)
         behavior_group.add(self._multiplexer_row)
+
+    def _build_paa_page(self):
+        page = Adw.PreferencesPage(
+            title='PAA', icon_name='applications-system-symbolic'
+        )
+        self.add(page)
+
+        # -- Enable group --
+        enable_group = Adw.PreferencesGroup(
+            title='Projects Admin Agent',
+            description='Proactive background monitor for project health',
+        )
+        page.add(enable_group)
+
+        self._paa_enabled_row = Adw.SwitchRow(
+            title='Enable PAA',
+            subtitle='Scans projects for issues (filesystem only — no API cost)',
+        )
+        self._paa_enabled_row.set_active(self._settings.paa_enabled)
+        self._paa_enabled_row.connect('notify::active', self._on_paa_enabled_toggled)
+        enable_group.add(self._paa_enabled_row)
+
+        self._paa_interval_row = Adw.SpinRow.new_with_range(5, 120, 5)
+        self._paa_interval_row.set_title('Scan Interval (minutes)')
+        self._paa_interval_row.set_subtitle('How often PAA checks projects for issues')
+        self._paa_interval_row.set_value(self._settings.paa_loop_interval_minutes)
+        self._paa_interval_row.set_sensitive(self._settings.paa_enabled)
+        self._paa_interval_row.connect('notify::value', self._on_paa_interval_changed)
+        enable_group.add(self._paa_interval_row)
+
+        # -- Budget group (Phase 2) --
+        budget_group = Adw.PreferencesGroup(
+            title='Token Budget',
+            description='AI-powered analysis controls (Phase 2 — not yet active)',
+        )
+        page.add(budget_group)
+
+        self._paa_unlimited_row = Adw.SwitchRow(
+            title='Unlimited Budget',
+            subtitle='Warning: removes cost guardrails for AI analysis',
+        )
+        self._paa_unlimited_row.set_active(self._settings.paa_budget_unlimited)
+        self._paa_unlimited_row.set_sensitive(False)  # Phase 2
+        budget_group.add(self._paa_unlimited_row)
+
+        self._paa_budget_row = Adw.SpinRow.new_with_range(10000, 1000000, 10000)
+        self._paa_budget_row.set_title('Monthly Token Budget')
+        self._paa_budget_row.set_subtitle('~$0.03 per 100K tokens at Haiku rates')
+        self._paa_budget_row.set_value(self._settings.paa_budget_tokens)
+        self._paa_budget_row.set_sensitive(False)  # Phase 2
+        budget_group.add(self._paa_budget_row)
+
+        # -- AI Analysis group (Phase 2) --
+        ai_group = Adw.PreferencesGroup(
+            title='AI Analysis',
+            description='These controls take effect when AI-powered checks are added',
+        )
+        page.add(ai_group)
+
+        self._paa_haiku_row = Adw.SwitchRow(
+            title='Use Haiku for Triage',
+            subtitle='Cheaper model for initial analysis passes',
+        )
+        self._paa_haiku_row.set_active(self._settings.paa_allow_haiku)
+        self._paa_haiku_row.set_sensitive(False)  # Phase 2
+        ai_group.add(self._paa_haiku_row)
+
+        self._paa_autonomy_row = Adw.ComboRow(title='Autonomy Level')
+        self._paa_autonomy_row.set_model(Gtk.StringList.new([
+            'Suggest Only', 'Auto-apply Safe Fixes', 'Full Autonomy',
+        ]))
+        _autonomy_options = ['suggest', 'auto-safe', 'full']
+        idx = _autonomy_options.index(self._settings.paa_autonomy_level) \
+            if self._settings.paa_autonomy_level in _autonomy_options else 0
+        self._paa_autonomy_row.set_selected(idx)
+        self._paa_autonomy_row.set_sensitive(False)  # Phase 2
+        ai_group.add(self._paa_autonomy_row)
 
     def _build_appearance_page(self):
         page = Adw.PreferencesPage(
@@ -261,6 +339,15 @@ class SettingsWindow(Adw.PreferencesDialog):
 
     def _on_ntfy_topic_apply(self, row):
         self._settings.ntfy_topic = row.get_text().strip()
+        self._save_and_notify()
+
+    def _on_paa_enabled_toggled(self, row, _param):
+        self._settings.paa_enabled = row.get_active()
+        self._paa_interval_row.set_sensitive(row.get_active())
+        self._save_and_notify()
+
+    def _on_paa_interval_changed(self, row, _param):
+        self._settings.paa_loop_interval_minutes = int(row.get_value())
         self._save_and_notify()
 
     def _on_multiplexer_changed(self, row, _param):
