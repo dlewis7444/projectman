@@ -1,7 +1,6 @@
 import os
 import shutil
 import subprocess
-import stat
 
 
 def _setup_paa_dir(tmp_path):
@@ -15,14 +14,18 @@ def _setup_paa_dir(tmp_path):
 
     paa_dir = projects_dir / '.project-admin-agent'
     paa_dir.mkdir(exist_ok=True)
+    system_dir = paa_dir / '.system'
+    system_dir.mkdir(exist_ok=True)
 
     # Copy harness files
     src_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'paa')
     shutil.copy2(os.path.join(src_dir, 'CLAUDE.md'),
                   str(paa_dir / 'CLAUDE.md'))
+    shutil.copy2(os.path.join(src_dir, 'CLAUDE-SUPPLEMENT.md'),
+                  str(system_dir / 'CLAUDE-SUPPLEMENT.md'))
     shutil.copy2(os.path.join(src_dir, 'gather-context.sh'),
-                  str(paa_dir / 'gather-context.sh'))
-    os.chmod(str(paa_dir / 'gather-context.sh'), 0o755)
+                  str(system_dir / 'gather-context.sh'))
+    os.chmod(str(system_dir / 'gather-context.sh'), 0o755)
 
     return projects_dir, paa_dir
 
@@ -36,7 +39,7 @@ def test_harness_copies_claude_md(tmp_path):
 
 def test_harness_copies_gather_script(tmp_path):
     _, paa_dir = _setup_paa_dir(tmp_path)
-    script = paa_dir / 'gather-context.sh'
+    script = paa_dir / '.system' / 'gather-context.sh'
     assert script.exists()
     assert os.access(str(script), os.X_OK)
 
@@ -65,14 +68,35 @@ def test_user_md_not_overwritten(tmp_path):
     assert user_md.read_text() == 'my custom instructions'
 
 
+def test_journal_created_when_missing(tmp_path):
+    _, paa_dir = _setup_paa_dir(tmp_path)
+    journal = paa_dir / 'paa-journal.md'
+    assert not journal.exists()
+    if not journal.exists():
+        journal.write_text(
+            '<!-- PAA session journal. Written by the agent, never overwritten by PM. -->\n'
+        )
+    assert journal.exists()
+
+
+def test_journal_not_overwritten(tmp_path):
+    _, paa_dir = _setup_paa_dir(tmp_path)
+    journal = paa_dir / 'paa-journal.md'
+    journal.write_text('## Session 2026-03-24\n- did stuff\n')
+    if not journal.exists():
+        journal.write_text('overwritten!')
+    assert 'did stuff' in journal.read_text()
+
+
 def test_gather_context_produces_snapshot(tmp_path):
     projects_dir, paa_dir = _setup_paa_dir(tmp_path)
+    system_dir = paa_dir / '.system'
     result = subprocess.run(
-        [str(paa_dir / 'gather-context.sh')],
-        cwd=str(paa_dir), capture_output=True, text=True,
+        [str(system_dir / 'gather-context.sh')],
+        cwd=str(system_dir), capture_output=True, text=True,
     )
     assert result.returncode == 0
-    snapshot = (paa_dir / 'project-snapshot.md').read_text()
+    snapshot = (system_dir / 'project-snapshot.md').read_text()
     assert 'alpha' in snapshot
     assert 'beta' in snapshot
     assert 'Active: 2' in snapshot
@@ -81,11 +105,12 @@ def test_gather_context_produces_snapshot(tmp_path):
 
 def test_gather_context_excludes_hidden_dirs(tmp_path):
     projects_dir, paa_dir = _setup_paa_dir(tmp_path)
+    system_dir = paa_dir / '.system'
     subprocess.run(
-        [str(paa_dir / 'gather-context.sh')],
-        cwd=str(paa_dir), capture_output=True,
+        [str(system_dir / 'gather-context.sh')],
+        cwd=str(system_dir), capture_output=True,
     )
-    snapshot = (paa_dir / 'project-snapshot.md').read_text()
+    snapshot = (system_dir / 'project-snapshot.md').read_text()
     assert '.archive' not in snapshot
     assert '.project-admin-agent' not in snapshot
 

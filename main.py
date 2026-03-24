@@ -4,6 +4,7 @@ gi.require_version('Adw', '1')
 gi.require_version('Vte', '3.91')
 
 import os
+import subprocess
 import sys
 from gi.repository import Gtk, Adw, Gdk, Gio, GObject
 
@@ -12,7 +13,7 @@ from window import AppWindow
 from settings import Settings
 
 
-VERSION = '0.1.5'
+VERSION = '0.2.0'
 
 
 class ProjectManApp(Adw.Application):
@@ -125,6 +126,18 @@ class ProjectManApp(Adw.Application):
     def _on_projects_changed(self, watcher):
         self._window._sidebar.refresh()
         self._window._sync_running_state()
+        self._refresh_paa_snapshot()
+
+    def _refresh_paa_snapshot(self):
+        paa_dir = os.path.join(
+            self._settings.resolved_projects_dir, '.project-admin-agent'
+        )
+        script = os.path.join(paa_dir, 'gather-context.sh')
+        if os.path.exists(script):
+            subprocess.Popen(
+                [script], cwd=paa_dir,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
 
     def _zoom_in(self, action, param):
         tv = self._get_active_terminal()
