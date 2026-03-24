@@ -1,6 +1,10 @@
 import os
 import re
 
+import gi
+gi.require_version('Gtk', '4.0')
+from gi.repository import GObject, GLib
+
 from paa_ledger import LedgerItem, make_item_id, now_iso
 
 
@@ -100,3 +104,62 @@ def scan_project(project_name, project_path):
     items.extend(check_context_drift(project_name, project_path))
     items.extend(check_no_git(project_name, project_path))
     return items
+
+
+class PAAMonitor(GObject.GObject):
+    """Background monitor that periodically scans projects for issues."""
+    __gsignals__ = {
+        'findings-changed': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+    }
+
+    def __init__(self, store, ledger, settings):
+        super().__init__()
+        self._store = store
+        self._ledger = ledger
+        self._settings = settings
+        self._timer_id = None
+
+    def start(self):
+        if self._timer_id is not None:
+            return
+        GLib.timeout_add(2000, self._initial_scan)
+
+    def _initial_scan(self):
+        self.run_scan()
+        interval_ms = max(5, self._settings.paa_loop_interval_minutes) * 60 * 1000
+        self._timer_id = GLib.timeout_add(interval_ms, self._on_timer)
+        return GLib.SOURCE_REMOVE
+
+    def _on_timer(self):
+        if not self._settings.paa_enabled:
+            self._timer_id = None
+            return GLib.SOURCE_REMOVE
+        self.run_scan()
+        return GLib.SOURCE_CONTINUE
+
+    def stop(self):
+        if self._timer_id is not None:
+            GLib.source_remove(self._timer_id)
+            self._timer_id = None
+
+    def restart(self):
+        self.stop()
+        if self._settings.paa_enabled:
+            self.start()
+
+    def run_scan(self):
+        """Execute all checks across all active projects. Update ledger."""
+        projects = self._store.load_projects()
+        all_findings = []
+        for project in projects:
+            items = scan_project(project.name, project.path)
+            all_findings.extend(items)
+
+        active_ids = {item.id for item in all_findings}
+        self._ledger.sweep(active_ids)
+
+        for item in all_findings:
+            self._ledger.add_if_new(item)
+
+        self._ledger.save()
+        self.emit('findings-changed', self._ledger.pending_count)
