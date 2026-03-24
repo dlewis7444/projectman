@@ -187,12 +187,12 @@ class PAACardWindow(Adw.Window):
     def _on_dismiss(self, item_id):
         self._ledger.update_status(item_id, 'dismissed')
         self._ledger.save()
-        self._refresh()
+        GLib.idle_add(self._refresh)
 
     def _on_acknowledge(self, item_id):
         self._ledger.update_status(item_id, 'approved')
         self._ledger.save()
-        self._refresh()
+        GLib.idle_add(self._refresh)
 
     def refresh_from_scan(self):
         """Called when the monitor completes a scan."""
