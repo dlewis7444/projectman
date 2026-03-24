@@ -160,12 +160,25 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_enabled_row.connect('notify::active', self._on_paa_enabled_toggled)
         enable_group.add(self._paa_enabled_row)
 
-        self._paa_interval_row = Adw.SpinRow.new_with_range(5, 120, 5)
-        self._paa_interval_row.set_title('Scan Interval (minutes)')
-        self._paa_interval_row.set_subtitle('How often PAA checks projects for issues')
-        self._paa_interval_row.set_value(self._settings.paa_loop_interval_minutes)
+        self._paa_interval_row = Adw.ActionRow(
+            title='Scan Interval',
+            subtitle='How often PAA checks projects for issues',
+        )
         self._paa_interval_row.set_sensitive(self._settings.paa_enabled)
-        self._paa_interval_row.connect('notify::value', self._on_paa_interval_changed)
+        self._paa_interval_scale = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, 5, 120, 5
+        )
+        self._paa_interval_scale.set_draw_value(True)
+        self._paa_interval_scale.set_value_pos(Gtk.PositionType.RIGHT)
+        self._paa_interval_scale.set_value(self._settings.paa_loop_interval_minutes)
+        self._paa_interval_scale.set_size_request(200, -1)
+        self._paa_interval_scale.set_valign(Gtk.Align.CENTER)
+        self._paa_interval_scale.add_mark(5, Gtk.PositionType.BOTTOM, '5m')
+        self._paa_interval_scale.add_mark(30, Gtk.PositionType.BOTTOM, '30m')
+        self._paa_interval_scale.add_mark(60, Gtk.PositionType.BOTTOM, '1h')
+        self._paa_interval_scale.add_mark(120, Gtk.PositionType.BOTTOM, '2h')
+        self._paa_interval_scale.connect('value-changed', self._on_paa_interval_changed)
+        self._paa_interval_row.add_suffix(self._paa_interval_scale)
         enable_group.add(self._paa_interval_row)
 
         # -- Budget group (Phase 2) --
@@ -183,11 +196,23 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_unlimited_row.set_sensitive(False)  # Phase 2
         budget_group.add(self._paa_unlimited_row)
 
-        self._paa_budget_row = Adw.SpinRow.new_with_range(10000, 1000000, 10000)
-        self._paa_budget_row.set_title('Monthly Token Budget')
-        self._paa_budget_row.set_subtitle('~$0.03 per 100K tokens at Haiku rates')
-        self._paa_budget_row.set_value(self._settings.paa_budget_tokens)
+        self._paa_budget_row = Adw.ActionRow(
+            title='Monthly Token Budget',
+            subtitle='~$0.03 per 100K tokens at Haiku rates',
+        )
         self._paa_budget_row.set_sensitive(False)  # Phase 2
+        self._paa_budget_scale = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, 10000, 1000000, 10000
+        )
+        self._paa_budget_scale.set_draw_value(True)
+        self._paa_budget_scale.set_value_pos(Gtk.PositionType.RIGHT)
+        self._paa_budget_scale.set_value(self._settings.paa_budget_tokens)
+        self._paa_budget_scale.set_size_request(200, -1)
+        self._paa_budget_scale.set_valign(Gtk.Align.CENTER)
+        self._paa_budget_scale.add_mark(100000, Gtk.PositionType.BOTTOM, '100K')
+        self._paa_budget_scale.add_mark(500000, Gtk.PositionType.BOTTOM, '500K')
+        self._paa_budget_scale.add_mark(1000000, Gtk.PositionType.BOTTOM, '1M')
+        self._paa_budget_row.add_suffix(self._paa_budget_scale)
         budget_group.add(self._paa_budget_row)
 
         # -- AI Analysis group (Phase 2) --
@@ -346,8 +371,8 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_interval_row.set_sensitive(row.get_active())
         self._save_and_notify()
 
-    def _on_paa_interval_changed(self, row, _param):
-        self._settings.paa_loop_interval_minutes = int(row.get_value())
+    def _on_paa_interval_changed(self, scale):
+        self._settings.paa_loop_interval_minutes = int(scale.get_value())
         self._save_and_notify()
 
     def _on_multiplexer_changed(self, row, _param):

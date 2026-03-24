@@ -159,6 +159,9 @@ class PAACardWindow(Adw.Window):
 
         dismiss_btn = Gtk.Button(label='Dismiss')
         dismiss_btn.add_css_class('flat')
+        dismiss_btn.set_tooltip_text(
+            'Hide this finding \u2014 it won\u2019t reappear unless re-detected after being resolved'
+        )
         dismiss_btn.connect(
             'clicked', lambda b, iid=item.id: self._on_dismiss(iid)
         )
@@ -166,6 +169,9 @@ class PAACardWindow(Adw.Window):
 
         ack_btn = Gtk.Button(label='Acknowledge')
         ack_btn.add_css_class('suggested-action')
+        ack_btn.set_tooltip_text(
+            'Mark as noted \u2014 you\u2019ve seen this and plan to address it'
+        )
         ack_btn.connect(
             'clicked', lambda b, iid=item.id: self._on_acknowledge(iid)
         )

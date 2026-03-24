@@ -97,4 +97,11 @@ row:hover .project-row-actions { opacity: 1; }
 }
 
 /* ── PAA sidebar button throb ────────────────────────────────────────── */
-.paa-btn-dim { opacity: 0.3; transition: opacity 400ms ease; }
+@keyframes paa-glow {
+    0%, 100% { background: alpha(#ffb900, 0.0); }
+    50%      { background: alpha(#ffb900, 0.3); }
+}
+.paa-btn-throb {
+    animation: paa-glow 3s ease-in-out infinite;
+    border-radius: 50%;
+}
