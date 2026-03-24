@@ -160,7 +160,9 @@ class PAACardWindow(Adw.Window):
         dismiss_btn = Gtk.Button(label='Dismiss')
         dismiss_btn.add_css_class('flat')
         dismiss_btn.set_tooltip_text(
-            'Hide this finding \u2014 it won\u2019t reappear unless re-detected after being resolved'
+            'Not relevant \u2014 hides this card.\n'
+            'PAA will only raise it again if the issue\n'
+            'goes away and comes back later.'
         )
         dismiss_btn.connect(
             'clicked', lambda b, iid=item.id: self._on_dismiss(iid)
@@ -170,7 +172,9 @@ class PAACardWindow(Adw.Window):
         ack_btn = Gtk.Button(label='Acknowledge')
         ack_btn.add_css_class('suggested-action')
         ack_btn.set_tooltip_text(
-            'Mark as noted \u2014 you\u2019ve seen this and plan to address it'
+            'I see it and accept it as-is \u2014 hides this card.\n'
+            'Same as Dismiss, but logged as intentional.\n'
+            'Both hide the card; Dismiss = ignore, Acknowledge = accept.'
         )
         ack_btn.connect(
             'clicked', lambda b, iid=item.id: self._on_acknowledge(iid)
