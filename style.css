@@ -71,3 +71,30 @@ row:hover .project-row-actions { opacity: 1; }
     padding: 6px 8px 2px;
     font-size: 10px; opacity: 0.55;
 }
+
+/* ── PAA card window ─────────────────────────────────────────────────── */
+.paa-stats-count { font-size: 13px; font-weight: 700; opacity: 0.7; }
+
+.paa-card {
+    border: 1px solid alpha(currentColor, 0.15);
+    border-radius: 12px;
+    padding: 16px;
+    margin: 4px 0;
+}
+.paa-card-type {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em; border-radius: 4px; padding: 2px 8px;
+}
+.paa-card-type-info { background: alpha(#c084fc, 0.15); }
+.paa-card-type-warning { background: alpha(#ffaa6e, 0.15); }
+.paa-card-type-action { background: alpha(#ff6eb4, 0.15); }
+.paa-card-project { font-weight: 700; font-size: 13px; }
+.paa-card-summary { font-size: 12px; }
+.paa-card-evidence {
+    font-size: 11px; opacity: 0.6;
+    padding: 6px 10px; border-radius: 6px;
+    background: alpha(currentColor, 0.04);
+}
+
+/* ── PAA sidebar button throb ────────────────────────────────────────── */
+.paa-btn-dim { opacity: 0.3; transition: opacity 400ms ease; }
