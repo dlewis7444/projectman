@@ -9,7 +9,7 @@ DEFAULT_SETTINGS_PATH = os.path.expanduser('~/.ProjectMan/settings.json')
 
 @dataclass
 class Settings:
-    projects_dir: str = '~/.ProjectMan/Projects'
+    projects_dir: str = '~/.ProjectMan/projects'
     claude_binary: str = ''
     resume_projects: bool = True
     font_size: int = 11
