@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import datetime, timezone
 
 import gi
 from gi.repository import GObject, GLib
@@ -96,6 +97,29 @@ def check_no_git(project_name, project_path):
     return []
 
 
+def _current_month():
+    return datetime.now(timezone.utc).strftime('%Y-%m')
+
+
+def _maybe_reset_budget(settings):
+    """Reset budget counter if the month has rolled over."""
+    month = _current_month()
+    if settings.paa_budget_month != month:
+        settings.paa_budget_used = 0
+        settings.paa_budget_month = month
+        return True
+    return False
+
+
+def _budget_allows_ai(settings):
+    """Check if the token budget allows AI checks."""
+    if not settings.paa_allow_haiku:
+        return False
+    if settings.paa_budget_unlimited:
+        return True
+    return settings.paa_budget_used < settings.paa_budget_tokens
+
+
 def scan_project(project_name, project_path):
     """Run all checks on a single project, return list of LedgerItems."""
     items = []
@@ -153,11 +177,29 @@ class PAAMonitor(GObject.GObject):
 
     def run_scan(self):
         """Execute all checks across all active projects. Update ledger."""
+        _maybe_reset_budget(self._settings)
         projects = self._store.load_projects()
         all_findings = []
+        total_ai_tokens = 0
+
         for project in projects:
+            # Phase 1 filesystem checks (always run)
             items = scan_project(project.name, project.path)
             all_findings.extend(items)
+
+            # Phase 2 AI checks (budget-gated)
+            if _budget_allows_ai(self._settings):
+                from paa_haiku import run_ai_checks
+                ai_items, tokens = run_ai_checks(
+                    project.name, project.path, self._settings
+                )
+                all_findings.extend(ai_items)
+                total_ai_tokens += tokens
+
+        # Update budget
+        if total_ai_tokens > 0:
+            self._settings.paa_budget_used += total_ai_tokens
+            self._settings.save()
 
         active_ids = {item.id for item in all_findings}
         self._ledger.sweep(active_ids)

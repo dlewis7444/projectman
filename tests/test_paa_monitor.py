@@ -204,3 +204,150 @@ def test_run_scan_sweeps_resolved(tmp_path):
     # Second scan: should resolve
     monitor.run_scan()
     assert ledger.pending_count == 0
+
+
+from unittest.mock import patch, MagicMock
+from paa_ledger import LedgerItem, make_item_id, now_iso
+
+
+def test_scan_runs_ai_when_budget_available(tmp_path):
+    """AI checks run when haiku enabled and budget remains."""
+    projects_dir = tmp_path / 'projects'
+    projects_dir.mkdir()
+    proj = projects_dir / 'alpha'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text('# Alpha')
+    (proj / '.git').mkdir()
+
+    settings = Settings(
+        projects_dir=str(projects_dir),
+        paa_allow_haiku=True,
+        paa_budget_tokens=100000,
+        paa_budget_used=0,
+        paa_budget_month='2026-03',
+    )
+    store = ProjectStore(settings)
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
+    monitor = PAAMonitor(store, ledger, settings)
+
+    with patch('paa_monitor._current_month', return_value='2026-03'), \
+         patch('paa_haiku.run_ai_checks', return_value=([], 500)) as mock_ai:
+        monitor.run_scan()
+    mock_ai.assert_called_once()
+    assert settings.paa_budget_used == 500
+
+
+def test_scan_skips_ai_when_budget_exceeded(tmp_path):
+    """AI checks skipped when budget is exhausted."""
+    projects_dir = tmp_path / 'projects'
+    projects_dir.mkdir()
+    (projects_dir / 'alpha').mkdir()
+
+    settings = Settings(
+        projects_dir=str(projects_dir),
+        paa_allow_haiku=True,
+        paa_budget_tokens=1000,
+        paa_budget_used=1000,
+        paa_budget_month='2026-03',
+    )
+    store = ProjectStore(settings)
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
+    monitor = PAAMonitor(store, ledger, settings)
+
+    with patch('paa_monitor._current_month', return_value='2026-03'), \
+         patch('paa_haiku.run_ai_checks') as mock_ai:
+        monitor.run_scan()
+    mock_ai.assert_not_called()
+
+
+def test_scan_runs_ai_when_unlimited(tmp_path):
+    """AI checks run with unlimited budget even if used > tokens."""
+    projects_dir = tmp_path / 'projects'
+    projects_dir.mkdir()
+    (projects_dir / 'alpha').mkdir()
+
+    settings = Settings(
+        projects_dir=str(projects_dir),
+        paa_allow_haiku=True,
+        paa_budget_unlimited=True,
+        paa_budget_tokens=1000,
+        paa_budget_used=9999,
+        paa_budget_month='2026-03',
+    )
+    store = ProjectStore(settings)
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
+    monitor = PAAMonitor(store, ledger, settings)
+
+    with patch('paa_monitor._current_month', return_value='2026-03'), \
+         patch('paa_haiku.run_ai_checks', return_value=([], 200)) as mock_ai:
+        monitor.run_scan()
+    mock_ai.assert_called_once()
+
+
+def test_scan_skips_ai_when_haiku_disabled(tmp_path):
+    """AI checks skipped when paa_allow_haiku is False."""
+    projects_dir = tmp_path / 'projects'
+    projects_dir.mkdir()
+    (projects_dir / 'alpha').mkdir()
+
+    settings = Settings(
+        projects_dir=str(projects_dir),
+        paa_allow_haiku=False,
+        paa_budget_tokens=100000,
+        paa_budget_used=0,
+        paa_budget_month='2026-03',
+    )
+    store = ProjectStore(settings)
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
+    monitor = PAAMonitor(store, ledger, settings)
+
+    with patch('paa_monitor._current_month', return_value='2026-03'), \
+         patch('paa_haiku.run_ai_checks') as mock_ai:
+        monitor.run_scan()
+    mock_ai.assert_not_called()
+
+
+def test_budget_monthly_reset(tmp_path):
+    """Budget resets when month rolls over."""
+    projects_dir = tmp_path / 'projects'
+    projects_dir.mkdir()
+    (projects_dir / 'alpha').mkdir()
+
+    settings = Settings(
+        projects_dir=str(projects_dir),
+        paa_allow_haiku=True,
+        paa_budget_tokens=100000,
+        paa_budget_used=50000,
+        paa_budget_month='2026-02',  # last month
+    )
+    store = ProjectStore(settings)
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
+    monitor = PAAMonitor(store, ledger, settings)
+
+    with patch('paa_monitor._current_month', return_value='2026-03'), \
+         patch('paa_haiku.run_ai_checks', return_value=([], 300)) as mock_ai:
+        monitor.run_scan()
+    assert settings.paa_budget_month == '2026-03'
+    assert settings.paa_budget_used == 300  # reset + new usage
+
+
+def test_filesystem_checks_run_when_budget_exceeded(tmp_path):
+    """Filesystem checks still produce findings even when AI budget is exhausted."""
+    projects_dir = tmp_path / 'projects'
+    projects_dir.mkdir()
+    (projects_dir / 'alpha').mkdir()  # no CLAUDE.md, no .git
+
+    settings = Settings(
+        projects_dir=str(projects_dir),
+        paa_allow_haiku=True,
+        paa_budget_tokens=100,
+        paa_budget_used=100,
+        paa_budget_month='2026-03',
+    )
+    store = ProjectStore(settings)
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
+    monitor = PAAMonitor(store, ledger, settings)
+
+    with patch('paa_monitor._current_month', return_value='2026-03'):
+        monitor.run_scan()
+    assert ledger.pending_count >= 1  # filesystem checks found issues
