@@ -85,13 +85,17 @@ class PAACardWindow(Adw.Window):
         self._refresh()
 
     def _refresh(self):
-        # Hide before removing to cancel pending tooltip events
+        # Hold refs to removed widgets — prevents premature GC while
+        # GTK's tooltip system may still reference them internally.
+        self._stale = []
         self._scrolled.set_visible(False)
         while True:
             child = self._card_box.get_first_child()
             if child is None:
                 break
+            self._stale.append(child)
             self._card_box.remove(child)
+        GLib.timeout_add(200, self._drop_stale)
 
         items = self._ledger.pending_items()
         count = len(items)
@@ -199,6 +203,10 @@ class PAACardWindow(Adw.Window):
         if self._on_action_cb:
             self._on_action_cb(self._ledger.pending_count)
         GLib.idle_add(self._refresh)
+
+    def _drop_stale(self):
+        self._stale = None
+        return GLib.SOURCE_REMOVE
 
     def refresh_from_scan(self):
         """Called when the monitor completes a scan."""
