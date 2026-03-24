@@ -56,8 +56,6 @@ class Sidebar(Gtk.Box):
         self._paa_btn.set_tooltip_text('Projects Admin Agent')
         self._paa_btn.connect('clicked', lambda b: self.emit('show-paa-window'))
         btn_row.append(self._paa_btn)
-        self._paa_throb_id = None
-        self._paa_throb_on = True
 
         self.append(btn_row)
 
@@ -222,31 +220,11 @@ class Sidebar(Gtk.Box):
             self._paa_btn.set_tooltip_text(
                 f'Projects Admin Agent \u2014 {count} pending'
             )
-            self._start_paa_throb()
+            self._paa_btn.add_css_class('paa-btn-throb')
         else:
             self._paa_btn_label.set_label('\u2728')
             self._paa_btn.set_tooltip_text('Projects Admin Agent')
-            self._stop_paa_throb()
-
-    def _start_paa_throb(self):
-        if self._paa_throb_id is not None:
-            return
-        self._paa_throb_on = True
-        self._paa_throb_id = GLib.timeout_add(800, self._paa_throb_tick)
-
-    def _paa_throb_tick(self):
-        self._paa_throb_on = not self._paa_throb_on
-        if self._paa_throb_on:
-            self._paa_btn.remove_css_class('paa-btn-dim')
-        else:
-            self._paa_btn.add_css_class('paa-btn-dim')
-        return GLib.SOURCE_CONTINUE
-
-    def _stop_paa_throb(self):
-        if self._paa_throb_id is not None:
-            GLib.source_remove(self._paa_throb_id)
-            self._paa_throb_id = None
-        self._paa_btn.remove_css_class('paa-btn-dim')
+            self._paa_btn.remove_css_class('paa-btn-throb')
 
     def _on_add_project(self, button):
         if self._new_project_row is not None:
