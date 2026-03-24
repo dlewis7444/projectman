@@ -189,12 +189,15 @@ class PAAMonitor(GObject.GObject):
 
             # Phase 2 AI checks (budget-gated)
             if _budget_allows_ai(self._settings):
-                from paa_haiku import run_ai_checks
-                ai_items, tokens = run_ai_checks(
-                    project.name, project.path, self._settings
-                )
-                all_findings.extend(ai_items)
-                total_ai_tokens += tokens
+                try:
+                    from paa_haiku import run_ai_checks
+                    ai_items, tokens = run_ai_checks(
+                        project.name, project.path, self._settings
+                    )
+                    all_findings.extend(ai_items)
+                    total_ai_tokens += tokens
+                except Exception:
+                    pass  # AI failure must not block filesystem findings
 
         # Update budget
         if total_ai_tokens > 0:

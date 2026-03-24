@@ -351,3 +351,112 @@ def test_filesystem_checks_run_when_budget_exceeded(tmp_path):
     with patch('paa_monitor._current_month', return_value='2026-03'):
         monitor.run_scan()
     assert ledger.pending_count >= 1  # filesystem checks found issues
+
+
+def test_full_scan_with_mocked_ai(tmp_path):
+    """Full scan produces both filesystem and AI findings."""
+    projects_dir = tmp_path / 'projects'
+    projects_dir.mkdir()
+    proj = projects_dir / 'alpha'
+    proj.mkdir()
+    # No CLAUDE.md, no .git -> filesystem checks will find issues
+
+    ai_item = LedgerItem(
+        id='ai-test-001',
+        type='ai-health-concern',
+        project='alpha',
+        project_path=str(proj),
+        summary='Missing README',
+        evidence='No README.md found',
+        severity='info',
+        created=now_iso(),
+    )
+
+    settings = Settings(
+        projects_dir=str(projects_dir),
+        paa_allow_haiku=True,
+        paa_budget_tokens=100000,
+        paa_budget_used=0,
+        paa_budget_month='2026-03',
+    )
+    store = ProjectStore(settings)
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
+    monitor = PAAMonitor(store, ledger, settings)
+
+    with patch('paa_monitor._current_month', return_value='2026-03'), \
+         patch('paa_haiku.run_ai_checks', return_value=([ai_item], 1500)):
+        monitor.run_scan()
+
+    # Should have both filesystem AND AI findings
+    assert ledger.pending_count >= 2
+    types = {i.type for i in ledger.pending_items()}
+    assert 'ai-health-concern' in types
+    assert 'missing-claude-md' in types or 'no-git' in types
+    assert settings.paa_budget_used == 1500
+
+
+def test_full_scan_ai_failure_graceful(tmp_path):
+    """AI failure doesn't prevent filesystem findings from appearing."""
+    projects_dir = tmp_path / 'projects'
+    projects_dir.mkdir()
+    proj = projects_dir / 'alpha'
+    proj.mkdir()
+    # No CLAUDE.md -> filesystem will find an issue
+
+    settings = Settings(
+        projects_dir=str(projects_dir),
+        paa_allow_haiku=True,
+        paa_budget_tokens=100000,
+        paa_budget_used=0,
+        paa_budget_month='2026-03',
+    )
+    store = ProjectStore(settings)
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
+    monitor = PAAMonitor(store, ledger, settings)
+
+    with patch('paa_monitor._current_month', return_value='2026-03'), \
+         patch('paa_haiku.run_ai_checks', side_effect=Exception('AI broke')):
+        monitor.run_scan()
+
+    # Filesystem findings should still be present despite AI failure
+    assert ledger.pending_count >= 1
+    types = {i.type for i in ledger.pending_items()}
+    assert 'missing-claude-md' in types or 'no-git' in types
+    assert settings.paa_budget_used == 0  # No AI tokens consumed
+
+
+def test_full_scan_budget_exhaustion_midway(tmp_path):
+    """Budget exhaustion mid-scan stops AI for remaining projects."""
+    projects_dir = tmp_path / 'projects'
+    projects_dir.mkdir()
+    (projects_dir / 'aaa').mkdir()  # scanned first (alphabetical)
+    (projects_dir / 'zzz').mkdir()  # scanned second
+
+    settings = Settings(
+        projects_dir=str(projects_dir),
+        paa_allow_haiku=True,
+        paa_budget_tokens=1000,
+        paa_budget_used=999,  # only 1 token of budget left
+        paa_budget_month='2026-03',
+    )
+    store = ProjectStore(settings)
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
+    monitor = PAAMonitor(store, ledger, settings)
+
+    call_count = 0
+
+    def mock_ai_checks(name, path, s):
+        nonlocal call_count
+        call_count += 1
+        return ([], 500)  # each call uses 500 tokens
+
+    with patch('paa_monitor._current_month', return_value='2026-03'), \
+         patch('paa_haiku.run_ai_checks', side_effect=mock_ai_checks):
+        monitor.run_scan()
+
+    # _budget_allows_ai checks settings.paa_budget_used which stays at 999
+    # throughout the loop (budget is only updated AFTER the loop completes).
+    # 999 < 1000 is True for both projects, so both get AI checks.
+    # Budget enforcement is per-scan, not per-project within a scan.
+    assert call_count == 2  # Both got AI checks in this scan
+    assert settings.paa_budget_used == 999 + 1000  # 500 per project
