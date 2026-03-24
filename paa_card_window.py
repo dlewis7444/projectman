@@ -63,6 +63,11 @@ class PAACardWindow(Adw.Window):
         self._pending_label = Gtk.Label()
         self._pending_label.add_css_class('paa-stats-count')
         stats.append(self._pending_label)
+        self._budget_label = Gtk.Label()
+        self._budget_label.add_css_class('paa-stats-count')
+        self._budget_label.set_hexpand(True)
+        self._budget_label.set_halign(Gtk.Align.END)
+        stats.append(self._budget_label)
         content.append(stats)
 
         sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
@@ -89,7 +94,26 @@ class PAACardWindow(Adw.Window):
         self.set_content(toolbar)
         self._refresh()
 
+    def _update_budget_label(self):
+        if self._settings.paa_allow_haiku:
+            if self._settings.paa_budget_unlimited:
+                budget_text = f'Budget: unlimited ({self._settings.paa_budget_used:,} tokens used)'
+            else:
+                pct = min(100, int(
+                    self._settings.paa_budget_used
+                    / max(1, self._settings.paa_budget_tokens) * 100
+                ))
+                budget_text = (
+                    f'Budget: {self._settings.paa_budget_used:,} / '
+                    f'{self._settings.paa_budget_tokens:,} tokens ({pct}%)'
+                )
+            self._budget_label.set_label(budget_text)
+            self._budget_label.set_visible(True)
+        else:
+            self._budget_label.set_visible(False)
+
     def _refresh(self):
+        self._update_budget_label()
         # Hold refs to removed widgets — prevents premature GC while
         # GTK's tooltip system may still reference them internally.
         self._stale = []
