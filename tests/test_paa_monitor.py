@@ -4,7 +4,11 @@ from paa_monitor import (
     check_context_drift,
     check_no_git,
     scan_project,
+    PAAMonitor,
 )
+from paa_ledger import Ledger
+from settings import Settings
+from model import ProjectStore
 
 
 def test_extract_refs_backtick_path():
@@ -156,12 +160,6 @@ def test_scan_project_clean(tmp_path):
     (proj / 'CLAUDE.md').write_text('# Clean project\n')
     items = scan_project('myproj', str(proj))
     assert len(items) == 0
-
-
-from paa_ledger import Ledger
-from paa_monitor import PAAMonitor
-from settings import Settings
-from model import ProjectStore
 
 
 def test_run_scan_populates_ledger(tmp_path):

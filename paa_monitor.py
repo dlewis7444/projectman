@@ -2,7 +2,6 @@ import os
 import re
 
 import gi
-gi.require_version('Gtk', '4.0')
 from gi.repository import GObject, GLib
 
 from paa_ledger import LedgerItem, make_item_id, now_iso
@@ -118,13 +117,15 @@ class PAAMonitor(GObject.GObject):
         self._ledger = ledger
         self._settings = settings
         self._timer_id = None
+        self._initial_id = None
 
     def start(self):
-        if self._timer_id is not None:
+        if self._timer_id is not None or self._initial_id is not None:
             return
-        GLib.timeout_add(2000, self._initial_scan)
+        self._initial_id = GLib.timeout_add(2000, self._initial_scan)
 
     def _initial_scan(self):
+        self._initial_id = None
         self.run_scan()
         interval_ms = max(5, self._settings.paa_loop_interval_minutes) * 60 * 1000
         self._timer_id = GLib.timeout_add(interval_ms, self._on_timer)
@@ -138,6 +139,9 @@ class PAAMonitor(GObject.GObject):
         return GLib.SOURCE_CONTINUE
 
     def stop(self):
+        if self._initial_id is not None:
+            GLib.source_remove(self._initial_id)
+            self._initial_id = None
         if self._timer_id is not None:
             GLib.source_remove(self._timer_id)
             self._timer_id = None
