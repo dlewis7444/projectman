@@ -19,6 +19,13 @@ class Settings:
     theme: str = 'argonaut'
     debug_logging: bool = False
     sidebar_width: int = 220
+    paa_enabled: bool = False
+    paa_loop_interval_minutes: int = 30
+    paa_budget_tokens: int = 100000
+    paa_budget_used: int = 0
+    paa_budget_unlimited: bool = False
+    paa_allow_haiku: bool = True
+    paa_autonomy_level: str = 'suggest'
     ntfy_enabled: bool = False
     ntfy_topic: str = ''
 
