@@ -31,7 +31,7 @@ def test_run_haiku_success():
     mock_result.returncode = 0
     mock_result.stdout = _make_claude_json('hello world')
     with patch('subprocess.run', return_value=mock_result) as mock_run:
-        text, tokens = _run_haiku('test prompt', '/tmp', settings)
+        text, tokens = _run_haiku('test prompt', settings)
     assert text == 'hello world'
     assert tokens == 150  # input + output
     mock_run.assert_called_once()
@@ -42,7 +42,7 @@ def test_run_haiku_success():
 def test_run_haiku_timeout():
     settings = Settings()
     with patch('subprocess.run', side_effect=subprocess.TimeoutExpired('claude', 30)):
-        text, tokens = _run_haiku('test', '/tmp', settings)
+        text, tokens = _run_haiku('test', settings)
     assert text is None
     assert tokens == 0
 
@@ -50,7 +50,7 @@ def test_run_haiku_timeout():
 def test_run_haiku_not_found():
     settings = Settings()
     with patch('subprocess.run', side_effect=FileNotFoundError):
-        text, tokens = _run_haiku('test', '/tmp', settings)
+        text, tokens = _run_haiku('test', settings)
     assert text is None
     assert tokens == 0
 
@@ -61,7 +61,7 @@ def test_run_haiku_nonzero_exit():
     mock_result.returncode = 1
     mock_result.stdout = ''
     with patch('subprocess.run', return_value=mock_result):
-        text, tokens = _run_haiku('test', '/tmp', settings)
+        text, tokens = _run_haiku('test', settings)
     assert text is None
     assert tokens == 0
 
@@ -72,7 +72,7 @@ def test_run_haiku_bad_json():
     mock_result.returncode = 0
     mock_result.stdout = 'not json at all'
     with patch('subprocess.run', return_value=mock_result):
-        text, tokens = _run_haiku('test', '/tmp', settings)
+        text, tokens = _run_haiku('test', settings)
     assert text is None
     assert tokens == 0
 

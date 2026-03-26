@@ -13,16 +13,19 @@ _MANIFEST_FILES = [
 ]
 
 
-def _run_haiku(prompt, project_path, settings, timeout=_HAIKU_TIMEOUT):
+def _run_haiku(prompt, settings, timeout=_HAIKU_TIMEOUT):
     """Invoke claude -p --model haiku --output-format json.
     Returns (response_text, tokens_used) or (None, 0) on failure.
     tokens_used = input_tokens + output_tokens (excludes cache)."""
     claude_cmd = settings.resolved_claude_binary
+    # Run from PAA's own directory to avoid polluting real project sessions
+    paa_dir = os.path.join(settings.resolved_projects_dir, '.project-admin-agent')
+    os.makedirs(paa_dir, exist_ok=True)
     try:
         result = subprocess.run(
             [claude_cmd, '-p', '--model', 'haiku', '--output-format', 'json', prompt],
             capture_output=True, text=True, timeout=timeout,
-            cwd=project_path, stdin=subprocess.DEVNULL,
+            cwd=paa_dir, stdin=subprocess.DEVNULL,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return (None, 0)
@@ -95,7 +98,7 @@ def check_semantic_staleness(project_name, project_path, settings):
         'Respond with JSON only: {"issues": [{"summary": "...", "evidence": "..."}]}\n'
         'If CLAUDE.md accurately reflects the project, respond: {"issues": []}'
     )
-    response, tokens = _run_haiku(prompt, project_path, settings)
+    response, tokens = _run_haiku(prompt, settings)
     if response is None:
         return ([], 0)
 
@@ -140,7 +143,7 @@ def check_dependency_versions(project_name, project_path, settings):
         'Respond with JSON only: {"issues": [{"summary": "...", "evidence": "..."}]}\n'
         'If no significant issues: {"issues": []}'
     )
-    response, tokens = _run_haiku(prompt, project_path, settings)
+    response, tokens = _run_haiku(prompt, settings)
     if response is None:
         return ([], 0)
 
@@ -186,7 +189,7 @@ def check_project_health(project_name, project_path, settings):
         'Respond with JSON only: {"issues": [{"summary": "...", "evidence": "..."}]}\n'
         'If project looks healthy: {"issues": []}'
     )
-    response, tokens = _run_haiku(prompt, project_path, settings)
+    response, tokens = _run_haiku(prompt, settings)
     if response is None:
         return ([], 0)
 
