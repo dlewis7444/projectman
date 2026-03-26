@@ -181,29 +181,44 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_interval_row.add_suffix(self._paa_interval_scale)
         enable_group.add(self._paa_interval_row)
 
-        # -- Budget group (Phase 2) --
-        budget_group = Adw.PreferencesGroup(
-            title='Token Budget',
-            description='Controls for AI-powered Haiku analysis',
+        # -- AI Analysis --
+        ai_group = Adw.PreferencesGroup(
+            title='AI Analysis',
+            description='Haiku-powered project analysis and token budget',
         )
-        page.add(budget_group)
+        page.add(ai_group)
+
+        self._paa_haiku_row = Adw.SwitchRow(
+            title='Use Haiku for Triage',
+            subtitle='AI-powered analysis using Claude Haiku',
+        )
+        self._paa_haiku_row.set_active(self._settings.paa_allow_haiku)
+        self._paa_haiku_row.set_sensitive(self._settings.paa_enabled)
+        self._paa_haiku_row.connect('notify::active', self._on_paa_haiku_toggled)
+        ai_group.add(self._paa_haiku_row)
 
         self._paa_unlimited_row = Adw.SwitchRow(
             title='Unlimited Budget',
             subtitle='Warning: removes cost guardrails for AI analysis',
         )
         self._paa_unlimited_row.set_active(self._settings.paa_budget_unlimited)
-        self._paa_unlimited_row.set_sensitive(self._settings.paa_enabled)
+        self._paa_unlimited_row.set_sensitive(
+            self._settings.paa_enabled and self._settings.paa_allow_haiku
+        )
         self._paa_unlimited_row.connect('notify::active', self._on_paa_unlimited_toggled)
         if self._settings.paa_budget_unlimited:
             self._paa_unlimited_row.add_css_class('error')
-        budget_group.add(self._paa_unlimited_row)
+        ai_group.add(self._paa_unlimited_row)
 
         self._paa_budget_row = Adw.ActionRow(
             title='Monthly Token Budget',
             subtitle='~$0.03 per 100K tokens at Haiku rates',
         )
-        self._paa_budget_row.set_sensitive(self._settings.paa_enabled and not self._settings.paa_budget_unlimited)
+        self._paa_budget_row.set_sensitive(
+            self._settings.paa_enabled
+            and self._settings.paa_allow_haiku
+            and not self._settings.paa_budget_unlimited
+        )
         self._paa_budget_scale = Gtk.Scale.new_with_range(
             Gtk.Orientation.HORIZONTAL, 10000, 1000000, 10000
         )
@@ -217,23 +232,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_budget_scale.add_mark(1000000, Gtk.PositionType.BOTTOM, '1M')
         self._paa_budget_scale.connect('value-changed', self._on_paa_budget_changed)
         self._paa_budget_row.add_suffix(self._paa_budget_scale)
-        budget_group.add(self._paa_budget_row)
-
-        # -- AI Analysis group (Phase 2) --
-        ai_group = Adw.PreferencesGroup(
-            title='AI Analysis',
-            description='AI model and autonomy settings',
-        )
-        page.add(ai_group)
-
-        self._paa_haiku_row = Adw.SwitchRow(
-            title='Use Haiku for Triage',
-            subtitle='Cheaper model for initial analysis passes',
-        )
-        self._paa_haiku_row.set_active(self._settings.paa_allow_haiku)
-        self._paa_haiku_row.set_sensitive(self._settings.paa_enabled)
-        self._paa_haiku_row.connect('notify::active', self._on_paa_haiku_toggled)
-        ai_group.add(self._paa_haiku_row)
+        ai_group.add(self._paa_budget_row)
 
         self._paa_autonomy_row = Adw.ComboRow(title='Autonomy Level')
         self._paa_autonomy_row.set_model(Gtk.StringList.new([
@@ -375,12 +374,13 @@ class SettingsWindow(Adw.PreferencesDialog):
     def _on_paa_enabled_toggled(self, row, _param):
         enabled = row.get_active()
         self._settings.paa_enabled = enabled
+        haiku = self._settings.paa_allow_haiku
         self._paa_interval_row.set_sensitive(enabled)
-        self._paa_unlimited_row.set_sensitive(enabled)
-        self._paa_budget_row.set_sensitive(
-            enabled and not self._settings.paa_budget_unlimited
-        )
         self._paa_haiku_row.set_sensitive(enabled)
+        self._paa_unlimited_row.set_sensitive(enabled and haiku)
+        self._paa_budget_row.set_sensitive(
+            enabled and haiku and not self._settings.paa_budget_unlimited
+        )
         self._paa_autonomy_row.set_sensitive(enabled)
         self._save_and_notify()
 
@@ -391,7 +391,9 @@ class SettingsWindow(Adw.PreferencesDialog):
     def _on_paa_unlimited_toggled(self, row, _param):
         self._settings.paa_budget_unlimited = row.get_active()
         self._paa_budget_row.set_sensitive(
-            self._settings.paa_enabled and not row.get_active()
+            self._settings.paa_enabled
+            and self._settings.paa_allow_haiku
+            and not row.get_active()
         )
         if row.get_active():
             self._paa_unlimited_row.add_css_class('error')
@@ -404,7 +406,13 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._save_and_notify()
 
     def _on_paa_haiku_toggled(self, row, _param):
-        self._settings.paa_allow_haiku = row.get_active()
+        haiku = row.get_active()
+        self._settings.paa_allow_haiku = haiku
+        self._paa_unlimited_row.set_sensitive(self._settings.paa_enabled and haiku)
+        self._paa_budget_row.set_sensitive(
+            self._settings.paa_enabled and haiku
+            and not self._settings.paa_budget_unlimited
+        )
         self._save_and_notify()
 
     def _on_paa_autonomy_changed(self, row, _param):
