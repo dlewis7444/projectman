@@ -242,7 +242,9 @@ class SettingsWindow(Adw.PreferencesDialog):
         idx = _autonomy_options.index(self._settings.paa_autonomy_level) \
             if self._settings.paa_autonomy_level in _autonomy_options else 0
         self._paa_autonomy_row.set_selected(idx)
-        self._paa_autonomy_row.set_sensitive(self._settings.paa_enabled)
+        self._paa_autonomy_row.set_sensitive(
+            self._settings.paa_enabled and self._settings.paa_allow_haiku
+        )
         self._paa_autonomy_row.connect('notify::selected', self._on_paa_autonomy_changed)
         ai_group.add(self._paa_autonomy_row)
 
@@ -381,7 +383,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_budget_row.set_sensitive(
             enabled and haiku and not self._settings.paa_budget_unlimited
         )
-        self._paa_autonomy_row.set_sensitive(enabled)
+        self._paa_autonomy_row.set_sensitive(enabled and haiku)
         self._save_and_notify()
 
     def _on_paa_interval_changed(self, scale):
@@ -413,6 +415,7 @@ class SettingsWindow(Adw.PreferencesDialog):
             self._settings.paa_enabled and haiku
             and not self._settings.paa_budget_unlimited
         )
+        self._paa_autonomy_row.set_sensitive(self._settings.paa_enabled and haiku)
         self._save_and_notify()
 
     def _on_paa_autonomy_changed(self, row, _param):
