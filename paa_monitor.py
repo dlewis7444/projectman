@@ -195,42 +195,48 @@ class PAAMonitor(GObject.GObject):
 
         Two-pass design: filesystem checks run first and post immediately,
         then AI checks run per-project with incremental updates.
+        Sweep runs only after both passes so AI items aren't prematurely resolved.
         """
         _maybe_reset_budget(self._settings)
         projects = self._store.load_projects()
+        all_findings = []
 
-        # Pass 1: filesystem checks (fast)
-        fs_findings = []
+        # Pass 1: filesystem checks (fast, post immediately)
         for project in projects:
             items = scan_project(project.name, project.path)
-            fs_findings.extend(items)
+            all_findings.extend(items)
 
-        active_ids = {item.id for item in fs_findings}
-        self._ledger.sweep(active_ids)
-        for item in fs_findings:
+        for item in all_findings:
             self._ledger.add_if_new(item)
         self._ledger.save()
         count = self._ledger.pending_count
         GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
 
         # Pass 2: AI checks (slow, per-project with incremental updates)
-        if not _budget_allows_ai(self._settings):
-            return
-        from paa_haiku import run_ai_checks
-        for project in projects:
-            try:
-                ai_items, tokens = run_ai_checks(
-                    project.name, project.path, self._settings
-                )
-            except Exception:
-                continue
-            if not ai_items and tokens == 0:
-                continue
-            for item in ai_items:
-                self._ledger.add_if_new(item)
-            if tokens > 0:
-                self._settings.paa_budget_used += tokens
-                self._settings.save()
-            self._ledger.save()
-            count = self._ledger.pending_count
-            GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
+        if _budget_allows_ai(self._settings):
+            from paa_haiku import run_ai_checks
+            for project in projects:
+                try:
+                    ai_items, tokens = run_ai_checks(
+                        project.name, project.path, self._settings
+                    )
+                except Exception:
+                    continue
+                if not ai_items and tokens == 0:
+                    continue
+                all_findings.extend(ai_items)
+                for item in ai_items:
+                    self._ledger.add_if_new(item)
+                if tokens > 0:
+                    self._settings.paa_budget_used += tokens
+                    self._settings.save()
+                self._ledger.save()
+                count = self._ledger.pending_count
+                GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
+
+        # Sweep after both passes — only now can we know which items are stale
+        active_ids = {item.id for item in all_findings}
+        self._ledger.sweep(active_ids)
+        self._ledger.save()
+        count = self._ledger.pending_count
+        GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
