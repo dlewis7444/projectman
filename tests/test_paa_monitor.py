@@ -171,7 +171,7 @@ def test_run_scan_populates_ledger(tmp_path):
     (projects_dir / 'beta' / '.git').mkdir()
     (projects_dir / 'beta' / 'CLAUDE.md').write_text('# Beta\n')
 
-    settings = Settings(projects_dir=str(projects_dir))
+    settings = Settings(projects_dir=str(projects_dir), paa_allow_haiku=False)
     store = ProjectStore(settings)
     ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     monitor = PAAMonitor(store, ledger, settings)
@@ -190,7 +190,7 @@ def test_run_scan_sweeps_resolved(tmp_path):
     proj = projects_dir / 'alpha'
     proj.mkdir()
     # First scan: no CLAUDE.md
-    settings = Settings(projects_dir=str(projects_dir))
+    settings = Settings(projects_dir=str(projects_dir), paa_allow_haiku=False)
     store = ProjectStore(settings)
     ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     monitor = PAAMonitor(store, ledger, settings)

@@ -41,6 +41,13 @@ def _run_haiku(prompt, project_path, settings, timeout=_HAIKU_TIMEOUT):
 def _parse_haiku_response(text):
     """Parse structured JSON response from Haiku.
     Returns list of dicts with 'summary' and 'evidence' keys, or [] on failure."""
+    # Strip markdown code fences (Haiku often wraps JSON in ```json ... ```)
+    text = text.strip()
+    if text.startswith('```'):
+        text = text.split('\n', 1)[1] if '\n' in text else ''
+    if text.endswith('```'):
+        text = text[:-3]
+    text = text.strip()
     try:
         data = json.loads(text)
         issues = data.get('issues', [])
@@ -159,9 +166,7 @@ def check_dependency_versions(project_name, project_path, settings):
 def check_project_health(project_name, project_path, settings):
     """AI check: general project health scan.
     Returns (list[LedgerItem], int tokens_used)."""
-    listing = _top_level_listing(project_path)
-    if not listing:
-        return ([], 0)
+    listing = _top_level_listing(project_path) or '(no visible files)'
 
     context = listing
     readme = _read_truncated(os.path.join(project_path, 'README.md'))
