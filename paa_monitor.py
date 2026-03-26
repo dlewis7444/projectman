@@ -212,27 +212,31 @@ class PAAMonitor(GObject.GObject):
         count = self._ledger.pending_count
         GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
 
-        # Pass 2: AI checks (slow, per-project with incremental updates)
+        # Pass 2: AI checks (parallel, results applied as they arrive)
         if _budget_allows_ai(self._settings):
             from paa_haiku import run_ai_checks
-            for project in projects:
-                try:
-                    ai_items, tokens = run_ai_checks(
-                        project.name, project.path, self._settings
-                    )
-                except Exception:
-                    continue
-                if not ai_items and tokens == 0:
-                    continue
-                all_findings.extend(ai_items)
-                for item in ai_items:
-                    self._ledger.add_if_new(item)
-                if tokens > 0:
-                    self._settings.paa_budget_used += tokens
-                    self._settings.save()
-                self._ledger.save()
-                count = self._ledger.pending_count
-                GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {
+                    pool.submit(run_ai_checks, p.name, p.path, self._settings): p
+                    for p in projects
+                }
+                for future in as_completed(futures):
+                    try:
+                        ai_items, tokens = future.result()
+                    except Exception:
+                        continue
+                    if not ai_items and tokens == 0:
+                        continue
+                    all_findings.extend(ai_items)
+                    for item in ai_items:
+                        self._ledger.add_if_new(item)
+                    if tokens > 0:
+                        self._settings.paa_budget_used += tokens
+                        self._settings.save()
+                    self._ledger.save()
+                    count = self._ledger.pending_count
+                    GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
 
         # Sweep after both passes — only now can we know which items are stale
         active_ids = {item.id for item in all_findings}
