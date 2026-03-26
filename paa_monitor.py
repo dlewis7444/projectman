@@ -1,5 +1,7 @@
+import json
 import os
 import re
+import tempfile
 from datetime import datetime, timezone
 
 import gi
@@ -121,6 +123,28 @@ def _budget_allows_ai(settings):
     return settings.paa_budget_used < settings.paa_budget_tokens
 
 
+_MTIME_CACHE_PATH = os.path.expanduser('~/.ProjectMan/paa-mtime-cache.json')
+
+
+def _load_mtime_cache():
+    try:
+        with open(_MTIME_CACHE_PATH, 'r') as f:
+            return json.loads(f.read())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_mtime_cache(data):
+    try:
+        content = json.dumps(data)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(_MTIME_CACHE_PATH))
+        with os.fdopen(fd, 'w') as f:
+            f.write(content)
+        os.replace(tmp, _MTIME_CACHE_PATH)
+    except OSError:
+        pass
+
+
 def _project_mtime(project_path):
     """Get the most recent modification time for a project.
     Uses .git/index if available (tracks all staged changes),
@@ -159,7 +183,7 @@ class PAAMonitor(GObject.GObject):
         self._timer_id = None
         self._initial_id = None
         self._scanning = False
-        self._last_mtime = {}  # project_path → mtime at last AI scan
+        self._last_mtime = _load_mtime_cache()
 
     def start(self):
         if self._timer_id is not None or self._initial_id is not None:
@@ -274,5 +298,6 @@ class PAAMonitor(GObject.GObject):
                 active_ids.add(item.id)
         self._ledger.sweep(active_ids)
         self._ledger.save()
+        _save_mtime_cache(self._last_mtime)
         count = self._ledger.pending_count
         GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
