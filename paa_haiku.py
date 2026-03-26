@@ -95,7 +95,9 @@ def check_semantic_staleness(project_name, project_path, settings):
         f'CLAUDE.md contents:\n{content}\n\n'
         'Check if CLAUDE.md references files, directories, commands, or patterns '
         'that no longer match the actual project structure.\n\n'
-        'Respond with JSON only: {"issues": [{"summary": "...", "evidence": "..."}]}\n'
+        'Respond with JSON only: {"issues": [{"summary": "...", "evidence": "...", "critical": false}]}\n'
+        'Set "critical" to true ONLY for issues that would cause builds to fail, '
+        'data loss, or security vulnerabilities. Stale documentation alone is never critical.\n'
         'If CLAUDE.md accurately reflects the project, respond: {"issues": []}'
     )
     response, tokens = _run_haiku(prompt, settings)
@@ -107,6 +109,7 @@ def check_semantic_staleness(project_name, project_path, settings):
     for issue in issues:
         summary = issue.get('summary', 'Semantic staleness detected')
         evidence = issue.get('evidence', '')
+        severity = 'critical' if issue.get('critical') else 'warning'
         item_id = make_item_id('ai-semantic-staleness', project_name, summary)
         items.append(LedgerItem(
             id=item_id,
@@ -115,7 +118,7 @@ def check_semantic_staleness(project_name, project_path, settings):
             project_path=project_path,
             summary=summary,
             evidence=evidence,
-            severity='warning',
+            severity=severity,
             created=now_iso(),
         ))
     return (items, tokens)
@@ -140,7 +143,9 @@ def check_dependency_versions(project_name, project_path, settings):
         f'{manifest_name}:\n{manifest_content}\n\n'
         'Only flag dependencies that are significantly outdated (major version behind) '
         'or have known security issues. Do not flag minor version differences.\n\n'
-        'Respond with JSON only: {"issues": [{"summary": "...", "evidence": "..."}]}\n'
+        'Respond with JSON only: {"issues": [{"summary": "...", "evidence": "...", "critical": false}]}\n'
+        'Set "critical" to true ONLY for dependencies with known CVEs or security advisories. '
+        'Being outdated alone is never critical.\n'
         'If no significant issues: {"issues": []}'
     )
     response, tokens = _run_haiku(prompt, settings)
@@ -152,6 +157,7 @@ def check_dependency_versions(project_name, project_path, settings):
     for issue in issues:
         summary = issue.get('summary', 'Dependency issue detected')
         evidence = issue.get('evidence', '')
+        severity = 'critical' if issue.get('critical') else 'info'
         item_id = make_item_id('ai-dependency-outdated', project_name, summary)
         items.append(LedgerItem(
             id=item_id,
@@ -160,7 +166,7 @@ def check_dependency_versions(project_name, project_path, settings):
             project_path=project_path,
             summary=summary,
             evidence=evidence,
-            severity='info',
+            severity=severity,
             created=now_iso(),
         ))
     return (items, tokens)
@@ -186,7 +192,9 @@ def check_project_health(project_name, project_path, settings):
         'Look for obvious issues: missing essential files (README, LICENSE, .gitignore), '
         'unusual structure, potential configuration problems.\n'
         'Do NOT flag missing CLAUDE.md (handled separately).\n\n'
-        'Respond with JSON only: {"issues": [{"summary": "...", "evidence": "..."}]}\n'
+        'Respond with JSON only: {"issues": [{"summary": "...", "evidence": "...", "critical": false}]}\n'
+        'Set "critical" to true ONLY for issues that pose a security risk, risk of data loss, '
+        'or would break a production deployment. Missing best-practice files are never critical.\n'
         'If project looks healthy: {"issues": []}'
     )
     response, tokens = _run_haiku(prompt, settings)
@@ -198,6 +206,7 @@ def check_project_health(project_name, project_path, settings):
     for issue in issues:
         summary = issue.get('summary', 'Health concern detected')
         evidence = issue.get('evidence', '')
+        severity = 'critical' if issue.get('critical') else 'info'
         item_id = make_item_id('ai-health-concern', project_name, summary)
         items.append(LedgerItem(
             id=item_id,
@@ -206,7 +215,7 @@ def check_project_health(project_name, project_path, settings):
             project_path=project_path,
             summary=summary,
             evidence=evidence,
-            severity='info',
+            severity=severity,
             created=now_iso(),
         ))
     return (items, tokens)

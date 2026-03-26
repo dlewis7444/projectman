@@ -168,6 +168,11 @@ class PAACardWindow(Adw.Window):
         proj_lbl.set_hexpand(True)
         proj_lbl.set_halign(Gtk.Align.START)
         header.append(proj_lbl)
+        if item.severity == 'critical':
+            crit_badge = Gtk.Label(label='CRITICAL')
+            crit_badge.add_css_class('paa-card-type')
+            crit_badge.add_css_class('paa-card-critical')
+            header.append(crit_badge)
         card.append(header)
 
         # Summary
