@@ -173,6 +173,7 @@ class PAAMonitor(GObject.GObject):
     """Background monitor that periodically scans projects for issues."""
     __gsignals__ = {
         'findings-changed': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        'scan-progress': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self, store, ledger, settings):
@@ -184,6 +185,7 @@ class PAAMonitor(GObject.GObject):
         self._initial_id = None
         self._scanning = False
         self._last_mtime = _load_mtime_cache()
+        self._active_ai_projects = set()  # names of projects currently being AI-scanned
 
     def start(self):
         if self._timer_id is not None or self._initial_id is not None:
@@ -203,6 +205,11 @@ class PAAMonitor(GObject.GObject):
             return GLib.SOURCE_REMOVE
         self.schedule_scan()
         return GLib.SOURCE_CONTINUE
+
+    def _emit_progress(self):
+        """Emit scan-progress with comma-separated active project names, or '' when idle."""
+        names = ', '.join(sorted(self._active_ai_projects))
+        GLib.idle_add(lambda n=names: self.emit('scan-progress', n) or False)
 
     def schedule_scan(self):
         """Run scan in background thread to avoid blocking the UI."""
@@ -263,6 +270,9 @@ class PAAMonitor(GObject.GObject):
                 mtime = _project_mtime(p.path)
                 if mtime != self._last_mtime.get(p.path):
                     changed.append(p)
+            if changed:
+                self._active_ai_projects = {p.name for p in changed}
+                self._emit_progress()
             with ThreadPoolExecutor(max_workers=5) as pool:
                 futures = {
                     pool.submit(run_ai_checks, p.name, p.path, self._settings): p
@@ -270,6 +280,8 @@ class PAAMonitor(GObject.GObject):
                 }
                 for future in as_completed(futures):
                     project = futures[future]
+                    self._active_ai_projects.discard(project.name)
+                    self._emit_progress()
                     try:
                         ai_items, tokens = future.result()
                     except Exception:
@@ -299,5 +311,7 @@ class PAAMonitor(GObject.GObject):
         self._ledger.sweep(active_ids)
         self._ledger.save()
         _save_mtime_cache(self._last_mtime)
+        self._active_ai_projects = set()
+        self._emit_progress()
         count = self._ledger.pending_count
         GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)

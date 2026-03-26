@@ -56,6 +56,8 @@ class Sidebar(Gtk.Box):
         self._paa_btn.set_tooltip_text('Projects Admin Agent')
         self._paa_btn.connect('clicked', lambda b: self.emit('show-paa-window'))
         btn_row.append(self._paa_btn)
+        self._paa_count = 0
+        self._paa_scanning = False
 
         self.append(btn_row)
 
@@ -215,15 +217,32 @@ class Sidebar(Gtk.Box):
 
     def set_paa_pending_count(self, count):
         """Update PAA button label and tooltip only (no throb change)."""
-        if count > 0:
-            self._paa_btn_label.set_label(f'\u2728 {count}')
+        self._paa_count = count
+        self._update_paa_label()
+        if count == 0:
+            self.stop_paa_throb()
+
+    def set_paa_scanning(self, names):
+        """Show/hide scanning indicator on the sparkle button."""
+        self._paa_scanning = bool(names)
+        self._update_paa_label()
+        if names:
+            self._paa_btn.set_tooltip_text(f'PAA \u2014 scanning: {names}')
+        elif self._paa_count > 0:
             self._paa_btn.set_tooltip_text(
-                f'Projects Admin Agent \u2014 {count} pending'
+                f'Projects Admin Agent \u2014 {self._paa_count} pending'
             )
         else:
-            self._paa_btn_label.set_label('\u2728')
             self._paa_btn.set_tooltip_text('Projects Admin Agent')
-            self.stop_paa_throb()
+
+    def _update_paa_label(self):
+        """Rebuild the sparkle button label from count + scanning state."""
+        parts = ['\u2728']
+        if self._paa_count > 0:
+            parts.append(str(self._paa_count))
+        if self._paa_scanning:
+            parts.append('\u27f3')  # ⟳
+        self._paa_btn_label.set_label(' '.join(parts))
 
     def start_paa_throb(self):
         """Start the golden glow animation."""

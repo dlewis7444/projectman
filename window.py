@@ -37,6 +37,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._paa_monitor = paa_monitor
         if paa_monitor:
             paa_monitor.connect('findings-changed', self._on_paa_findings_changed)
+            paa_monitor.connect('scan-progress', self._on_paa_scan_progress)
         zellij_watcher.connect('sessions-changed', self._on_zellij_sessions_changed)
 
         self.set_default_size(1200, 750)
@@ -474,6 +475,11 @@ class AppWindow(Adw.ApplicationWindow):
             self._sidebar.start_paa_throb()
         if self._paa_win is not None:
             self._paa_win.refresh_from_scan()
+
+    def _on_paa_scan_progress(self, monitor, names):
+        self._sidebar.set_paa_scanning(names)
+        if self._paa_win is not None:
+            self._paa_win.set_scanning(names)
 
     # --- other terminal actions ---
 
