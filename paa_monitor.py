@@ -238,8 +238,13 @@ class PAAMonitor(GObject.GObject):
                     count = self._ledger.pending_count
                     GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
 
-        # Sweep after both passes — only now can we know which items are stale
+        # Sweep after both passes — only now can we know which items are stale.
+        # If AI checks didn't run, preserve existing AI items (we can't verify them).
         active_ids = {item.id for item in all_findings}
+        if not _budget_allows_ai(self._settings):
+            for item in self._ledger._items.values():
+                if item.type.startswith('ai-') and item.status == 'pending':
+                    active_ids.add(item.id)
         self._ledger.sweep(active_ids)
         self._ledger.save()
         count = self._ledger.pending_count
