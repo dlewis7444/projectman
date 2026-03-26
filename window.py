@@ -89,6 +89,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.connect('project-new-claude',  self._on_project_new_claude)
         self._sidebar.connect('project-zellij',      self._on_project_open_zellij)
         self._sidebar.connect('project-ntfy-toggle', self._on_ntfy_toggle)
+        self._sidebar.connect('project-haiku-check', self._on_project_haiku_check)
         self._sidebar.connect('show-archive-window', self._on_show_archive_window)
         self._sidebar.connect('show-settings',       self._on_open_settings)
         self._sidebar.connect('project-create', self._on_project_create)
@@ -475,6 +476,13 @@ class AppWindow(Adw.ApplicationWindow):
             self._sidebar.start_paa_throb()
         if self._paa_win is not None:
             self._paa_win.refresh_from_scan()
+
+    def _on_project_haiku_check(self, sidebar, path):
+        if self._paa_monitor is None:
+            return
+        project = self._find_project(path)
+        if project:
+            self._paa_monitor.scan_single_project(project.name, project.path)
 
     def _on_paa_scan_progress(self, monitor, names):
         self._sidebar.set_paa_scanning(names)
