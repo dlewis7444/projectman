@@ -121,6 +121,21 @@ def _budget_allows_ai(settings):
     return settings.paa_budget_used < settings.paa_budget_tokens
 
 
+def _project_mtime(project_path):
+    """Get the most recent modification time for a project.
+    Uses .git/index if available (tracks all staged changes),
+    otherwise falls back to the directory mtime itself."""
+    git_index = os.path.join(project_path, '.git', 'index')
+    try:
+        return os.path.getmtime(git_index)
+    except OSError:
+        pass
+    try:
+        return os.path.getmtime(project_path)
+    except OSError:
+        return 0
+
+
 def scan_project(project_name, project_path):
     """Run all checks on a single project, return list of LedgerItems."""
     items = []
@@ -144,6 +159,7 @@ class PAAMonitor(GObject.GObject):
         self._timer_id = None
         self._initial_id = None
         self._scanning = False
+        self._last_mtime = {}  # project_path → mtime at last AI scan
 
     def start(self):
         if self._timer_id is not None or self._initial_id is not None:
@@ -212,20 +228,30 @@ class PAAMonitor(GObject.GObject):
         count = self._ledger.pending_count
         GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
 
-        # Pass 2: AI checks (parallel, results applied as they arrive)
+        # Pass 2: AI checks (parallel, only for changed projects)
+        ai_scanned_paths = set()
         if _budget_allows_ai(self._settings):
             from paa_haiku import run_ai_checks
             from concurrent.futures import ThreadPoolExecutor, as_completed
+            # Filter to projects that changed since last AI scan
+            changed = []
+            for p in projects:
+                mtime = _project_mtime(p.path)
+                if mtime != self._last_mtime.get(p.path):
+                    changed.append(p)
             with ThreadPoolExecutor(max_workers=5) as pool:
                 futures = {
                     pool.submit(run_ai_checks, p.name, p.path, self._settings): p
-                    for p in projects
+                    for p in changed
                 }
                 for future in as_completed(futures):
+                    project = futures[future]
                     try:
                         ai_items, tokens = future.result()
                     except Exception:
                         continue
+                    ai_scanned_paths.add(project.path)
+                    self._last_mtime[project.path] = _project_mtime(project.path)
                     if not ai_items and tokens == 0:
                         continue
                     all_findings.extend(ai_items)
@@ -239,12 +265,13 @@ class PAAMonitor(GObject.GObject):
                     GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
 
         # Sweep after both passes — only now can we know which items are stale.
-        # If AI checks didn't run, preserve existing AI items (we can't verify them).
+        # Preserve AI items for projects that weren't AI-scanned this cycle
+        # (unchanged projects, Haiku disabled, or budget exhausted).
         active_ids = {item.id for item in all_findings}
-        if not _budget_allows_ai(self._settings):
-            for item in self._ledger._items.values():
-                if item.type.startswith('ai-') and item.status == 'pending':
-                    active_ids.add(item.id)
+        for item in self._ledger._items.values():
+            if (item.type.startswith('ai-') and item.status == 'pending'
+                    and item.project_path not in ai_scanned_paths):
+                active_ids.add(item.id)
         self._ledger.sweep(active_ids)
         self._ledger.save()
         count = self._ledger.pending_count
