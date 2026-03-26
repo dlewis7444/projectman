@@ -63,6 +63,12 @@ class PAACardWindow(Adw.Window):
         self._pending_label = Gtk.Label()
         self._pending_label.add_css_class('paa-stats-count')
         stats.append(self._pending_label)
+        self._scanning_label = Gtk.Label()
+        self._scanning_label.add_css_class('paa-stats-count')
+        self._scanning_label.set_hexpand(True)
+        self._scanning_label.set_halign(Gtk.Align.CENTER)
+        self._scanning_label.set_visible(False)
+        stats.append(self._scanning_label)
         self._budget_label = Gtk.Label()
         self._budget_label.add_css_class('paa-stats-count')
         self._budget_label.set_hexpand(True)
@@ -245,6 +251,14 @@ class PAACardWindow(Adw.Window):
     def refresh_from_scan(self):
         """Called when the monitor completes a scan."""
         self._refresh()
+
+    def set_scanning(self, names):
+        """Show which projects are being AI-scanned, or hide when done."""
+        if names:
+            self._scanning_label.set_label(f'Scanning: {names}')
+            self._scanning_label.set_visible(True)
+        else:
+            self._scanning_label.set_visible(False)
 
     def _on_key(self, ctrl, keyval, keycode, state):
         if keyval == Gdk.KEY_Escape:
