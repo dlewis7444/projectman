@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import gi
 from gi.repository import GObject, GLib
+import threading
 
 from paa_ledger import LedgerItem, make_item_id, now_iso
 
@@ -142,6 +143,7 @@ class PAAMonitor(GObject.GObject):
         self._settings = settings
         self._timer_id = None
         self._initial_id = None
+        self._scanning = False
 
     def start(self):
         if self._timer_id is not None or self._initial_id is not None:
@@ -150,7 +152,7 @@ class PAAMonitor(GObject.GObject):
 
     def _initial_scan(self):
         self._initial_id = None
-        self.run_scan()
+        self.schedule_scan()
         interval_ms = max(5, self._settings.paa_loop_interval_minutes) * 60 * 1000
         self._timer_id = GLib.timeout_add(interval_ms, self._on_timer)
         return GLib.SOURCE_REMOVE
@@ -159,8 +161,21 @@ class PAAMonitor(GObject.GObject):
         if not self._settings.paa_enabled:
             self._timer_id = None
             return GLib.SOURCE_REMOVE
-        self.run_scan()
+        self.schedule_scan()
         return GLib.SOURCE_CONTINUE
+
+    def schedule_scan(self):
+        """Run scan in background thread to avoid blocking the UI."""
+        if self._scanning:
+            return
+        self._scanning = True
+        threading.Thread(target=self._scan_thread, daemon=True).start()
+
+    def _scan_thread(self):
+        try:
+            self.run_scan()
+        finally:
+            self._scanning = False
 
     def stop(self):
         if self._initial_id is not None:
@@ -211,4 +226,5 @@ class PAAMonitor(GObject.GObject):
             self._ledger.add_if_new(item)
 
         self._ledger.save()
-        self.emit('findings-changed', self._ledger.pending_count)
+        count = self._ledger.pending_count
+        GLib.idle_add(lambda: self.emit('findings-changed', count) or False)
