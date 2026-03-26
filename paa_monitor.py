@@ -211,6 +211,32 @@ class PAAMonitor(GObject.GObject):
         names = ', '.join(sorted(self._active_ai_projects))
         GLib.idle_add(lambda n=names: self.emit('scan-progress', n) or False)
 
+    def scan_single_project(self, project_name, project_path):
+        """Force an AI scan of a single project in the background."""
+        def _worker():
+            self._active_ai_projects = {project_name}
+            self._emit_progress()
+            try:
+                from paa_haiku import run_ai_checks
+                ai_items, tokens = run_ai_checks(
+                    project_name, project_path, self._settings
+                )
+            except Exception:
+                ai_items, tokens = [], 0
+            self._active_ai_projects = set()
+            self._emit_progress()
+            self._last_mtime[project_path] = _project_mtime(project_path)
+            for item in ai_items:
+                self._ledger.add_if_new(item)
+            if tokens > 0:
+                self._settings.paa_budget_used += tokens
+                self._settings.save()
+            self._ledger.save()
+            _save_mtime_cache(self._last_mtime)
+            count = self._ledger.pending_count
+            GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
+        threading.Thread(target=_worker, daemon=True).start()
+
     def schedule_scan(self):
         """Run scan in background thread to avoid blocking the UI."""
         if self._scanning:

@@ -22,6 +22,7 @@ class Sidebar(Gtk.Box):
         'show-settings':        (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-create':       (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'show-paa-window':      (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'project-haiku-check':  (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self, store, history, watcher, version=''):
@@ -153,6 +154,8 @@ class Sidebar(Gtk.Box):
                         lambda r, p=proj.path: self.emit('project-zellij', p))
             row.connect('project-ntfy-toggle',
                         lambda r, p=proj.path: self.emit('project-ntfy-toggle', p))
+            row.connect('project-haiku-check',
+                        lambda r, p=proj.path: self.emit('project-haiku-check', p))
             row.connect('project-rename',
                         lambda r, new_name, p=proj.path: self.emit('project-rename', p, new_name))
             self._listbox.append(row)
@@ -332,6 +335,7 @@ class ProjectRow(Gtk.ListBoxRow):
         'project-new-claude': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-zellij':     (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-ntfy-toggle': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'project-haiku-check': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-rename':     (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
@@ -432,6 +436,7 @@ class ProjectRow(Gtk.ListBoxRow):
         self._menu = Gio.Menu()
         self._menu.append('New Session',        'row.new-claude')
         self._menu.append('New Zellij Session', 'row.zellij')
+        self._menu.append('Haiku Check',        'row.haiku-check')
         self._menu.append('Rename',             'row.rename')
         self._menu.append('Deactivate',         'row.deactivate')
         self._menu.append('Archive',            'row.archive')
@@ -448,8 +453,9 @@ class ProjectRow(Gtk.ListBoxRow):
         self._new_claude_action = _add('new-claude', 'project-new-claude')
         self._deactivate_action = _add('deactivate', 'project-deactivate')
         self._deactivate_action.set_enabled(False)
-        _add('zellij',   'project-zellij')
-        _add('archive',  'project-archive')
+        _add('zellij',       'project-zellij')
+        _add('haiku-check',  'project-haiku-check')
+        _add('archive',      'project-archive')
 
         rename_action = Gio.SimpleAction.new('rename', None)
         rename_action.connect('activate', lambda a, p: self._enter_rename_mode())
