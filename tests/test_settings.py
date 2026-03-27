@@ -120,3 +120,16 @@ def test_paa_roundtrip(tmp_path):
     s2 = Settings.load(path)
     assert s2.paa_enabled is True
     assert s2.paa_loop_interval_minutes == 15
+
+
+def test_paa_budget_month_default():
+    s = Settings()
+    assert s.paa_budget_month == ''
+
+
+def test_paa_budget_month_roundtrip(tmp_path):
+    p = str(tmp_path / 'settings.json')
+    s = Settings(paa_budget_month='2026-03')
+    s.save(p)
+    s2 = Settings.load(p)
+    assert s2.paa_budget_month == '2026-03'
