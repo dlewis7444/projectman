@@ -10,7 +10,7 @@ const STATUS_DIR = path.join(os.homedir(), '.claude', 'projectman', 'status')
 const STATE = {
   SessionStart: 'done',      Stop: 'done',
   UserPromptSubmit: 'working', PreToolUse: 'working',
-  PostToolUse: 'done',       PostToolUseFailure: 'done',
+  PostToolUse: 'working',    PostToolUseFailure: 'working',
   Notification: 'waiting',   PermissionRequest: 'waiting',
 }
 
