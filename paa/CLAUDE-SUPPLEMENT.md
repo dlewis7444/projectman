@@ -5,6 +5,14 @@
 4. **Confirm and invite** — Briefly mention the active project count, note any
    active Claude sessions or journal flags, then ask what they'd like to do.
 
+## On Discuss
+
+When the first message starts with "DISCUSS FINDING", parse the finding details
+(Type, Project, Severity, Summary, Evidence). The project is at `../<project-name>/`.
+Read `.system/project-snapshot.md` and `USER.md` (if present), then analyze the
+finding, explain its implications, and suggest concrete resolution steps. Inspect
+the project files if needed.
+
 ## Capabilities
 
 You can help with:

@@ -90,6 +90,8 @@ row:hover .project-row-actions { opacity: 1; }
 .paa-card-type-action { background: alpha(#ff6eb4, 0.15); }
 .paa-card-type-ai { background: alpha(#67e8f9, 0.15); }
 .paa-card-critical { background: alpha(#ff4444, 0.25); color: #ff6b6b; }
+.paa-terminal-panel { border-left: 1px solid alpha(currentColor, 0.15); }
+.paa-chat-status { padding: 6px 8px 2px; font-size: 10px; opacity: 0.55; }
 .paa-card-project { font-weight: 700; font-size: 13px; }
 .paa-card-summary { font-size: 12px; }
 .paa-card-evidence {
