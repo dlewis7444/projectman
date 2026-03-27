@@ -1,8 +1,12 @@
+import json
 import os
 import re
+import tempfile
+from datetime import datetime, timezone
 
 import gi
 from gi.repository import GObject, GLib
+import threading
 
 from paa_ledger import LedgerItem, make_item_id, now_iso
 
@@ -96,6 +100,66 @@ def check_no_git(project_name, project_path):
     return []
 
 
+def _current_month():
+    return datetime.now(timezone.utc).strftime('%Y-%m')
+
+
+def _maybe_reset_budget(settings):
+    """Reset budget counter if the month has rolled over."""
+    month = _current_month()
+    if settings.paa_budget_month != month:
+        settings.paa_budget_used = 0
+        settings.paa_budget_month = month
+        return True
+    return False
+
+
+def _budget_allows_ai(settings):
+    """Check if the token budget allows AI checks."""
+    if not settings.paa_allow_haiku:
+        return False
+    if settings.paa_budget_unlimited:
+        return True
+    return settings.paa_budget_used < settings.paa_budget_tokens
+
+
+_MTIME_CACHE_PATH = os.path.expanduser('~/.ProjectMan/paa-mtime-cache.json')
+
+
+def _load_mtime_cache():
+    try:
+        with open(_MTIME_CACHE_PATH, 'r') as f:
+            return json.loads(f.read())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_mtime_cache(data):
+    try:
+        content = json.dumps(data)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(_MTIME_CACHE_PATH))
+        with os.fdopen(fd, 'w') as f:
+            f.write(content)
+        os.replace(tmp, _MTIME_CACHE_PATH)
+    except OSError:
+        pass
+
+
+def _project_mtime(project_path):
+    """Get the most recent modification time for a project.
+    Uses .git/index if available (tracks all staged changes),
+    otherwise falls back to the directory mtime itself."""
+    git_index = os.path.join(project_path, '.git', 'index')
+    try:
+        return os.path.getmtime(git_index)
+    except OSError:
+        pass
+    try:
+        return os.path.getmtime(project_path)
+    except OSError:
+        return 0
+
+
 def scan_project(project_name, project_path):
     """Run all checks on a single project, return list of LedgerItems."""
     items = []
@@ -109,6 +173,7 @@ class PAAMonitor(GObject.GObject):
     """Background monitor that periodically scans projects for issues."""
     __gsignals__ = {
         'findings-changed': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        'scan-progress': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self, store, ledger, settings):
@@ -118,6 +183,9 @@ class PAAMonitor(GObject.GObject):
         self._settings = settings
         self._timer_id = None
         self._initial_id = None
+        self._scanning = False
+        self._last_mtime = _load_mtime_cache()
+        self._active_ai_projects = set()  # names of projects currently being AI-scanned
 
     def start(self):
         if self._timer_id is not None or self._initial_id is not None:
@@ -126,7 +194,7 @@ class PAAMonitor(GObject.GObject):
 
     def _initial_scan(self):
         self._initial_id = None
-        self.run_scan()
+        self.schedule_scan()
         interval_ms = max(5, self._settings.paa_loop_interval_minutes) * 60 * 1000
         self._timer_id = GLib.timeout_add(interval_ms, self._on_timer)
         return GLib.SOURCE_REMOVE
@@ -135,8 +203,52 @@ class PAAMonitor(GObject.GObject):
         if not self._settings.paa_enabled:
             self._timer_id = None
             return GLib.SOURCE_REMOVE
-        self.run_scan()
+        self.schedule_scan()
         return GLib.SOURCE_CONTINUE
+
+    def _emit_progress(self):
+        """Emit scan-progress with comma-separated active project names, or '' when idle."""
+        names = ', '.join(sorted(self._active_ai_projects))
+        GLib.idle_add(lambda n=names: self.emit('scan-progress', n) or False)
+
+    def scan_single_project(self, project_name, project_path):
+        """Force an AI scan of a single project in the background."""
+        def _worker():
+            self._active_ai_projects = {project_name}
+            self._emit_progress()
+            try:
+                from paa_haiku import run_ai_checks
+                ai_items, tokens = run_ai_checks(
+                    project_name, project_path, self._settings
+                )
+            except Exception:
+                ai_items, tokens = [], 0
+            self._active_ai_projects = set()
+            self._emit_progress()
+            self._last_mtime[project_path] = _project_mtime(project_path)
+            for item in ai_items:
+                self._ledger.add_if_new(item)
+            if tokens > 0:
+                self._settings.paa_budget_used += tokens
+                self._settings.save()
+            self._ledger.save()
+            _save_mtime_cache(self._last_mtime)
+            count = self._ledger.pending_count
+            GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def schedule_scan(self):
+        """Run scan in background thread to avoid blocking the UI."""
+        if self._scanning:
+            return
+        self._scanning = True
+        threading.Thread(target=self._scan_thread, daemon=True).start()
+
+    def _scan_thread(self):
+        try:
+            self.run_scan()
+        finally:
+            self._scanning = False
 
     def stop(self):
         if self._initial_id is not None:
@@ -152,18 +264,80 @@ class PAAMonitor(GObject.GObject):
             self.start()
 
     def run_scan(self):
-        """Execute all checks across all active projects. Update ledger."""
+        """Execute all checks across all active projects. Update ledger.
+
+        Two-pass design: filesystem checks run first and post immediately,
+        then AI checks run per-project with incremental updates.
+        Sweep runs only after both passes so AI items aren't prematurely resolved.
+        """
+        _maybe_reset_budget(self._settings)
         projects = self._store.load_projects()
         all_findings = []
+
+        # Pass 1: filesystem checks (fast, post immediately)
         for project in projects:
             items = scan_project(project.name, project.path)
             all_findings.extend(items)
 
-        active_ids = {item.id for item in all_findings}
-        self._ledger.sweep(active_ids)
-
         for item in all_findings:
             self._ledger.add_if_new(item)
-
         self._ledger.save()
-        self.emit('findings-changed', self._ledger.pending_count)
+        count = self._ledger.pending_count
+        GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
+
+        # Pass 2: AI checks (parallel, only for changed projects)
+        ai_scanned_paths = set()
+        if _budget_allows_ai(self._settings):
+            from paa_haiku import run_ai_checks
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            # Filter to projects that changed since last AI scan
+            changed = []
+            for p in projects:
+                mtime = _project_mtime(p.path)
+                if mtime != self._last_mtime.get(p.path):
+                    changed.append(p)
+            if changed:
+                self._active_ai_projects = {p.name for p in changed}
+                self._emit_progress()
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {
+                    pool.submit(run_ai_checks, p.name, p.path, self._settings): p
+                    for p in changed
+                }
+                for future in as_completed(futures):
+                    project = futures[future]
+                    self._active_ai_projects.discard(project.name)
+                    self._emit_progress()
+                    try:
+                        ai_items, tokens = future.result()
+                    except Exception:
+                        continue
+                    ai_scanned_paths.add(project.path)
+                    self._last_mtime[project.path] = _project_mtime(project.path)
+                    if not ai_items and tokens == 0:
+                        continue
+                    all_findings.extend(ai_items)
+                    for item in ai_items:
+                        self._ledger.add_if_new(item)
+                    if tokens > 0:
+                        self._settings.paa_budget_used += tokens
+                        self._settings.save()
+                    self._ledger.save()
+                    count = self._ledger.pending_count
+                    GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
+
+        # Sweep after both passes — only now can we know which items are stale.
+        # Preserve AI items for projects that weren't AI-scanned this cycle
+        # (unchanged projects, Haiku disabled, or budget exhausted).
+        active_ids = {item.id for item in all_findings}
+        for item in self._ledger._items.values():
+            if (item.type.startswith('ai-') and item.status == 'pending'
+                    and item.project_path not in ai_scanned_paths):
+                active_ids.add(item.id)
+        self._ledger.sweep(active_ids)
+        self._ledger.save()
+        _save_mtime_cache(self._last_mtime)
+        self._active_ai_projects = set()
+        self._emit_progress()
+        count = self._ledger.pending_count
+        GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)

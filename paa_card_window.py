@@ -8,12 +8,17 @@ _TYPE_LABELS = {
     'missing-claude-md': 'Missing CLAUDE.md',
     'context-drift': 'Context Drift',
     'no-git': 'No Git Repo',
+    # Phase 2 AI checks
+    'ai-semantic-staleness': 'Semantic Staleness',
+    'ai-dependency-outdated': 'Outdated Dependency',
+    'ai-health-concern': 'Health Concern',
 }
 
 _SEVERITY_CSS = {
     'info': 'paa-card-type-info',
     'warning': 'paa-card-type-warning',
     'action-needed': 'paa-card-type-action',
+    'ai-suggestion': 'paa-card-type-ai',
 }
 
 
@@ -58,7 +63,51 @@ class PAACardWindow(Adw.Window):
         self._pending_label = Gtk.Label()
         self._pending_label.add_css_class('paa-stats-count')
         stats.append(self._pending_label)
+        self._scanning_label = Gtk.Label()
+        self._scanning_label.add_css_class('paa-stats-count')
+        self._scanning_label.set_hexpand(True)
+        self._scanning_label.set_halign(Gtk.Align.CENTER)
+        self._scanning_label.set_visible(False)
+        stats.append(self._scanning_label)
+        self._budget_label = Gtk.Label()
+        self._budget_label.add_css_class('paa-stats-count')
+        self._budget_label.set_hexpand(True)
+        self._budget_label.set_halign(Gtk.Align.END)
+        stats.append(self._budget_label)
         content.append(stats)
+
+        # Filter row
+        filters = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        filters.set_margin_start(16)
+        filters.set_margin_end(16)
+        filters.set_margin_bottom(8)
+
+        # Project filter
+        self._project_names = ['All Projects']
+        self._project_filter_model = Gtk.StringList.new(self._project_names)
+        self._project_dropdown = Gtk.DropDown(model=self._project_filter_model)
+        self._project_dropdown.set_selected(0)
+        self._project_dropdown.add_css_class('flat')
+        self._project_dropdown.connect('notify::selected', lambda *_: self._refresh())
+        filters.append(self._project_dropdown)
+
+        # Critical filter
+        self._critical_btn = Gtk.ToggleButton(label='Critical')
+        self._critical_btn.add_css_class('flat')
+        self._critical_btn.connect('toggled', lambda *_: self._refresh())
+        filters.append(self._critical_btn)
+
+        # Type filter
+        self._type_names = ['All Types'] + list(_TYPE_LABELS.values())
+        self._type_keys = [''] + list(_TYPE_LABELS.keys())
+        self._type_filter_model = Gtk.StringList.new(self._type_names)
+        self._type_dropdown = Gtk.DropDown(model=self._type_filter_model)
+        self._type_dropdown.set_selected(0)
+        self._type_dropdown.add_css_class('flat')
+        self._type_dropdown.connect('notify::selected', lambda *_: self._refresh())
+        filters.append(self._type_dropdown)
+
+        content.append(filters)
 
         sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
         content.append(sep)
@@ -84,7 +133,26 @@ class PAACardWindow(Adw.Window):
         self.set_content(toolbar)
         self._refresh()
 
+    def _update_budget_label(self):
+        if self._settings.paa_allow_haiku:
+            if self._settings.paa_budget_unlimited:
+                budget_text = f'Budget: unlimited ({self._settings.paa_budget_used:,} tokens used)'
+            else:
+                pct = min(100, int(
+                    self._settings.paa_budget_used
+                    / max(1, self._settings.paa_budget_tokens) * 100
+                ))
+                budget_text = (
+                    f'Budget: {self._settings.paa_budget_used:,} / '
+                    f'{self._settings.paa_budget_tokens:,} tokens ({pct}%)'
+                )
+            self._budget_label.set_label(budget_text)
+            self._budget_label.set_visible(True)
+        else:
+            self._budget_label.set_visible(False)
+
     def _refresh(self):
+        self._update_budget_label()
         # Hold refs to removed widgets — prevents premature GC while
         # GTK's tooltip system may still reference them internally.
         self._stale = []
@@ -97,12 +165,37 @@ class PAACardWindow(Adw.Window):
             self._card_box.remove(child)
         GLib.timeout_add(200, self._drop_stale)
 
-        items = self._ledger.pending_items()
-        count = len(items)
+        all_items = self._ledger.pending_items()
+        total = len(all_items)
         self._pending_label.set_label(
-            f'{count} pending item{"s" if count != 1 else ""}'
+            f'{total} pending item{"s" if total != 1 else ""}'
         )
-        has_items = count > 0
+
+        # Update project dropdown with current project names
+        projects_in_ledger = sorted({i.project for i in all_items})
+        new_names = ['All Projects'] + projects_in_ledger
+        if new_names != self._project_names:
+            self._project_names = new_names
+            sel = self._project_dropdown.get_selected()
+            self._project_filter_model.splice(0, self._project_filter_model.get_n_items(),
+                                              new_names)
+            if sel < len(new_names):
+                self._project_dropdown.set_selected(sel)
+
+        # Apply filters
+        items = all_items
+        proj_idx = self._project_dropdown.get_selected()
+        if proj_idx > 0 and proj_idx < len(self._project_names):
+            proj_name = self._project_names[proj_idx]
+            items = [i for i in items if i.project == proj_name]
+        if self._critical_btn.get_active():
+            items = [i for i in items if i.severity == 'critical']
+        type_idx = self._type_dropdown.get_selected()
+        if type_idx > 0 and type_idx < len(self._type_keys):
+            type_key = self._type_keys[type_idx]
+            items = [i for i in items if i.type == type_key]
+
+        has_items = len(items) > 0
         self._scrolled.set_visible(has_items)
         self._empty.set_visible(not has_items)
 
@@ -113,6 +206,12 @@ class PAACardWindow(Adw.Window):
                     'Enable the Projects Admin Agent in Settings \u2192 PAA'
                 )
                 self._empty.set_icon_name('system-shutdown-symbolic')
+            elif total > 0:
+                self._empty.set_title('No Matches')
+                self._empty.set_description(
+                    'No items match the current filters.'
+                )
+                self._empty.set_icon_name('edit-find-symbolic')
             else:
                 self._empty.set_title('All Clear')
                 self._empty.set_description(
@@ -139,6 +238,11 @@ class PAACardWindow(Adw.Window):
         proj_lbl.set_hexpand(True)
         proj_lbl.set_halign(Gtk.Align.START)
         header.append(proj_lbl)
+        if item.severity == 'critical':
+            crit_badge = Gtk.Label(label='CRITICAL')
+            crit_badge.add_css_class('paa-card-type')
+            crit_badge.add_css_class('paa-card-critical')
+            header.append(crit_badge)
         card.append(header)
 
         # Summary
@@ -211,6 +315,14 @@ class PAACardWindow(Adw.Window):
     def refresh_from_scan(self):
         """Called when the monitor completes a scan."""
         self._refresh()
+
+    def set_scanning(self, names):
+        """Show which projects are being AI-scanned, or hide when done."""
+        if names:
+            self._scanning_label.set_label(f'Scanning: {names}')
+            self._scanning_label.set_visible(True)
+        else:
+            self._scanning_label.set_visible(False)
 
     def _on_key(self, ctrl, keyval, keycode, state):
         if keyval == Gdk.KEY_Escape:

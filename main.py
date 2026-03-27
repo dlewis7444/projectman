@@ -138,7 +138,7 @@ class ProjectManApp(Adw.Application):
         self._window._sync_running_state()
         self._refresh_paa_snapshot()
         if hasattr(self, '_paa_monitor') and self._settings.paa_enabled:
-            self._paa_monitor.run_scan()
+            self._paa_monitor.schedule_scan()
 
     def _refresh_paa_snapshot(self):
         paa_dir = os.path.join(
