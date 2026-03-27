@@ -577,10 +577,14 @@ class PAACardWindow(Adw.Window):
         )
         actions.append(ack_btn)
 
-        discuss_btn = Gtk.Button(label='Discuss')
-        discuss_btn.add_css_class('flat')
+        discuss_btn = Gtk.ToggleButton(label='Discuss')
+        discuss_btn.add_css_class('paa-discuss-btn')
         discuss_btn.set_tooltip_text('Discuss this finding with Claude')
-        discuss_btn.connect('clicked', lambda b, i=item: self._on_discuss(i))
+        discuss_btn.set_active(
+            self._terminal_panel.get_visible()
+            and self._discussing_item_id == item.id
+        )
+        discuss_btn.connect('toggled', lambda b, i=item: self._on_discuss(i))
         actions.append(discuss_btn)
 
         card.append(actions)
