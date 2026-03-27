@@ -234,6 +234,40 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_budget_row.add_suffix(self._paa_budget_scale)
         ai_group.add(self._paa_budget_row)
 
+        # Scan model
+        _scan_models = ['haiku', 'sonnet', 'opus']
+        _scan_labels = ['Haiku', 'Sonnet', 'Opus']
+        self._paa_scan_model_row = Adw.ComboRow(
+            title='Scan Model',
+            subtitle='Model used for background AI scans',
+        )
+        self._paa_scan_model_row.set_model(Gtk.StringList.new(_scan_labels))
+        scan_idx = _scan_models.index(self._settings.paa_scan_model) \
+            if self._settings.paa_scan_model in _scan_models else 0
+        self._paa_scan_model_row.set_selected(scan_idx)
+        self._paa_scan_model_row.set_sensitive(
+            self._settings.paa_enabled and self._settings.paa_allow_haiku
+        )
+        self._paa_scan_model_row.connect('notify::selected', self._on_paa_scan_model_changed)
+        ai_group.add(self._paa_scan_model_row)
+
+        # Chat model
+        _chat_models = ['sonnet', 'haiku', 'opus']
+        _chat_labels = ['Sonnet', 'Haiku', 'Opus']
+        self._paa_chat_model_row = Adw.ComboRow(
+            title='Chat Model',
+            subtitle='Model used for Discuss sessions',
+        )
+        self._paa_chat_model_row.set_model(Gtk.StringList.new(_chat_labels))
+        chat_idx = _chat_models.index(self._settings.paa_chat_model) \
+            if self._settings.paa_chat_model in _chat_models else 0
+        self._paa_chat_model_row.set_selected(chat_idx)
+        self._paa_chat_model_row.set_sensitive(
+            self._settings.paa_enabled and self._settings.paa_allow_haiku
+        )
+        self._paa_chat_model_row.connect('notify::selected', self._on_paa_chat_model_changed)
+        ai_group.add(self._paa_chat_model_row)
+
         self._paa_autonomy_row = Adw.ComboRow(title='Autonomy Level')
         self._paa_autonomy_row.set_model(Gtk.StringList.new([
             'Suggest Only', 'Auto-apply Safe Fixes', 'Full Autonomy',
@@ -383,6 +417,8 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_budget_row.set_sensitive(
             enabled and haiku and not self._settings.paa_budget_unlimited
         )
+        self._paa_scan_model_row.set_sensitive(enabled and haiku)
+        self._paa_chat_model_row.set_sensitive(enabled and haiku)
         self._paa_autonomy_row.set_sensitive(enabled and haiku)
         self._save_and_notify()
 
@@ -415,8 +451,24 @@ class SettingsWindow(Adw.PreferencesDialog):
             self._settings.paa_enabled and haiku
             and not self._settings.paa_budget_unlimited
         )
+        self._paa_scan_model_row.set_sensitive(self._settings.paa_enabled and haiku)
+        self._paa_chat_model_row.set_sensitive(self._settings.paa_enabled and haiku)
         self._paa_autonomy_row.set_sensitive(self._settings.paa_enabled and haiku)
         self._save_and_notify()
+
+    def _on_paa_scan_model_changed(self, row, _param):
+        models = ['haiku', 'sonnet', 'opus']
+        idx = row.get_selected()
+        if 0 <= idx < len(models):
+            self._settings.paa_scan_model = models[idx]
+            self._save_and_notify()
+
+    def _on_paa_chat_model_changed(self, row, _param):
+        models = ['sonnet', 'haiku', 'opus']
+        idx = row.get_selected()
+        if 0 <= idx < len(models):
+            self._settings.paa_chat_model = models[idx]
+            self._save_and_notify()
 
     def _on_paa_autonomy_changed(self, row, _param):
         options = ['suggest', 'auto-safe', 'full']
