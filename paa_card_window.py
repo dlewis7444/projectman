@@ -42,6 +42,7 @@ class PAACardWindow(Adw.Window):
         self._closing = False
         self._child_pid = None
         self._spawn_cancelled = False
+        self._discussing_item_id = None
 
         self.set_title('Projects Admin Agent')
         self.set_transient_for(parent)
@@ -279,9 +280,10 @@ class PAACardWindow(Adw.Window):
         paa_dir = self._deploy_harness()
         claude_cmd = self._settings.resolved_claude_binary
         self._spawn_cancelled = False
+        model = self._settings.paa_chat_model
         self._vte.spawn_async(
             Vte.PtyFlags(0), paa_dir,
-            [claude_cmd, prompt],
+            [claude_cmd, '--model', model, prompt],
             None, GLib.SpawnFlags.SEARCH_PATH,
             None, None, -1, None,
             self._on_spawn_done,
@@ -329,6 +331,13 @@ class PAACardWindow(Adw.Window):
     # ── Discuss / Chat actions ────────────────────────────────────────────
 
     def _on_discuss(self, item):
+        # Toggle: if already discussing this item, fold closed
+        if (self._terminal_panel.get_visible()
+                and self._discussing_item_id == item.id):
+            self._discussing_item_id = None
+            self._hide_terminal()
+            return
+
         type_label = _TYPE_LABELS.get(item.type, item.type)
         prompt = (
             f'DISCUSS FINDING\n\n'
@@ -340,6 +349,7 @@ class PAACardWindow(Adw.Window):
             f'Please help me understand this finding and suggest how to address it. '
             f'The project is at ../{item.project}/ relative to your working directory.'
         )
+        self._discussing_item_id = item.id
         self._reveal_terminal()
         self._spawn_claude(prompt)
         self._chat_status.set_label(
@@ -348,6 +358,12 @@ class PAACardWindow(Adw.Window):
         self._vte.grab_focus()
 
     def _on_chat_clicked(self, button):
+        # Toggle: if terminal is visible, fold closed
+        if self._terminal_panel.get_visible():
+            self._discussing_item_id = None
+            self._hide_terminal()
+            return
+        self._discussing_item_id = None
         self._reveal_terminal()
         self._spawn_claude('WELCOME')
         self._chat_status.set_label('General chat')
@@ -537,12 +553,6 @@ class PAACardWindow(Adw.Window):
         actions.set_halign(Gtk.Align.END)
         actions.set_margin_top(4)
 
-        discuss_btn = Gtk.Button(label='Discuss')
-        discuss_btn.add_css_class('flat')
-        discuss_btn.set_tooltip_text('Open a Claude session to discuss this finding')
-        discuss_btn.connect('clicked', lambda b, i=item: self._on_discuss(i))
-        actions.append(discuss_btn)
-
         dismiss_btn = Gtk.Button(label='Dismiss')
         dismiss_btn.add_css_class('flat')
         dismiss_btn.set_tooltip_text(
@@ -566,6 +576,12 @@ class PAACardWindow(Adw.Window):
             'clicked', lambda b, iid=item.id: self._on_acknowledge(iid)
         )
         actions.append(ack_btn)
+
+        discuss_btn = Gtk.Button(label='Discuss')
+        discuss_btn.add_css_class('flat')
+        discuss_btn.set_tooltip_text('Discuss this finding with Claude')
+        discuss_btn.connect('clicked', lambda b, i=item: self._on_discuss(i))
+        actions.append(discuss_btn)
 
         card.append(actions)
         return card

@@ -23,7 +23,7 @@ def _run_haiku(prompt, settings, timeout=_HAIKU_TIMEOUT):
     os.makedirs(paa_dir, exist_ok=True)
     try:
         result = subprocess.run(
-            [claude_cmd, '-p', '--model', 'haiku', '--output-format', 'json', prompt],
+            [claude_cmd, '-p', '--model', settings.paa_scan_model, '--output-format', 'json', prompt],
             capture_output=True, text=True, timeout=timeout,
             cwd=paa_dir, stdin=subprocess.DEVNULL,
         )

@@ -27,6 +27,8 @@ class Settings:
     paa_allow_haiku: bool = True
     paa_autonomy_level: str = 'suggest'
     paa_budget_month: str = ''
+    paa_chat_model: str = 'sonnet'
+    paa_scan_model: str = 'haiku'
     ntfy_enabled: bool = False
     ntfy_topic: str = ''
 
