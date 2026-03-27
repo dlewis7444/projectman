@@ -184,13 +184,13 @@ class SettingsWindow(Adw.PreferencesDialog):
         # -- AI Analysis --
         ai_group = Adw.PreferencesGroup(
             title='AI Analysis',
-            description='Haiku-powered project analysis and token budget',
+            description='AI-powered project analysis and token budget',
         )
         page.add(ai_group)
 
         self._paa_haiku_row = Adw.SwitchRow(
-            title='Use Haiku for Triage',
-            subtitle='AI-powered analysis using Claude Haiku',
+            title='Enable AI Scans',
+            subtitle='Use Claude for deeper project analysis',
         )
         self._paa_haiku_row.set_active(self._settings.paa_allow_haiku)
         self._paa_haiku_row.set_sensitive(self._settings.paa_enabled)
