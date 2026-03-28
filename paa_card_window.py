@@ -349,6 +349,7 @@ class PAACardWindow(Adw.Window):
                 and self._discussing_item_id == item.id):
             self._discussing_item_id = None
             self._hide_terminal()
+            GLib.idle_add(self._refresh)
             return
 
         type_label = _TYPE_LABELS.get(item.type, item.type)
@@ -368,19 +369,22 @@ class PAACardWindow(Adw.Window):
         self._chat_status.set_label(
             f'Discussing: {item.project} \u2014 {type_label}'
         )
-        self._vte.grab_focus()
+        GLib.idle_add(self._refresh)
+        GLib.idle_add(self._vte.grab_focus)
 
     def _on_chat_clicked(self, button):
         # Toggle: if terminal is visible, fold closed
         if self._terminal_panel.get_visible():
             self._discussing_item_id = None
             self._hide_terminal()
+            GLib.idle_add(self._refresh)
             return
         self._discussing_item_id = None
         self._reveal_terminal()
         self._spawn_claude('WELCOME')
         self._chat_status.set_label('General chat')
-        self._vte.grab_focus()
+        GLib.idle_add(self._refresh)
+        GLib.idle_add(self._vte.grab_focus)
 
     # ── Terminal keyboard / context menu ──────────────────────────────────
 
@@ -539,6 +543,9 @@ class PAACardWindow(Adw.Window):
     def _build_card(self, item):
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         card.add_css_class('paa-card')
+        if (self._terminal_panel.get_visible()
+                and self._discussing_item_id == item.id):
+            card.add_css_class('paa-card-discussing')
 
         # Header: type badge + project name + critical badge
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
