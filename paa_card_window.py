@@ -20,6 +20,10 @@ _TYPE_LABELS = {
     'ai-semantic-staleness': 'Semantic Staleness',
     'ai-dependency-outdated': 'Outdated Dependency',
     'ai-health-concern': 'Health Concern',
+    # Phase 4 cross-project checks
+    'xp-dep-conflict': 'Dep Conflict',
+    'xp-broken-reference': 'Broken Reference',
+    'xp-stale-project': 'Stale Project',
 }
 
 _SEVERITY_CSS = {
@@ -33,10 +37,11 @@ _SEVERITY_CSS = {
 class PAACardWindow(Adw.Window):
     """Card-based PAA window showing actionable findings with chat panel."""
 
-    def __init__(self, parent, ledger, settings, on_close=None, on_action=None):
+    def __init__(self, parent, ledger, settings, store=None, on_close=None, on_action=None):
         super().__init__()
         self._ledger = ledger
         self._settings = settings
+        self._store = store
         self._on_close_cb = on_close
         self._on_action_cb = on_action
         self._closing = False
@@ -98,6 +103,14 @@ class PAACardWindow(Adw.Window):
         self._budget_label.set_halign(Gtk.Align.END)
         stats.append(self._budget_label)
         content.append(stats)
+
+        # Health summary row
+        self._health_label = Gtk.Label()
+        self._health_label.add_css_class('paa-health-summary')
+        self._health_label.set_halign(Gtk.Align.START)
+        self._health_label.set_margin_start(16)
+        self._health_label.set_margin_bottom(4)
+        content.append(self._health_label)
 
         # Filter row
         filters = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -438,8 +451,22 @@ class PAACardWindow(Adw.Window):
         else:
             self._budget_label.set_visible(False)
 
+    def _update_health_summary(self):
+        if self._store is None:
+            self._health_label.set_visible(False)
+            return
+        projects = self._store.load_projects()
+        total = len(projects)
+        with_git = sum(1 for p in projects if os.path.isdir(os.path.join(p.path, '.git')))
+        with_claude = sum(1 for p in projects if os.path.isfile(os.path.join(p.path, 'CLAUDE.md')))
+        self._health_label.set_label(
+            f'{total} projects \u2022 {with_git} with git \u2022 {with_claude} with CLAUDE.md'
+        )
+        self._health_label.set_visible(True)
+
     def _refresh(self):
         self._update_budget_label()
+        self._update_health_summary()
         self._stale = []
         self._scrolled.set_visible(False)
         while True:
@@ -518,6 +545,8 @@ class PAACardWindow(Adw.Window):
         badge = Gtk.Label(label=_TYPE_LABELS.get(item.type, item.type))
         badge.add_css_class('paa-card-type')
         badge.add_css_class(_SEVERITY_CSS.get(item.severity, 'paa-card-type-info'))
+        if item.type.startswith('xp-'):
+            badge.add_css_class('paa-card-xp')
         header.append(badge)
         proj_lbl = Gtk.Label(label=item.project)
         proj_lbl.add_css_class('paa-card-project')

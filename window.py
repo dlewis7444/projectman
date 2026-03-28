@@ -461,6 +461,7 @@ class AppWindow(Adw.ApplicationWindow):
             parent=self,
             ledger=self._paa_ledger,
             settings=self._settings,
+            store=self._store,
             on_close=lambda: setattr(self, '_paa_win', None),
             on_action=self._on_paa_card_action,
         )

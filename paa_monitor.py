@@ -326,13 +326,34 @@ class PAAMonitor(GObject.GObject):
                     count = self._ledger.pending_count
                     GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
 
-        # Sweep after both passes — only now can we know which items are stale.
+        # Pass 3: cross-project checks (collective)
+        xp_ran = True
+        try:
+            from paa_cross_project import run_cross_project_checks
+            xp_items, xp_tokens = run_cross_project_checks(projects, self._settings)
+            all_findings.extend(xp_items)
+            for item in xp_items:
+                self._ledger.add_if_new(item)
+            if xp_tokens > 0:
+                self._settings.paa_budget_used += xp_tokens
+                self._settings.save()
+            self._ledger.save()
+            count = self._ledger.pending_count
+            GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
+        except Exception:
+            xp_ran = False
+
+        # Sweep after all passes — only now can we know which items are stale.
         # Preserve AI items for projects that weren't AI-scanned this cycle
         # (unchanged projects, Haiku disabled, or budget exhausted).
         active_ids = {item.id for item in all_findings}
         for item in self._ledger._items.values():
-            if (item.type.startswith('ai-') and item.status == 'pending'
+            if item.status != 'pending':
+                continue
+            if (item.type.startswith('ai-')
                     and item.project_path not in ai_scanned_paths):
+                active_ids.add(item.id)
+            if item.type.startswith('xp-') and not xp_ran:
                 active_ids.add(item.id)
         self._ledger.sweep(active_ids)
         self._ledger.save()

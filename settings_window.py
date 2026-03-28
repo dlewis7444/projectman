@@ -181,6 +181,14 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_interval_row.add_suffix(self._paa_interval_scale)
         enable_group.add(self._paa_interval_row)
 
+        self._paa_stale_row = Adw.SpinRow.new_with_range(7, 365, 7)
+        self._paa_stale_row.set_title('Stale Project Threshold')
+        self._paa_stale_row.set_subtitle('Days without git commits before flagging')
+        self._paa_stale_row.set_value(self._settings.paa_stale_days)
+        self._paa_stale_row.set_sensitive(self._settings.paa_enabled)
+        self._paa_stale_row.connect('notify::value', self._on_paa_stale_changed)
+        enable_group.add(self._paa_stale_row)
+
         # -- AI Analysis --
         ai_group = Adw.PreferencesGroup(
             title='AI Analysis',
@@ -412,6 +420,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._settings.paa_enabled = enabled
         haiku = self._settings.paa_allow_haiku
         self._paa_interval_row.set_sensitive(enabled)
+        self._paa_stale_row.set_sensitive(enabled)
         self._paa_haiku_row.set_sensitive(enabled)
         self._paa_unlimited_row.set_sensitive(enabled and haiku)
         self._paa_budget_row.set_sensitive(
@@ -424,6 +433,10 @@ class SettingsWindow(Adw.PreferencesDialog):
 
     def _on_paa_interval_changed(self, scale):
         self._settings.paa_loop_interval_minutes = int(scale.get_value())
+        self._save_and_notify()
+
+    def _on_paa_stale_changed(self, row, _param):
+        self._settings.paa_stale_days = int(row.get_value())
         self._save_and_notify()
 
     def _on_paa_unlimited_toggled(self, row, _param):

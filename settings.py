@@ -29,6 +29,7 @@ class Settings:
     paa_budget_month: str = ''
     paa_chat_model: str = 'sonnet'
     paa_scan_model: str = 'haiku'
+    paa_stale_days: int = 60
     ntfy_enabled: bool = False
     ntfy_topic: str = ''
 

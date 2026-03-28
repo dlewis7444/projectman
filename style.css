@@ -97,6 +97,8 @@ row:hover .project-row-actions { opacity: 1; }
 }
 .paa-terminal-panel { border-left: 2px solid alpha(#008df8, 0.4); }
 .paa-chat-status { padding: 6px 8px 2px; font-size: 10px; opacity: 0.55; }
+.paa-card-xp { background: alpha(#4ade80, 0.15); }
+.paa-health-summary { font-size: 11px; opacity: 0.55; }
 .paa-card-project { font-weight: 700; font-size: 13px; }
 .paa-card-summary { font-size: 12px; }
 .paa-card-evidence {
