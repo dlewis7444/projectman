@@ -630,6 +630,9 @@ class PAACardWindow(Adw.Window):
     # ── Card actions ──────────────────────────────────────────────────────
 
     def _on_dismiss(self, item_id):
+        if self._discussing_item_id == item_id:
+            self._discussing_item_id = None
+            self._hide_terminal()
         self._ledger.update_status(item_id, 'dismissed')
         self._ledger.save()
         if self._on_action_cb:
@@ -637,6 +640,9 @@ class PAACardWindow(Adw.Window):
         GLib.idle_add(self._refresh)
 
     def _on_acknowledge(self, item_id):
+        if self._discussing_item_id == item_id:
+            self._discussing_item_id = None
+            self._hide_terminal()
         self._ledger.update_status(item_id, 'approved')
         self._ledger.save()
         if self._on_action_cb:
