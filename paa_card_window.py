@@ -78,6 +78,7 @@ class PAACardWindow(Adw.Window):
 
         # Paned: cards on left, terminal on right
         self._paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self._paned.add_css_class('paa-paned')
 
         # -- Left: card content --
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
