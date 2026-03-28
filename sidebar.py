@@ -222,6 +222,13 @@ class Sidebar(Gtk.Box):
         """Update PAA button label and tooltip only (no throb change)."""
         self._paa_count = count
         self._update_paa_label()
+        if not self._paa_scanning:
+            if count > 0:
+                self._paa_btn.set_tooltip_text(
+                    f'Projects Admin Agent \u2014 {count} pending'
+                )
+            else:
+                self._paa_btn.set_tooltip_text('Projects Admin Agent')
         if count == 0:
             self.stop_paa_throb()
 
