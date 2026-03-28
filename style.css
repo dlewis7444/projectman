@@ -90,12 +90,17 @@ row:hover .project-row-actions { opacity: 1; }
 .paa-card-type-action { background: alpha(#ff6eb4, 0.15); }
 .paa-card-type-ai { background: alpha(#67e8f9, 0.15); }
 .paa-card-critical { background: alpha(#ff4444, 0.25); color: #ff6b6b; }
+.paa-card-discussing {
+    border: 2px solid alpha(#008df8, 0.5);
+    border-right: none;
+    border-radius: 12px 0 0 12px;
+    margin-right: 0;
+    background: alpha(#008df8, 0.04);
+}
 .paa-discuss-btn:checked {
     background: alpha(#008df8, 0.25); color: #008df8;
-    border-radius: 6px 0 0 6px;
-    margin-right: -1px;
 }
-.paa-terminal-panel { border-left: 2px solid alpha(#008df8, 0.4); }
+.paa-terminal-panel { border-left: 2px solid alpha(#008df8, 0.5); }
 .paa-chat-status { padding: 6px 8px 2px; font-size: 10px; opacity: 0.55; }
 .paa-card-xp { background: alpha(#4ade80, 0.15); }
 .paa-health-summary { font-size: 11px; opacity: 0.55; }
