@@ -74,7 +74,7 @@ def _top_level_listing(project_path):
     """Get top-level directory listing."""
     try:
         entries = sorted(e.name for e in os.scandir(project_path)
-                        if not e.name.startswith('.'))
+                        if e.name != '.git')
         return '\n'.join(entries)
     except OSError:
         return ''
@@ -192,12 +192,15 @@ def check_project_health(project_name, project_path, settings):
         'You are doing a quick health check on a project.\n\n'
         f'Project: {project_name}\n'
         f'Contents:\n{context}\n\n'
-        'Look for obvious issues: missing essential files (README, LICENSE, .gitignore), '
-        'unusual structure, potential configuration problems.\n'
-        'Do NOT flag missing CLAUDE.md (handled separately).\n\n'
+        'Look for concrete, verifiable issues only. The file listing above is complete — '
+        'if a file appears in the listing, it EXISTS. Do not claim a file is missing '
+        'if it is shown in the listing.\n'
+        'Do NOT flag: missing CLAUDE.md (handled separately), missing LICENSE '
+        '(many private projects intentionally omit it), or style preferences.\n'
+        'Only flag issues you are highly confident about based on the listing.\n\n'
         'Respond with JSON only: {"issues": [{"summary": "...", "evidence": "...", "critical": false}]}\n'
-        'Set "critical" to true ONLY for issues that pose a security risk, risk of data loss, '
-        'or would break a production deployment. Missing best-practice files are never critical.\n'
+        'Set "critical" to true ONLY for security risks, data loss risks, '
+        'or broken deployments. Missing best-practice files are never critical.\n'
         'If project looks healthy: {"issues": []}'
     )
     response, tokens = _run_haiku(prompt, settings)
