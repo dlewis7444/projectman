@@ -12,10 +12,6 @@ import time
 
 from paa_ledger import LedgerItem, make_item_id, now_iso
 
-_MANIFEST_FILES = [
-    'requirements.txt', 'pyproject.toml', 'package.json',
-    'Cargo.toml', 'go.mod', 'Gemfile', 'pom.xml',
-]
 
 
 # ── Manifest parsers ──────────────────────────────────────────────────────
@@ -132,7 +128,6 @@ def check_stale_projects(projects, settings):
 def check_cross_references(projects):
     """Check CLAUDE.md files for broken references to sibling projects."""
     known_names = {p.name for p in projects}
-    known_paths = {p.path for p in projects}
     items = []
     for project in projects:
         claude_md = os.path.join(project.path, 'CLAUDE.md')
@@ -181,12 +176,13 @@ def check_shared_dep_conflicts(projects, settings):
                 break  # first manifest wins per project
 
     # Find conflicts: same package, different version specs
+    # Wildcard '*' (no pin) is compatible with everything — ignore it
     conflicts = {}
     for pkg, proj_specs in dep_map.items():
         if len(proj_specs) < 2:
             continue
-        specs = set(proj_specs.values())
-        if len(specs) > 1:
+        pinned_specs = {s for s in proj_specs.values() if s != '*'}
+        if len(pinned_specs) > 1:
             conflicts[pkg] = proj_specs
 
     if not conflicts:

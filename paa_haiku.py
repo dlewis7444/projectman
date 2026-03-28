@@ -4,7 +4,7 @@ import subprocess
 from paa_ledger import LedgerItem, make_item_id, now_iso
 
 _HAIKU_TIMEOUT = 30
-_MAX_CONTENT_CHARS = 4000
+_MAX_CONTENT_CHARS = 16000
 
 # Manifest files to check for dependency analysis (first found wins)
 _MANIFEST_FILES = [
@@ -90,14 +90,16 @@ def check_semantic_staleness(project_name, project_path, settings):
 
     listing = _top_level_listing(project_path)
     prompt = (
-        'You are auditing a project\'s CLAUDE.md for accuracy.\n\n'
+        'You are auditing a project\'s CLAUDE.md for accuracy.\n'
+        'IMPORTANT: Do NOT read any files yourself. ALL project data is provided below. '
+        'Your working directory is NOT the project — do not inspect it.\n\n'
+        f'Project: {project_name}\n'
         f'Project directory listing (top-level):\n{listing}\n\n'
-        f'CLAUDE.md contents:\n{content}\n\n'
+        f'CLAUDE.md contents (may be truncated):\n{content}\n\n'
         'Check if CLAUDE.md references files, directories, commands, or patterns '
-        'that no longer match the actual project structure.\n'
-        'Only flag concrete mismatches (e.g. a referenced file that no longer exists). '
-        'Do NOT flag perceived truncation, incomplete sections, or markdown formatting.\n'
-        'The content below may be truncated for size — ignore where the text ends.\n\n'
+        'that no longer match the actual project structure shown in the listing above.\n'
+        'Only flag concrete mismatches where a referenced file/directory is NOT in the listing. '
+        'Do NOT flag truncation, incomplete sections, or markdown formatting.\n\n'
         'Respond with JSON only: {"issues": [{"summary": "...", "evidence": "...", "critical": false}]}\n'
         'Set "critical" to true ONLY for issues that would cause builds to fail, '
         'data loss, or security vulnerabilities. Stale documentation alone is never critical.\n'
@@ -142,7 +144,8 @@ def check_dependency_versions(project_name, project_path, settings):
         return ([], 0)
 
     prompt = (
-        f'Check this {manifest_name} for outdated, insecure, or problematic dependencies.\n\n'
+        f'Check this {manifest_name} for outdated, insecure, or problematic dependencies.\n'
+        'IMPORTANT: Do NOT read any files yourself. ALL data is provided below.\n\n'
         f'{manifest_name}:\n{manifest_content}\n\n'
         'Only flag dependencies that are significantly outdated (major version behind) '
         'or have known security issues. Do not flag minor version differences.\n\n'
@@ -189,15 +192,18 @@ def check_project_health(project_name, project_path, settings):
         context += f'\n\nCLAUDE.md (truncated):\n{claude_md}'
 
     prompt = (
-        'You are doing a quick health check on a project.\n\n'
+        'You are doing a quick health check on a project.\n'
+        'IMPORTANT: Do NOT read any files yourself. ALL project data is provided below. '
+        'Your working directory is NOT the project — do not inspect it.\n'
+        'The file listing below is COMPLETE and AUTHORITATIVE — if a file appears, it EXISTS.\n\n'
         f'Project: {project_name}\n'
         f'Contents:\n{context}\n\n'
-        'Look for concrete, verifiable issues only. The file listing above is complete — '
-        'if a file appears in the listing, it EXISTS. Do not claim a file is missing '
-        'if it is shown in the listing.\n'
-        'Do NOT flag: missing CLAUDE.md (handled separately), missing LICENSE '
-        '(many private projects intentionally omit it), or style preferences.\n'
-        'Only flag issues you are highly confident about based on the listing.\n\n'
+        'The listing includes gitignored files (like __pycache__). Their presence '
+        'does NOT mean they are committed to version control.\n'
+        'Do NOT flag: missing CLAUDE.md (handled separately), missing LICENSE/README '
+        '(many private projects intentionally omit these), style preferences, '
+        'or files that ARE present in the listing.\n'
+        'Only flag concrete issues you are highly confident about.\n\n'
         'Respond with JSON only: {"issues": [{"summary": "...", "evidence": "...", "critical": false}]}\n'
         'Set "critical" to true ONLY for security risks, data loss risks, '
         'or broken deployments. Missing best-practice files are never critical.\n'
