@@ -55,6 +55,14 @@ def check_missing_claude_md(project_name, project_path):
     return []
 
 
+def _find_in_tree(root, filename):
+    """Return True if *filename* exists anywhere under *root*."""
+    for dirpath, _dirs, files in os.walk(root):
+        if filename in files:
+            return True
+    return False
+
+
 def check_context_drift(project_name, project_path):
     """Flag CLAUDE.md references to files that no longer exist."""
     claude_md = os.path.join(project_path, 'CLAUDE.md')
@@ -84,6 +92,10 @@ def check_context_drift(project_name, project_path):
     items = []
     for ref in failing:
         if os.path.basename(ref) in valid_basenames:
+            continue
+        # Bare filenames (no path separator) may live in a subdirectory —
+        # search the project tree before flagging.
+        if '/' not in ref and _find_in_tree(project_path, ref):
             continue
         items.append(LedgerItem(
             id=make_item_id('context-drift', project_name, ref),
