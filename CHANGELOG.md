@@ -2,6 +2,16 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
+## [0.4.1] - 2026-03-30
+
+### Fixed
+- **Shutdown hang**: SIGTERM race in `bash -c 'claude -c || exec claude'` could respawn a new claude that never received the signal, causing the shutdown window to spin indefinitely. Now only restarts for normal failures (exit 1–128), not signal kills (>128).
+- **Process linger after Force Shutdown**: added explicit `app.quit()` after window destroy as a safety net so the Python process always exits.
+- **Context-drift false positives**: bare filenames mentioned in prose (e.g. `setup-env.sh`) no longer flag when the same file is already referenced by a valid full path elsewhere in CLAUDE.md. Also fixed resolution of absolute paths (not just `~` and relative).
+
+### Improved
+- **Discuss sibling cards**: clicking Discuss on a PAA card now includes other pending findings for the same project in the prompt, so Claude is aware of related issues the user may want to address as a group.
+
 ## [0.4.0] - 2026-03-28
 
 ### Added
