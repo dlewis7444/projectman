@@ -64,23 +64,37 @@ def check_context_drift(project_name, project_path):
     except FileNotFoundError:
         return []
     refs = extract_file_references(content)
-    items = []
+    # Two-pass check: first collect basenames of refs that resolve, then
+    # skip bare-name failures whose basename is covered by a valid full-path
+    # ref.  This prevents false positives when CLAUDE.md mentions a file by
+    # bare name in prose while also giving its full external path elsewhere.
+    valid_basenames = set()
+    failing = []
     for ref in sorted(refs):
         if ref.startswith('~'):
             full = os.path.expanduser(ref)
+        elif os.path.isabs(ref):
+            full = ref
         else:
             full = os.path.join(project_path, ref.lstrip('./'))
-        if not os.path.exists(full):
-            items.append(LedgerItem(
-                id=make_item_id('context-drift', project_name, ref),
-                type='context-drift',
-                project=project_name,
-                project_path=project_path,
-                summary=f'CLAUDE.md references `{ref}` which does not exist',
-                evidence=f'File reference `{ref}` in CLAUDE.md — not found on disk',
-                severity='action-needed',
-                created=now_iso(),
-            ))
+        if os.path.exists(full):
+            valid_basenames.add(os.path.basename(ref))
+        else:
+            failing.append(ref)
+    items = []
+    for ref in failing:
+        if os.path.basename(ref) in valid_basenames:
+            continue
+        items.append(LedgerItem(
+            id=make_item_id('context-drift', project_name, ref),
+            type='context-drift',
+            project=project_name,
+            project_path=project_path,
+            summary=f'CLAUDE.md references `{ref}` which does not exist',
+            evidence=f'File reference `{ref}` in CLAUDE.md — not found on disk',
+            severity='action-needed',
+            created=now_iso(),
+        ))
     return items
 
 

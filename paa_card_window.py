@@ -354,6 +354,26 @@ class PAACardWindow(Adw.Window):
             return
 
         type_label = _TYPE_LABELS.get(item.type, item.type)
+
+        # Collect other pending cards for the same project
+        siblings = [
+            i for i in self._ledger.pending_items()
+            if i.project == item.project and i.id != item.id
+        ]
+        sibling_block = ''
+        if siblings:
+            lines = []
+            for s in siblings:
+                lbl = _TYPE_LABELS.get(s.type, s.type)
+                lines.append(f'  - [{s.severity}] {lbl}: {s.summary}')
+            sibling_block = (
+                f'\n\nOTHER PENDING FINDINGS FOR THIS PROJECT '
+                f'({len(siblings)}):\n'
+                + '\n'.join(lines)
+                + '\n\nThe user may want to address some of these together. '
+                  'Focus on the primary finding above unless asked.'
+            )
+
         prompt = (
             f'DISCUSS FINDING\n\n'
             f'Type: {item.type}\n'
@@ -363,6 +383,7 @@ class PAACardWindow(Adw.Window):
             f'Evidence: {item.evidence}\n\n'
             f'Please help me understand this finding and suggest how to address it. '
             f'The project is at ../{item.project}/ relative to your working directory.'
+            f'{sibling_block}'
         )
         self._discussing_item_id = item.id
         self._reveal_terminal()

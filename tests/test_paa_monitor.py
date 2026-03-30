@@ -126,6 +126,36 @@ def test_check_context_drift_multiple_refs(tmp_path):
     assert len(items) == 2
 
 
+def test_check_context_drift_bare_name_covered_by_full_path(tmp_path):
+    """Bare filename mentioned in prose should not flag if a full-path ref
+    to the same basename already exists and resolves."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    # Create the external file at a path outside the project
+    ext_dir = tmp_path / 'external' / 'scripts'
+    ext_dir.mkdir(parents=True)
+    script = ext_dir / 'setup-env.sh'
+    script.write_text('#!/bin/bash\n')
+    (proj / 'CLAUDE.md').write_text(
+        f'| `{script}` | Setup script |\n\n'
+        'If missing, run `setup-env.sh` to configure.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 0, f'unexpected drift items: {[i.summary for i in items]}'
+
+
+def test_check_context_drift_bare_name_no_covering_path(tmp_path):
+    """Bare filename should still flag if no full-path ref covers it."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text(
+        'Run `missing-tool.sh` to deploy.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 1
+    assert 'missing-tool.sh' in items[0].summary
+
+
 def test_check_no_git_absent(tmp_path):
     proj = tmp_path / 'myproj'
     proj.mkdir()
