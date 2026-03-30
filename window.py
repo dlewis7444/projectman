@@ -35,6 +35,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._zellij_watcher = zellij_watcher
         self._paa_ledger = paa_ledger
         self._paa_monitor = paa_monitor
+        self._paa_prev_count = paa_ledger.pending_count if paa_ledger else 0
         if paa_monitor:
             paa_monitor.connect('findings-changed', self._on_paa_findings_changed)
             paa_monitor.connect('scan-progress', self._on_paa_scan_progress)
@@ -480,8 +481,9 @@ class AppWindow(Adw.ApplicationWindow):
 
     def _on_paa_findings_changed(self, monitor, pending_count):
         self._sidebar.set_paa_pending_count(pending_count)
-        if pending_count > 0 and self._paa_win is None:
+        if pending_count > self._paa_prev_count and self._paa_win is None:
             self._sidebar.start_paa_throb()
+        self._paa_prev_count = pending_count
         if self._paa_win is not None:
             self._paa_win.refresh_from_scan()
 
