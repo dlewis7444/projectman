@@ -156,6 +156,18 @@ def test_check_context_drift_bare_name_no_covering_path(tmp_path):
     assert 'missing-tool.sh' in items[0].summary
 
 
+def test_check_context_drift_bare_name_in_subdirectory(tmp_path):
+    """Bare filename found in a project subdirectory should not flag."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    sub = proj / 'workflows'
+    sub.mkdir()
+    (sub / 'deploy.json').write_text('{}')
+    (proj / 'CLAUDE.md').write_text('Workflow: `deploy.json`\n')
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 0, f'unexpected: {[i.summary for i in items]}'
+
+
 def test_check_no_git_absent(tmp_path):
     proj = tmp_path / 'myproj'
     proj.mkdir()
