@@ -179,7 +179,14 @@ class AppWindow(Adw.ApplicationWindow):
 
     def _open_shutdown_window(self, running):
         self._save_session()      # snapshot before SIGTERM
-        ShutdownWindow(parent=self, running=running, on_complete=self.destroy)
+        ShutdownWindow(parent=self, running=running, on_complete=self._quit)
+
+    def _quit(self):
+        """Destroy the main window and explicitly quit the application."""
+        app = self.get_application()
+        self.destroy()
+        if app:
+            app.quit()
 
     def _save_session(self):
         """Snapshot running terminals to SESSION_FILE (atomic write)."""

@@ -287,10 +287,15 @@ class TerminalView(Gtk.Box):
             argv = [claude_cmd]
         else:
             # Try continuing most recent conversation; fall back to fresh
-            # if there's no history (claude -c exits non-zero).
+            # if there's no history (claude -c exits non-zero due to normal
+            # failure, not a signal kill).  Exit codes >128 mean killed by
+            # signal (128 + signum), so we only restart for codes 1-128.
+            # Without this guard, a SIGTERM race can cause bash to exec a new
+            # claude after the old one exits with 143, leaving a process that
+            # never received SIGTERM and causing the shutdown window to spin.
             import shlex
             c = shlex.quote(claude_cmd)
-            argv = ['bash', '-c', f'{c} -c || exec {c}']
+            argv = ['bash', '-c', f'{c} -c; s=$?; [ "$s" -gt 0 ] && [ "$s" -le 128 ] && exec {c}']
         self._is_multiplexed = False
         self._spawn(argv)
 
