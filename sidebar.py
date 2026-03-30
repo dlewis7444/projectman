@@ -745,7 +745,9 @@ class ResourceBar(Gtk.Box):
     def _update(self):
         data = self._reader.read()
         self._cpu_label.set_label(f"CPU: {data['cpu_pct']:.0f}%")
-        self._ram_label.set_label(
-            f"RAM: {data['mem_used_gb']:.1f}/{data['mem_total_gb']:.1f} GB"
-        )
+        mem = data['mem_mb']
+        if mem >= 1024:
+            self._ram_label.set_label(f"RAM: {mem / 1024:.1f} GB")
+        else:
+            self._ram_label.set_label(f"RAM: {mem:.0f} MB")
         return GLib.SOURCE_CONTINUE
