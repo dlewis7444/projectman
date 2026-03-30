@@ -272,48 +272,82 @@ class ProjectsWatcher(GObject.GObject):
 
 
 class ResourceReader:
+    """Read CPU and RAM usage for ProjectMan and all its descendant processes."""
+
+    _PAGE_SIZE = os.sysconf('SC_PAGESIZE')
+    _CLK_TCK = os.sysconf('SC_CLK_TCK')
+    _NUM_CPUS = os.cpu_count() or 1
+
     def __init__(self):
-        self._prev_idle = 0
-        self._prev_total = 0
+        self._pid = os.getpid()
+        self._prev_ticks = 0
+        self._prev_time = 0.0
 
     def read(self):
-        cpu_pct = self._read_cpu()
-        mem_used, mem_total = self._read_mem()
+        pids = self._get_tree(self._pid)
+        cpu_pct = self._read_cpu(pids)
+        mem_mb = self._read_mem(pids)
         return {
             'cpu_pct': cpu_pct,
-            'mem_used_gb': mem_used,
-            'mem_total_gb': mem_total,
+            'mem_mb': mem_mb,
         }
 
-    def _read_cpu(self):
-        try:
-            with open('/proc/stat', 'r') as f:
-                parts = f.readline().split()
-            values = [int(x) for x in parts[1:]]
-            idle = values[3] + values[4]
-            total = sum(values)
-            d_idle = idle - self._prev_idle
-            d_total = total - self._prev_total
-            self._prev_idle = idle
-            self._prev_total = total
-            if d_total == 0:
-                return 0.0
-            return (1.0 - d_idle / d_total) * 100.0
-        except (FileNotFoundError, IndexError, ValueError):
-            return 0.0
+    @staticmethod
+    def _get_tree(root_pid):
+        """Collect root_pid and all descendants via /proc/<pid>/task/*/children."""
+        pids = []
+        queue = [root_pid]
+        while queue:
+            pid = queue.pop()
+            pids.append(pid)
+            try:
+                task_dir = f'/proc/{pid}/task'
+                for tid in os.listdir(task_dir):
+                    children_file = f'{task_dir}/{tid}/children'
+                    try:
+                        with open(children_file) as f:
+                            for child in f.read().split():
+                                queue.append(int(child))
+                    except (FileNotFoundError, ValueError):
+                        pass
+            except FileNotFoundError:
+                pass
+        return pids
 
-    def _read_mem(self):
-        try:
-            mem_total = 0
-            mem_available = 0
-            with open('/proc/meminfo', 'r') as f:
-                for line in f:
-                    if line.startswith('MemTotal:'):
-                        mem_total = int(line.split()[1])
-                    elif line.startswith('MemAvailable:'):
-                        mem_available = int(line.split()[1])
-            total_gb = mem_total / (1024 * 1024)
-            used_gb = (mem_total - mem_available) / (1024 * 1024)
-            return used_gb, total_gb
-        except (FileNotFoundError, IndexError, ValueError):
-            return 0.0, 0.0
+    def _read_cpu(self, pids):
+        """CPU percentage of the process tree over the elapsed interval."""
+        total_ticks = 0
+        for pid in pids:
+            try:
+                with open(f'/proc/{pid}/stat') as f:
+                    fields = f.read().rsplit(') ', 1)[1].split()
+                # fields[11]=utime, fields[12]=stime (0-indexed after ')')
+                total_ticks += int(fields[11]) + int(fields[12])
+            except (FileNotFoundError, IndexError, ValueError):
+                pass
+        now = _monotonic()
+        dt = now - self._prev_time
+        dticks = total_ticks - self._prev_ticks
+        self._prev_ticks = total_ticks
+        self._prev_time = now
+        if dt <= 0 or self._prev_time == now and self._prev_ticks == total_ticks:
+            return 0.0
+        secs_used = dticks / self._CLK_TCK
+        return min(secs_used / dt * 100.0, self._NUM_CPUS * 100.0)
+
+    def _read_mem(self, pids):
+        """Total RSS of the process tree in MB."""
+        total_pages = 0
+        for pid in pids:
+            try:
+                with open(f'/proc/{pid}/statm') as f:
+                    total_pages += int(f.read().split()[1])  # rss field
+            except (FileNotFoundError, IndexError, ValueError):
+                pass
+        return total_pages * self._PAGE_SIZE / (1024 * 1024)
+
+
+def _monotonic():
+    """time.monotonic() imported lazily to keep module-level side-effects minimal."""
+    import time
+    return time.monotonic()
