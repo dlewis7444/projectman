@@ -401,13 +401,17 @@ class AppWindow(Adw.ApplicationWindow):
             project = self._find_project(path)
             if project:
                 sname = z.session_name(project.name)
+                # Clear zellij flags BEFORE killing the session so that
+                # _on_child_exited emits process-exited (not process-detached).
+                # Without this, a race exists: the VTE child may exit before
+                # zellij finishes cleaning up the session socket, causing
+                # session_alive() to return True and the project to stay
+                # visible as "detached" in the Active list.
+                tv._is_zellij = False
+                tv._zellij_session = None
                 if z.session_exists(sname):
                     subprocess.run(['zellij', 'kill-session', sname],
                                    capture_output=True)
-                    # Killing the session causes the `zellij attach` VTE child to exit on its own.
-                    # _on_child_exited fires → session_exists returns False → process-exited emitted
-                    # → set_project_state(path, 'inactive') via the signal handler.
-                    # If detached (no VTE child), force the state update immediately:
                     if tv._child_pid is None:
                         self._sidebar.set_project_state(path, 'inactive')
         else:
