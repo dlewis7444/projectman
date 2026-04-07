@@ -25,7 +25,41 @@ running `claude` (or `zellij attach`) per project. Projects are directories unde
 - Sidebar pin/collapse with persistent width
 - Terminal right-click menu (Copy, Paste, Select All, Open URL / Copy URL)
 - Ctrl+click to open URLs and file paths
-- CPU / RAM resource bar
+- Process-tree CPU / RAM resource bar
+- ntfy push notifications on session completion
+
+### Projects Admin Agent (PAA)
+
+The sparkle (✦) button in the sidebar opens the PAA — a background health monitor that
+continuously scans your projects and surfaces actionable findings in a card-based window.
+
+**Filesystem checks (always on):**
+- Missing `CLAUDE.md`
+- No git repository
+- Context drift — stale file references in `CLAUDE.md` (bare filenames, relative paths,
+  and absolute paths all resolved; external references deduplicated automatically)
+
+**AI checks (optional, requires Haiku API access):**
+- Semantic staleness — `CLAUDE.md` no longer describes what the project actually does
+- Outdated or conflicting dependency versions
+- General project health
+
+**Cross-project analysis:**
+- Stale projects (configurable inactivity threshold)
+- Broken `../sibling/` references between projects
+- Shared dependency version conflicts
+
+**Card window:**
+- Filter by project, criticality, or finding type
+- **Discuss** button — opens an interactive Claude session with the finding pre-loaded as
+  context, plus any other pending findings for the same project so related issues can be
+  addressed together
+- Dismiss / Acknowledge actions with persistent ledger (survives restarts)
+- Sparkle button throbs only when new findings appear
+
+**PAA settings (Settings → PAA):**
+- Enable/disable toggle and scan interval
+- Haiku toggle, monthly token budget, and model selection for scans and chat
 
 ## Requirements
 
@@ -145,6 +179,7 @@ python -m pytest
 | `~/.ProjectMan/settings.json` | App settings |
 | `~/.ProjectMan/session.json` | Session restore data |
 | `~/.ProjectMan/projects/` | Default projects directory |
+| `~/.ProjectMan/paa-ledger.json` | PAA findings ledger |
 | `~/.claude/projectman/hook.js` | Claude Code hook script for status updates |
 | `~/.claude/settings.json` | Claude Code settings (hook registration) |
 
