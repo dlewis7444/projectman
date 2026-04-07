@@ -167,9 +167,13 @@ class TerminalView(Gtk.Box):
             print(f'[DBG] {msg}', flush=True)
 
     def _on_ctrl_click(self, gesture, n_press, x, y):
-        state = gesture.get_current_event_state()
+        # get_current_event_state() can drop modifiers on Wayland/GTK4 —
+        # pull the state directly from the underlying GdkEvent instead.
+        seq = gesture.get_current_sequence()
+        event = gesture.get_last_event(seq)
+        state = event.get_modifier_state() if event else gesture.get_current_event_state()
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
-        self._debug(f'click n_press={n_press} x={x:.1f} y={y:.1f} ctrl={ctrl}')
+        self._debug(f'click n_press={n_press} x={x:.1f} y={y:.1f} ctrl={ctrl} state={int(state)}')
         if not ctrl:
             return
         self._open_url_at_coords(x, y)
