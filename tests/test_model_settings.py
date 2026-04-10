@@ -176,3 +176,47 @@ def test_status_watcher_reload_replaces_dict_atomically(tmp_path, monkeypatch):
     (tmp_path / 'tmp-atomicproject.json').unlink()
     w._reload()
     assert os.path.realpath(proj_path) not in w._status
+
+
+def test_status_watcher_worktree_collapse_prefers_latest_timestamp(tmp_path, monkeypatch):
+    """When a main project and its worktrees both have status files that
+    collapse to the same project key, the snapshot with the newest ts must
+    win — not whichever os.scandir happens to yield last. Without this,
+    a stale worktree 'working' update can clobber the parent's real
+    'waiting'/'done' state and leave the sidebar dot stuck yellow."""
+    import model
+    monkeypatch.setattr(model, 'STATUS_DIR', str(tmp_path))
+    proj_path = '/tmp/collapsetest'
+    # Stale worktree status (state=working, old ts)
+    (tmp_path / 'worktree-phase1.json').write_text(json.dumps({
+        'state': 'working', 'event': 'PreToolUse',
+        'cwd': proj_path + '/.worktrees/phase1',
+        'ts': 1000, 'session': 'x', 'tool': 'Bash',
+    }))
+    # Main project status (state=waiting, newest ts)
+    (tmp_path / 'main.json').write_text(json.dumps({
+        'state': 'waiting', 'event': 'Notification',
+        'cwd': proj_path, 'ts': 2000, 'session': 'y',
+    }))
+    # Even staler worktree status (state=working, oldest ts)
+    (tmp_path / 'worktree-phase2.json').write_text(json.dumps({
+        'state': 'working', 'event': 'PreToolUse',
+        'cwd': proj_path + '/.worktrees/phase2',
+        'ts': 500, 'session': 'z', 'tool': 'Bash',
+    }))
+    # Force the worst-case scandir order: main is read first, then stale
+    # worktree files clobber it. This is exactly the real-world scenario
+    # that produced the stuck-yellow-dot bug on dex-arbitrage-bot.
+    real_scandir = os.scandir
+    def ordered_scandir(path):
+        entries = sorted(real_scandir(path), key=lambda e: (0 if 'main' in e.name else 1, e.name))
+        return iter(entries)
+    monkeypatch.setattr(model.os, 'scandir', ordered_scandir)
+    w = StatusWatcher()
+    w._reload()
+    key = os.path.realpath(proj_path)
+    snap = w._status[key]
+    assert snap.state == 'waiting', (
+        f"parent's state was clobbered by stale worktree; got state={snap.state!r} ts={snap.ts}"
+    )
+    assert snap.ts == 2000

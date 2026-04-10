@@ -216,7 +216,7 @@ class StatusWatcher(GObject.GObject):
                     wt_idx = key.find(wt)
                     if wt_idx != -1:
                         key = key[:wt_idx]
-                    new_status[key] = StatusSnapshot(
+                    snapshot = StatusSnapshot(
                         event=data.get('event', ''),
                         cwd=cwd,
                         ts=data.get('ts', 0),
@@ -224,6 +224,13 @@ class StatusWatcher(GObject.GObject):
                         tool=data.get('tool'),
                         state=data.get('state', 'done'),
                     )
+                    # Multiple status files (main project + worktrees) can
+                    # collapse to the same key. Keep the newest snapshot so
+                    # the parent's own state isn't clobbered by a stale
+                    # worktree update based on filesystem scan order.
+                    existing = new_status.get(key)
+                    if existing is None or snapshot.ts >= existing.ts:
+                        new_status[key] = snapshot
                 except (OSError, json.JSONDecodeError):
                     continue
         except Exception:
