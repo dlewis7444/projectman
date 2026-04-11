@@ -44,15 +44,14 @@ def test_set_process_state_back_to_inactive_clears_css():
     assert not row._name_label.has_css_class('project-row-detached')
 
 
-def test_deactivate_action_enabled_only_when_attached():
-    # GLib booleans are not Python True/False by identity — use bool()
+def test_deactivate_button_enabled_only_when_attached():
     row = _make_row()
     row.set_process_state('attached')
-    assert bool(row._deactivate_action.get_enabled()) is True
+    assert row._deactivate_btn.get_sensitive() is True
     row.set_process_state('detached')
-    assert bool(row._deactivate_action.get_enabled()) is False
+    assert row._deactivate_btn.get_sensitive() is False
     row.set_process_state('inactive')
-    assert bool(row._deactivate_action.get_enabled()) is False
+    assert row._deactivate_btn.get_sensitive() is False
 
 
 def test_update_status_attached_no_file_shows_done():
