@@ -178,45 +178,48 @@ def test_status_watcher_reload_replaces_dict_atomically(tmp_path, monkeypatch):
     assert os.path.realpath(proj_path) not in w._status
 
 
-def test_status_watcher_worktree_collapse_prefers_latest_timestamp(tmp_path, monkeypatch):
-    """When a main project and its worktrees both have status files that
-    collapse to the same project key, the snapshot with the newest ts must
-    win — not whichever os.scandir happens to yield last. Without this,
-    a stale worktree 'working' update can clobber the parent's real
-    'waiting'/'done' state and leave the sidebar dot stuck yellow."""
+def test_status_watcher_worktree_files_do_not_affect_parent_with_no_main(tmp_path, monkeypatch):
+    """Worktree status files belong to a separate cwd and must not roll up
+    to the parent project's dot. A project whose main session has cleanly
+    exited (no main status file) must show as idle even if its worktrees
+    left stale 'working' status files behind from non-graceful exits.
+
+    This is the dex-arbitrage-bot stuck-yellow case."""
     import model
     monkeypatch.setattr(model, 'STATUS_DIR', str(tmp_path))
-    proj_path = '/tmp/collapsetest'
-    # Stale worktree status (state=working, old ts)
-    (tmp_path / 'worktree-phase1.json').write_text(json.dumps({
-        'state': 'working', 'event': 'PreToolUse',
-        'cwd': proj_path + '/.worktrees/phase1',
-        'ts': 1000, 'session': 'x', 'tool': 'Bash',
-    }))
-    # Main project status (state=waiting, newest ts)
-    (tmp_path / 'main.json').write_text(json.dumps({
-        'state': 'waiting', 'event': 'Notification',
-        'cwd': proj_path, 'ts': 2000, 'session': 'y',
-    }))
-    # Even staler worktree status (state=working, oldest ts)
-    (tmp_path / 'worktree-phase2.json').write_text(json.dumps({
-        'state': 'working', 'event': 'PreToolUse',
-        'cwd': proj_path + '/.worktrees/phase2',
-        'ts': 500, 'session': 'z', 'tool': 'Bash',
-    }))
-    # Force the worst-case scandir order: main is read first, then stale
-    # worktree files clobber it. This is exactly the real-world scenario
-    # that produced the stuck-yellow-dot bug on dex-arbitrage-bot.
-    real_scandir = os.scandir
-    def ordered_scandir(path):
-        entries = sorted(real_scandir(path), key=lambda e: (0 if 'main' in e.name else 1, e.name))
-        return iter(entries)
-    monkeypatch.setattr(model.os, 'scandir', ordered_scandir)
+    proj_path = '/tmp/parentproj'
+    # Three stale worktree status files, increasing ts; no main file
+    for i, ts in enumerate((1000, 2000, 3000)):
+        (tmp_path / f'worktree-phase{i}.json').write_text(json.dumps({
+            'state': 'working', 'event': 'PreToolUse',
+            'cwd': f'{proj_path}/.worktrees/phase{i}',
+            'ts': ts, 'session': f's{i}', 'tool': 'Bash',
+        }))
     w = StatusWatcher()
     w._reload()
-    key = os.path.realpath(proj_path)
-    snap = w._status[key]
-    assert snap.state == 'waiting', (
-        f"parent's state was clobbered by stale worktree; got state={snap.state!r} ts={snap.ts}"
-    )
-    assert snap.ts == 2000
+    proj = Project(name='parentproj', path=os.path.realpath(proj_path))
+    assert w.get_project_status(proj) == 'idle'
+
+
+def test_status_watcher_parent_state_independent_of_worktrees(tmp_path, monkeypatch):
+    """When a project has its own main status file, that file is authoritative
+    for the parent dot. Worktree status files in subdirectories — even if
+    newer and in a 'working' state — must not influence it."""
+    import model
+    monkeypatch.setattr(model, 'STATUS_DIR', str(tmp_path))
+    proj_path = '/tmp/maincoexist'
+    # Stale-but-newer worktree saying 'working'
+    (tmp_path / 'worktree.json').write_text(json.dumps({
+        'state': 'working', 'event': 'PreToolUse',
+        'cwd': proj_path + '/.worktrees/phase1',
+        'ts': 9999, 'session': 'x', 'tool': 'Bash',
+    }))
+    # Older main with 'done' — must still win the parent dot
+    (tmp_path / 'main.json').write_text(json.dumps({
+        'state': 'done', 'event': 'Stop',
+        'cwd': proj_path, 'ts': 5000, 'session': 'y',
+    }))
+    w = StatusWatcher()
+    w._reload()
+    proj = Project(name='maincoexist', path=os.path.realpath(proj_path))
+    assert w.get_project_status(proj) == 'done'
