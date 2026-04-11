@@ -403,27 +403,13 @@ class ProjectRow(Gtk.ListBoxRow):
         actions_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         actions_box.add_css_class('project-row-actions')
 
-        self._restart_btn = Gtk.Button.new_from_icon_name('view-refresh-symbolic')
-        self._restart_btn.add_css_class('flat')
-        self._restart_btn.set_valign(Gtk.Align.CENTER)
-        self._restart_btn.set_tooltip_text('Restart Claude (new session)')
-        self._restart_btn.set_sensitive(False)  # only enabled when process running
-        self._restart_btn.connect('clicked', lambda b: self._show_confirm_popover(b, lambda: self.emit('project-new-claude')))
-        actions_box.append(self._restart_btn)
-
-        archive_btn = Gtk.Button.new_from_icon_name('mail-archive-symbolic')
-        archive_btn.add_css_class('flat')
-        archive_btn.set_valign(Gtk.Align.CENTER)
-        archive_btn.set_tooltip_text('Archive project')
-        archive_btn.connect('clicked', lambda b: self._show_confirm_popover(b, lambda: self.emit('project-archive')))
-        actions_box.append(archive_btn)
-
-        self._new_session_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
-        self._new_session_btn.add_css_class('flat')
-        self._new_session_btn.set_valign(Gtk.Align.CENTER)
-        self._new_session_btn.set_tooltip_text('New Claude session')
-        self._new_session_btn.connect('clicked', lambda b: self.emit('project-new-claude'))
-        actions_box.append(self._new_session_btn)
+        self._deactivate_btn = Gtk.Button.new_from_icon_name('media-playback-stop-symbolic')
+        self._deactivate_btn.add_css_class('flat')
+        self._deactivate_btn.set_valign(Gtk.Align.CENTER)
+        self._deactivate_btn.set_tooltip_text('Deactivate Claude session')
+        self._deactivate_btn.set_sensitive(False)  # only enabled when process running
+        self._deactivate_btn.connect('clicked', lambda b: self._show_confirm_popover(b, lambda: self.emit('project-deactivate')))
+        actions_box.append(self._deactivate_btn)
 
         top.append(actions_box)
 
@@ -445,7 +431,6 @@ class ProjectRow(Gtk.ListBoxRow):
         self._menu.append('New Zellij Session', 'row.zellij')
         self._menu.append('Haiku Check',        'row.haiku-check')
         self._menu.append('Rename',             'row.rename')
-        self._menu.append('Deactivate',         'row.deactivate')
         self._menu.append('Archive',            'row.archive')
 
         ag = Gio.SimpleActionGroup()
@@ -458,8 +443,6 @@ class ProjectRow(Gtk.ListBoxRow):
             return action
 
         self._new_claude_action = _add('new-claude', 'project-new-claude')
-        self._deactivate_action = _add('deactivate', 'project-deactivate')
-        self._deactivate_action.set_enabled(False)
         _add('zellij',       'project-zellij')
         _add('haiku-check',  'project-haiku-check')
         _add('archive',      'project-archive')
@@ -569,9 +552,7 @@ class ProjectRow(Gtk.ListBoxRow):
             self._is_zellij = True
         elif state == 'inactive':
             self._is_zellij = False
-        self._deactivate_action.set_enabled(state == 'attached')
-        self._restart_btn.set_sensitive(state == 'attached')
-        self._new_session_btn.set_sensitive(not self._is_zellij)
+        self._deactivate_btn.set_sensitive(state == 'attached')
         self._new_claude_action.set_enabled(not self._is_zellij)
         if self._new_session_row is not None:
             self._new_session_row.set_sensitive(not self._is_zellij)
