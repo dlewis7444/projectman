@@ -167,11 +167,17 @@ class TerminalView(Gtk.Box):
             print(f'[DBG] {msg}', flush=True)
 
     def _on_ctrl_click(self, gesture, n_press, x, y):
-        # get_current_event_state() can drop modifiers on Wayland/GTK4 —
-        # pull the state directly from the underlying GdkEvent instead.
-        seq = gesture.get_current_sequence()
-        event = gesture.get_last_event(seq)
-        state = event.get_modifier_state() if event else gesture.get_current_event_state()
+        # GestureClick.get_current_event_state() and get_last_event() both
+        # drop modifiers on Wayland/GTK4 for mouse clicks. Query the live
+        # keyboard modifier state from the seat instead.
+        state = 0
+        display = Gdk.Display.get_default()
+        if display is not None:
+            seat = display.get_default_seat()
+            if seat is not None:
+                keyboard = seat.get_keyboard()
+                if keyboard is not None:
+                    state = keyboard.get_modifier_state()
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         self._debug(f'click n_press={n_press} x={x:.1f} y={y:.1f} ctrl={ctrl} state={int(state)}')
         if not ctrl:
