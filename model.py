@@ -211,12 +211,13 @@ class StatusWatcher(GObject.GObject):
                         key = os.path.realpath(cwd)
                     except OSError:
                         continue
-                    # Map worktree paths back to parent project
-                    wt = '/.worktrees/'
-                    wt_idx = key.find(wt)
-                    if wt_idx != -1:
-                        key = key[:wt_idx]
-                    snapshot = StatusSnapshot(
+                    # Each status file represents a single cwd. Worktree
+                    # status files are NOT rolled up to the parent project —
+                    # they're independent Claude sessions in independent
+                    # cwds, and conflating them lets stale worktree state
+                    # leak into the parent's dot when a worktree session
+                    # exits non-gracefully.
+                    new_status[key] = StatusSnapshot(
                         event=data.get('event', ''),
                         cwd=cwd,
                         ts=data.get('ts', 0),
@@ -224,13 +225,6 @@ class StatusWatcher(GObject.GObject):
                         tool=data.get('tool'),
                         state=data.get('state', 'done'),
                     )
-                    # Multiple status files (main project + worktrees) can
-                    # collapse to the same key. Keep the newest snapshot so
-                    # the parent's own state isn't clobbered by a stale
-                    # worktree update based on filesystem scan order.
-                    existing = new_status.get(key)
-                    if existing is None or snapshot.ts >= existing.ts:
-                        new_status[key] = snapshot
                 except (OSError, json.JSONDecodeError):
                     continue
         except Exception:
