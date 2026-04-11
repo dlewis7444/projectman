@@ -2,6 +2,17 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
+## [0.4.2] - 2026-04-11
+
+### Improved
+- **Resource bar**: shows PM process-tree CPU and RAM instead of system-wide
+- **Sidebar**: replaced row-toolbar restart/archive buttons with a single explicit Deactivate button (archive and new-Claude actions remain in the right-click menu)
+
+### Fixed
+- **StatusWatcher**: worktree status files no longer roll up to the parent project. Stale `working` state from non-gracefully-exited worktree sessions could clobber the parent dot, leaving it stuck yellow and triggering spurious "Interrupt Active Work?" dialogs on close.
+- **Deactivate**: clears zellij flags before killing the session to prevent detached ghost sessions.
+- **Ctrl+click on Wayland**: reads modifier state from the seat keyboard rather than the gesture event, which loses modifiers on GTK4/Wayland.
+
 ## [0.4.1] - 2026-03-30
 
 ### Fixed
