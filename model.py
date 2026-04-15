@@ -236,7 +236,21 @@ class StatusWatcher(GObject.GObject):
         snapshot = self._status.get(project.path)
         if snapshot is None:
             return 'idle'
-        return snapshot.state
+        # If the same session later moved its cwd into a subdirectory (e.g.
+        # `cd code && ...`), the hook writes a separate status file for that
+        # path.  The project-root snapshot becomes stale while the newer
+        # subdirectory snapshot holds the real state.  Pick the most recent
+        # snapshot among the project root and any same-session subdirectories.
+        # The session-ID guard keeps independent worktree sessions from leaking
+        # in — they have different session IDs.
+        prefix = project.path + os.sep
+        best = snapshot
+        for path, s in self._status.items():
+            if (path.startswith(prefix)
+                    and s.session == snapshot.session
+                    and s.ts > best.ts):
+                best = s
+        return best.state
 
 
 class ProjectsWatcher(GObject.GObject):
