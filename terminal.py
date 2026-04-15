@@ -185,33 +185,23 @@ class TerminalView(Gtk.Box):
         self._open_url_at_coords(x, y)
 
     def _url_at(self, x, y):
-        """Return URL/path string at pixel coords (x, y), or None."""
-        char_w = self._terminal.get_char_width()
-        if char_w <= 0:
-            return None
-        col = int(x / char_w)
-        row_count = self._terminal.get_row_count()
-        widget_h = self._terminal.get_allocated_height()
-        if row_count <= 0 or widget_h <= 0:
-            return None
-        row_from_top = int(y / (widget_h / row_count))
+        """Return URL/path string at pixel coords (x, y), or None.
+
+        Uses VTE's check_match_at() so the regexes registered earlier with
+        match_add_regex() do the work — including all the buffer/viewport
+        coordinate translation and scrollback awareness that the previous
+        manual implementation got wrong (it indexed scrollback rows with
+        viewport row numbers, so any active scrollback turned every click
+        into a "no match").
+        """
         try:
-            result = self._terminal.get_text_range_format(
-                Vte.Format.TEXT, 0, 0, row_count - 1, self._terminal.get_column_count()
-            )
-            text = result[0] if isinstance(result, tuple) else result
-            if not text:
-                return None
-            lines = text.split('\n')
-            if row_from_top >= len(lines):
-                return None
-            line = lines[row_from_top]
+            match, _tag = self._terminal.check_match_at(x, y)
         except Exception:
             return None
-        for m in re.finditer(r'https?://\S+|file://\S+|/[^\s]+', line):
-            if m.start() <= col <= m.end():
-                return re.sub(r'[)\].,;!?\'"]+$', '', m.group())
-        return None
+        if not match:
+            return None
+        # The registered \S+ regex greedily eats trailing punctuation.
+        return re.sub(r'[)\].,;!?\'"]+$', '', match)
 
     def _open_url_at_coords(self, x, y):
         url = self._url_at(x, y)
