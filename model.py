@@ -1,6 +1,7 @@
 import os
 import json
 import shutil
+from collections import deque
 from dataclasses import dataclass
 
 import gi
@@ -292,11 +293,17 @@ class ResourceReader:
     _PAGE_SIZE = os.sysconf('SC_PAGESIZE')
     _CLK_TCK = os.sysconf('SC_CLK_TCK')
     _NUM_CPUS = os.cpu_count() or 1
+    _WINDOW_SECONDS = 30.0
 
     def __init__(self):
         self._pid = os.getpid()
-        self._prev_ticks = 0
-        self._prev_time = 0.0
+        # Per-PID tick counts from the previous sample. Tracking per-PID (rather
+        # than a single summed total) keeps the delta meaningful when children
+        # come and go — otherwise a new/exiting subprocess makes the sum jump.
+        self._prev_pid_ticks = {}
+        self._prev_time = None
+        # Rolling window of (timestamp, dticks, dt) samples for the CPU average.
+        self._samples = deque()
 
     def read(self):
         pids = self._get_tree(self._pid)
@@ -330,25 +337,51 @@ class ResourceReader:
         return pids
 
     def _read_cpu(self, pids):
-        """CPU percentage of the process tree over the elapsed interval."""
-        total_ticks = 0
+        """Time-weighted average CPU% over a rolling ~30s window.
+
+        Per-PID tick tracking ensures the delta ignores children that joined
+        or exited between samples, so process-tree churn doesn't produce fake
+        spikes or zeros.
+        """
+        pid_ticks = {}
         for pid in pids:
             try:
                 with open(f'/proc/{pid}/stat') as f:
                     fields = f.read().rsplit(') ', 1)[1].split()
                 # fields[11]=utime, fields[12]=stime (0-indexed after ')')
-                total_ticks += int(fields[11]) + int(fields[12])
+                pid_ticks[pid] = int(fields[11]) + int(fields[12])
             except (FileNotFoundError, IndexError, ValueError):
                 pass
+
+        # Sum deltas only across PIDs we saw in both samples. New PIDs are
+        # recorded but contribute 0 this round; vanished PIDs are dropped.
+        dticks = 0
+        for pid, ticks in pid_ticks.items():
+            prev = self._prev_pid_ticks.get(pid)
+            if prev is not None:
+                delta = ticks - prev
+                if delta > 0:  # Guard against PID reuse (counter went backwards).
+                    dticks += delta
+        self._prev_pid_ticks = pid_ticks
+
         now = _monotonic()
-        dt = now - self._prev_time
-        dticks = total_ticks - self._prev_ticks
-        self._prev_ticks = total_ticks
+        prev_time = self._prev_time
         self._prev_time = now
-        if dt <= 0 or self._prev_time == now and self._prev_ticks == total_ticks:
+        if prev_time is None:
             return 0.0
-        secs_used = dticks / self._CLK_TCK
-        return min(secs_used / dt * 100.0, self._NUM_CPUS * 100.0)
+        dt = now - prev_time
+        if dt > 0:
+            self._samples.append((now, dticks, dt))
+            cutoff = now - self._WINDOW_SECONDS
+            while len(self._samples) > 1 and self._samples[0][0] < cutoff:
+                self._samples.popleft()
+
+        total_ticks = sum(s[1] for s in self._samples)
+        total_dt = sum(s[2] for s in self._samples)
+        if total_dt <= 0:
+            return 0.0
+        secs_used = total_ticks / self._CLK_TCK
+        return min(secs_used / total_dt * 100.0, self._NUM_CPUS * 100.0)
 
     def _read_mem(self, pids):
         """Total RSS of the process tree in MB."""
