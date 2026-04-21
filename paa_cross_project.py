@@ -148,6 +148,12 @@ def check_cross_references(projects):
                 continue  # valid reference
             if os.path.exists(ref_path):
                 continue  # path exists even if not a project
+            # Monorepo pattern: a CLAUDE.md may show commands run from
+            # subdirectories (`cd sub && ../bin/foo`). If the name matches
+            # a top-level entry inside the project itself, `../<name>` is
+            # almost certainly relative-to-subdir, not cross-project.
+            if os.path.exists(os.path.join(project.path, ref_name)):
+                continue
             ref_text = f'../{ref_name}'
             items.append(LedgerItem(
                 id=make_item_id('xp-broken-reference', project.name, ref_text),
