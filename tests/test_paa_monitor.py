@@ -168,6 +168,65 @@ def test_check_context_drift_bare_name_in_subdirectory(tmp_path):
     assert len(items) == 0, f'unexpected: {[i.summary for i in items]}'
 
 
+def test_check_context_drift_skips_generic_bare_name(tmp_path):
+    """Generic convention names (package.json, etc.) are prose FPs — never flag."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text(
+        'Dependencies are declared in `package.json` in the usual format.\n'
+        'See `.gitignore` for ignored paths; `Dockerfile` for the image build.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 0, f'unexpected drift items: {[i.summary for i in items]}'
+
+
+def test_check_context_drift_skips_placeholder_component(tmp_path):
+    """Path components like YYYY-MM-DD or NAME are placeholders, not refs."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text(
+        'Reports land at `reports/YYYY-MM-DD.md` once a day.\n'
+        'Per-user dumps go to `dumps/NAME.json`.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 0, f'unexpected drift items: {[i.summary for i in items]}'
+
+
+def test_check_context_drift_skips_glob_token(tmp_path):
+    """Tokens with glob/placeholder chars (<>, *, ?, [) aren't literal refs."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text(
+        'Rotating logs live at `logs/*.log`.\n'
+        'Templates are `configs/<env>.yaml`.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 0, f'unexpected drift items: {[i.summary for i in items]}'
+
+
+def test_check_context_drift_opt_out_marker(tmp_path):
+    """`<!-- paa-ignore: context-drift -->` disables the check entirely."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text(
+        '<!-- paa-ignore: context-drift -->\n'
+        'This project talks about remote files: `src/remote-only.py`.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 0
+
+
+def test_check_context_drift_unknown_tilde_user(tmp_path):
+    """`~unknownuser/path` that doesn't expand stays literal, not flagged."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text(
+        'Managed from `~definitely_not_a_user/bin/tool.sh` on the other host.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 0
+
+
 def test_check_no_git_absent(tmp_path):
     proj = tmp_path / 'myproj'
     proj.mkdir()

@@ -18,6 +18,51 @@ _FILE_EXTENSIONS = frozenset({
 })
 
 
+# Bare filenames that are overwhelmingly prose/convention references in
+# docs ("the package.json format", "edit your .gitignore") rather than
+# project-specific files. Never flag these even when absent — project-
+# specific typos like `deploy-worker.sh` still get caught by the tree walk.
+_GENERIC_BARE_NAMES = frozenset({
+    'README.md', 'LICENSE', 'COPYING', 'NOTICE',
+    'CHANGELOG.md', 'CONTRIBUTING.md', 'CODE_OF_CONDUCT.md',
+    'package.json', 'package-lock.json', 'yarn.lock',
+    'pnpm-lock.yaml', 'bun.lockb',
+    'Cargo.toml', 'Cargo.lock',
+    'pyproject.toml', 'setup.py', 'setup.cfg', 'requirements.txt',
+    'Pipfile', 'Pipfile.lock', 'poetry.lock',
+    'go.mod', 'go.sum',
+    'Gemfile', 'Gemfile.lock',
+    'composer.json', 'composer.lock',
+    'Dockerfile', 'docker-compose.yml', 'docker-compose.yaml',
+    'Makefile', 'CMakeLists.txt',
+    '.gitignore', '.dockerignore', '.editorconfig',
+    '.env', '.env.example',
+    'config.json', 'config.yaml', 'config.yml', 'config.toml',
+    'settings.json', 'tsconfig.json', 'jsconfig.json',
+    'manifest.json', 'plugin.json',
+    'index.html', 'index.js', 'index.ts',
+    'CLAUDE.md',
+})
+
+
+_PLACEHOLDER_COMPONENT_RE = re.compile(
+    r'^(?:Y{2,4}(?:[-_]?M{1,2})?(?:[-_]?D{1,2})?'
+    r'|YYYYMMDD|YYMMDD|HHMMSS|HH[-:_]MM(?:[-:_]SS)?'
+    r'|UUID|TIMESTAMP|SLUG|NAME|TZ|DATE|TIME)$',
+    re.IGNORECASE,
+)
+
+
+def _has_placeholder_component(path):
+    """True if any path component (minus extension) looks like an all-caps
+    placeholder token (YYYY-MM-DD, UUID, NAME, …)."""
+    for comp in path.split('/'):
+        base = comp.rsplit('.', 1)[0] if '.' in comp else comp
+        if _PLACEHOLDER_COMPONENT_RE.match(base):
+            return True
+    return False
+
+
 def extract_file_references(content):
     """Extract file/path references from backtick-quoted tokens in markdown."""
     refs = set()
@@ -27,6 +72,9 @@ def extract_file_references(content):
             continue
         if ' ' in token:
             continue
+        # Placeholders and globs aren't literal file refs
+        if any(c in token for c in '<>*?['):
+            continue
         # Strip :line or :line-line suffix
         clean = re.sub(r':\d+(-\d+)?$', '', token)
         _, ext = os.path.splitext(clean)
@@ -34,6 +82,9 @@ def extract_file_references(content):
             continue
         # Skip dotted class names like Gtk.Box.new — multi-dot, no slash
         if '/' not in clean and clean.count('.') > 1:
+            continue
+        # Skip placeholder-dated / named path components (YYYY-MM-DD.md etc.)
+        if _has_placeholder_component(clean):
             continue
         refs.add(clean)
     return refs
@@ -55,6 +106,11 @@ def check_missing_claude_md(project_name, project_path):
     return []
 
 
+_CONTEXT_DRIFT_OPT_OUT_RE = re.compile(
+    r'<!--\s*paa[- ]ignore:\s*context-drift\s*-->', re.IGNORECASE,
+)
+
+
 def _find_in_tree(root, filename):
     """Return True if *filename* exists anywhere under *root*."""
     for dirpath, _dirs, files in os.walk(root):
@@ -71,6 +127,11 @@ def check_context_drift(project_name, project_path):
             content = f.read()
     except FileNotFoundError:
         return []
+    # Opt-out: projects whose CLAUDE.md deliberately references off-box paths
+    # (e.g., a management point for a service running on a remote host) can
+    # include `<!-- paa-ignore: context-drift -->` to disable this check.
+    if _CONTEXT_DRIFT_OPT_OUT_RE.search(content):
+        return []
     refs = extract_file_references(content)
     # Two-pass check: first collect basenames of refs that resolve, then
     # skip bare-name failures whose basename is covered by a valid full-path
@@ -81,6 +142,10 @@ def check_context_drift(project_name, project_path):
     for ref in sorted(refs):
         if ref.startswith('~'):
             full = os.path.expanduser(ref)
+            # `~user/…` where `user` is not a real account on this host stays
+            # literal — that's a cross-host reference we can't validate.
+            if full == ref or full.startswith('~'):
+                continue
         elif os.path.isabs(ref):
             full = ref
         else:
@@ -93,10 +158,16 @@ def check_context_drift(project_name, project_path):
     for ref in failing:
         if os.path.basename(ref) in valid_basenames:
             continue
-        # Bare filenames (no path separator) may live in a subdirectory —
-        # search the project tree before flagging.
-        if '/' not in ref and _find_in_tree(project_path, ref):
-            continue
+        # Bare names (no `/`): hybrid policy — generic convention names
+        # (package.json, README.md, …) are prose FPs and never flag;
+        # otherwise fall through to a tree-walk so typos like
+        # `missing-tool.sh` still surface when the file lives nowhere
+        # in the project.
+        if '/' not in ref:
+            if ref in _GENERIC_BARE_NAMES:
+                continue
+            if _find_in_tree(project_path, ref):
+                continue
         items.append(LedgerItem(
             id=make_item_id('context-drift', project_name, ref),
             type='context-drift',
