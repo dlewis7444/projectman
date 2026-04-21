@@ -168,6 +168,20 @@ def test_no_claude_md_skipped(tmp_path):
     assert len(items) == 0
 
 
+def test_monorepo_relative_reference_skipped(tmp_path):
+    """`../name` where `name` is a top-level entry in the project itself is
+    almost always relative-to-subdir usage in monorepo docs, not a broken
+    cross-project reference."""
+    p = _make_project(
+        tmp_path,
+        'alpha',
+        claude_md='From inside the `sub/` package, run `../bin/build.sh`.\n',
+    )
+    os.mkdir(os.path.join(p.path, 'bin'))
+    items = check_cross_references([p])
+    assert len(items) == 0, f'unexpected items: {[i.summary for i in items]}'
+
+
 # ── check_shared_dep_conflicts tests ──────────────────────────────────────
 
 def test_conflicting_versions_detected(tmp_path):
