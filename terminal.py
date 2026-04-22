@@ -7,6 +7,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Vte', '3.91')
 from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk, Gio
 
+import terminal_copy
 import zellij
 
 
@@ -154,7 +155,7 @@ class TerminalView(Gtk.Box):
                 return True
         if keyval in (Gdk.KEY_c, Gdk.KEY_C):
             if (state & Gdk.ModifierType.CONTROL_MASK) and (state & Gdk.ModifierType.SHIFT_MASK):
-                self._terminal.copy_clipboard_format(Vte.Format.TEXT)
+                self._smart_copy()
                 return True
         if keyval in (Gdk.KEY_v, Gdk.KEY_V):
             if (state & Gdk.ModifierType.CONTROL_MASK) and (state & Gdk.ModifierType.SHIFT_MASK):
@@ -242,7 +243,7 @@ class TerminalView(Gtk.Box):
             return btn
 
         has_sel = self._terminal.get_has_selection()
-        box.append(item('Copy', lambda: self._terminal.copy_clipboard_format(Vte.Format.TEXT), has_sel))
+        box.append(item('Copy', self._smart_copy, has_sel))
         box.append(item('Paste', self._terminal.paste_clipboard))
         box.append(item('Select All', self._terminal.select_all))
 
@@ -257,6 +258,38 @@ class TerminalView(Gtk.Box):
 
     def _set_clipboard(self, text):
         Gdk.Display.get_default().get_clipboard().set(text)
+
+    def _smart_copy(self):
+        """Copy selection with TUI-emitted hard-wrap artifacts collapsed.
+
+        The selection from VTE already has `\\n  ` / `\\n   ` patterns where
+        the inner program (Claude Code etc.) hard-wrapped long paragraphs at
+        a 2-space hanging indent. `collapse_hard_wraps` rejoins those visual
+        wraps back into flowing prose, leaving paragraph breaks, code
+        indents, and short structural lines alone.
+
+        Falls back to VTE's native copy on any error — worst case is today's
+        pre-fix behavior.
+        """
+        try:
+            if not self._terminal.get_has_selection():
+                return
+            baseline = self._terminal.get_text_selected(Vte.Format.TEXT)
+            if not baseline:
+                self._terminal.copy_clipboard_format(Vte.Format.TEXT)
+                return
+            result = terminal_copy.collapse_hard_wraps(baseline)
+            self._debug(
+                f'smart-copy baseline_len={len(baseline)} result_len={len(result)} '
+                f'head={result[:80]!r}'
+            )
+            Gdk.Display.get_default().get_clipboard().set(result)
+        except Exception as e:
+            self._debug(f'smart-copy failed: {e!r}; falling back to native copy')
+            try:
+                self._terminal.copy_clipboard_format(Vte.Format.TEXT)
+            except Exception:
+                pass
 
     def _apply_font(self):
         desc = Pango.FontDescription.from_string(f'Monospace {self._font_size}')
