@@ -319,16 +319,20 @@ class TerminalView(Gtk.Box):
         elif fresh:
             argv = [claude_cmd]
         else:
-            # Try continuing most recent conversation; fall back to fresh
-            # if there's no history (claude -c exits non-zero due to normal
-            # failure, not a signal kill).  Exit codes >128 mean killed by
-            # signal (128 + signum), so we only restart for codes 1-128.
-            # Without this guard, a SIGTERM race can cause bash to exec a new
-            # claude after the old one exits with 143, leaving a process that
-            # never received SIGTERM and causing the shutdown window to spin.
+            # Try continuing most recent conversation; fall back to fresh if
+            # there's no history (claude -c exits non-zero).  Two guards keep
+            # PM's SIGTERM/SIGHUP from accidentally respawning claude:
+            #   - exit-code test rejects signal kills (s > 128)
+            #   - TERM/HUP trap rejects graceful-but-nonzero exits, where
+            #     claude catches the signal and cleanly returns code 1-128.
+            #     Without the trap, that case slips past the exit-code test
+            #     and bash exec's a fresh claude that never saw the signal,
+            #     leaving the project stuck "active" until SIGKILL.
             import shlex
             c = shlex.quote(claude_cmd)
-            argv = ['bash', '-c', f'{c} -c; s=$?; [ "$s" -gt 0 ] && [ "$s" -le 128 ] && exec {c}']
+            argv = ['bash', '-c',
+                    f"trap 'exit 143' TERM HUP; {c} -c; s=$?; "
+                    f'[ "$s" -gt 0 ] && [ "$s" -le 128 ] && exec {c}']
         self._is_multiplexed = False
         self._spawn(argv)
 
