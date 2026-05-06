@@ -2,7 +2,9 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
-## [0.4.3] - 2026-05-06
+## [0.4.4] - 2026-05-06
+
+> **Note:** version 0.4.3 was a mid-cycle bump in main.py (commit d2cf128) that was never tagged as a release; in-tree builds carrying that string contained the deactivate respawn race fixed below. This entry was originally drafted as 0.4.3 and is corrected to 0.4.4 to keep the version label honest.
 
 ### Improved
 - **Smart copy**: collapses TUI hard-wrap artifacts (the `\n  ` / `\n   ` hanging-indent breaks Claude Code and other TUIs emit) so copied prose pastes as flowing text, while paragraph breaks, code indents, and short structural lines are left alone.
