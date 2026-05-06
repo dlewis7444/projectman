@@ -2,6 +2,21 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
+## [0.4.3] - 2026-05-06
+
+### Improved
+- **Smart copy**: collapses TUI hard-wrap artifacts (the `\n  ` / `\n   ` hanging-indent breaks Claude Code and other TUIs emit) so copied prose pastes as flowing text, while paragraph breaks, code indents, and short structural lines are left alone.
+- **Resource bar CPU**: per-PID tick sampling with a 30-second rolling average produces a smooth, stable reading instead of jittery system-wide noise.
+
+### Fixed
+- **Deactivate respawn race**: the `bash -c` wrapper around `claude -c` now traps `TERM`/`HUP` and exits 143, so a graceful claude exit (codes 1–128 in response to a signal) can no longer trip the respawn guard. Previously, clicking Deactivate could leave the project stuck "active" because the wrapper exec'd a fresh claude inside the same PID.
+- **Ctrl+click in scrollback**: switched URL/path matching to VTE's `check_match_at()` so registered regexes do their own coordinate translation. The previous hand-rolled lookup indexed scrollback rows with viewport row numbers, turning every click into a miss whenever any scrollback was present.
+- **StatusWatcher subdirectory snapshots**: when worktree status files collapse to the parent project, the newest same-session snapshot wins instead of an arbitrary one.
+- **Sidebar rename focus race**: `grab_focus()` is now deferred via `GLib.idle_add` so the closing context-menu popover doesn't restore focus to its previous holder and trigger our focus-leave handler before the entry is interactive.
+- **PAA monitor**: skips placeholder projects, honors `paa-ignore`, and uses a hybrid bare-name policy to suppress drift false positives.
+- **PAA cross-project refs**: `../<name>` resolves as monorepo-relative when `<name>` exists locally, instead of getting flagged as a broken sibling reference.
+- **PAA haiku health prompt**: expanded the internal-project allowlist to reduce noise on lab-only projects.
+
 ## [0.4.2] - 2026-04-11
 
 ### Improved
