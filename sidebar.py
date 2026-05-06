@@ -585,10 +585,15 @@ class ProjectRow(Gtk.ListBoxRow):
 
     def _enter_rename_mode(self):
         self._rename_entry.set_text(self._project.name)
-        self._rename_entry.select_region(0, -1)
         self._name_label.set_visible(False)
         self._rename_entry.set_visible(True)
-        self._rename_entry.grab_focus()
+        # Defer grab_focus so the popover menu (which is still closing) doesn't
+        # restore focus to its previous holder and trigger our focus-leave handler.
+        def _focus():
+            self._rename_entry.grab_focus()
+            self._rename_entry.select_region(0, -1)
+            return False
+        GLib.idle_add(_focus)
 
     def _exit_rename_mode(self):
         self._rename_entry.set_visible(False)
