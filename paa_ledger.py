@@ -47,6 +47,9 @@ class Ledger:
                 known = {k: v for k, v in raw.items()
                          if k in LedgerItem.__dataclass_fields__}
                 item = LedgerItem(**known)
+                # Legacy: 'approved' was the original Acknowledge status.
+                if item.status == 'approved':
+                    item.status = 'acknowledged'
                 self._items[item.id] = item
         except (FileNotFoundError, json.JSONDecodeError, TypeError):
             pass
@@ -70,9 +73,9 @@ class Ledger:
             raise
 
     def add_if_new(self, item):
-        """Add item unless a matching one is already active or dismissed."""
+        """Add unless a matching item is pending, acknowledged, or dismissed."""
         existing = self._items.get(item.id)
-        if existing and existing.status in ('pending', 'approved', 'dismissed'):
+        if existing and existing.status in ('pending', 'acknowledged', 'dismissed'):
             return False
         self._items[item.id] = item
         return True
@@ -83,9 +86,15 @@ class Ledger:
             self._items[item_id].updated = now_iso()
 
     def sweep(self, active_ids):
-        """Auto-resolve pending items no longer detected in current scan."""
+        """Auto-resolve pending and acknowledged items no longer detected.
+
+        Acknowledged ('parked') items resolve symmetrically with pending
+        ones — if the underlying issue disappears, the parked entry should
+        clear instead of lingering forever.
+        """
         for item in self._items.values():
-            if item.status == 'pending' and item.id not in active_ids:
+            if (item.status in ('pending', 'acknowledged')
+                    and item.id not in active_ids):
                 item.status = 'resolved'
                 item.updated = now_iso()
 
@@ -93,6 +102,12 @@ class Ledger:
         return sorted(
             [i for i in self._items.values() if i.status == 'pending'],
             key=lambda i: i.created, reverse=True,
+        )
+
+    def acknowledged_items(self):
+        return sorted(
+            [i for i in self._items.values() if i.status == 'acknowledged'],
+            key=lambda i: i.updated or i.created, reverse=True,
         )
 
     @property

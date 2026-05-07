@@ -39,6 +39,15 @@ def test_add_skips_dismissed():
     assert ledger.add_if_new(item2) is False
 
 
+def test_add_skips_acknowledged():
+    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+    item = _make_item()
+    ledger.add_if_new(item)
+    ledger.update_status(item.id, 'acknowledged')
+    item2 = _make_item()  # same fingerprint
+    assert ledger.add_if_new(item2) is False
+
+
 def test_add_replaces_resolved():
     ledger = Ledger(path='/tmp/nonexistent_ledger.json')
     item = _make_item()
@@ -81,6 +90,59 @@ def test_sweep_keeps_active():
     ledger.add_if_new(item)
     ledger.sweep({item.id})  # item still detected
     assert ledger._items[item.id].status == 'pending'
+
+
+def test_sweep_resolves_stale_acknowledged():
+    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+    item = _make_item()
+    ledger.add_if_new(item)
+    ledger.update_status(item.id, 'acknowledged')
+    ledger.sweep(set())  # underlying issue gone — parked entry should clear
+    assert ledger._items[item.id].status == 'resolved'
+
+
+def test_sweep_keeps_active_acknowledged():
+    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+    item = _make_item()
+    ledger.add_if_new(item)
+    ledger.update_status(item.id, 'acknowledged')
+    ledger.sweep({item.id})  # still detected — stays parked
+    assert ledger._items[item.id].status == 'acknowledged'
+
+
+def test_sweep_keeps_dismissed():
+    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+    item = _make_item()
+    ledger.add_if_new(item)
+    ledger.update_status(item.id, 'dismissed')
+    ledger.sweep(set())  # dismissed is sticky-forever, never resolved
+    assert ledger._items[item.id].status == 'dismissed'
+
+
+def test_acknowledged_items():
+    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+    a = _make_item(project='a')
+    b = _make_item(project='b')
+    ledger.add_if_new(a)
+    ledger.add_if_new(b)
+    ledger.update_status(a.id, 'acknowledged')
+    acked = ledger.acknowledged_items()
+    assert len(acked) == 1
+    assert acked[0].project == 'a'
+
+
+def test_load_migrates_approved_to_acknowledged(tmp_path):
+    """Legacy ledgers wrote 'approved' for the Acknowledge action."""
+    path = tmp_path / 'ledger.json'
+    path.write_text(
+        '{"items": [{"id": "abc123", "type": "context-drift", '
+        '"project": "alpha", "project_path": "/tmp/alpha", '
+        '"summary": "x", "evidence": "y", "severity": "warning", '
+        '"status": "approved", "created": "", "updated": ""}]}'
+    )
+    ledger = Ledger(path=str(path))
+    ledger.load()
+    assert ledger._items['abc123'].status == 'acknowledged'
 
 
 def test_save_and_load(tmp_path):
