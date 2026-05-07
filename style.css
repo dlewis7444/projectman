@@ -81,6 +81,11 @@ row:hover .project-row-actions { opacity: 1; }
     padding: 16px;
     margin: 4px 0;
 }
+.paa-card-acknowledged {
+    opacity: 0.55;
+    background: alpha(currentColor, 0.02);
+    border-style: dashed;
+}
 .paa-card-type {
     font-size: 10px; font-weight: 700; text-transform: uppercase;
     letter-spacing: 0.06em; border-radius: 4px; padding: 2px 8px;

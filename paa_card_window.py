@@ -141,6 +141,15 @@ class PAACardWindow(Adw.Window):
         self._type_dropdown.connect('notify::selected', lambda *_: self._refresh())
         filters.append(self._type_dropdown)
 
+        self._show_ack_btn = Gtk.ToggleButton(label='Show acknowledged')
+        self._show_ack_btn.add_css_class('flat')
+        self._show_ack_btn.set_tooltip_text(
+            'Include acknowledged (parked) items in the list.\n'
+            'Off by default — toggle on to revisit them.'
+        )
+        self._show_ack_btn.connect('toggled', lambda *_: self._refresh())
+        filters.append(self._show_ack_btn)
+
         content.append(filters)
 
         sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
@@ -503,14 +512,26 @@ class PAACardWindow(Adw.Window):
             self._card_box.remove(child)
         GLib.timeout_add(200, self._drop_stale)
 
-        all_items = self._ledger.pending_items()
-        total = len(all_items)
-        self._pending_label.set_label(
-            f'{total} pending item{"s" if total != 1 else ""}'
-        )
+        pending = self._ledger.pending_items()
+        acknowledged = self._ledger.acknowledged_items()
+        show_ack = self._show_ack_btn.get_active()
 
-        # Update project dropdown
-        projects_in_ledger = sorted({i.project for i in all_items})
+        pending_total = len(pending)
+        ack_total = len(acknowledged)
+        if show_ack and ack_total:
+            self._pending_label.set_label(
+                f'{pending_total} pending '
+                f'• {ack_total} acknowledged'
+            )
+        else:
+            self._pending_label.set_label(
+                f'{pending_total} pending item{"s" if pending_total != 1 else ""}'
+            )
+
+        # Update project dropdown — include acknowledged so the user can still
+        # filter on a project that only has parked items in the toggled view.
+        scope_for_dropdown = pending + (acknowledged if show_ack else [])
+        projects_in_ledger = sorted({i.project for i in scope_for_dropdown})
         new_names = ['All Projects'] + projects_in_ledger
         if new_names != self._project_names:
             self._project_names = new_names
@@ -521,7 +542,8 @@ class PAACardWindow(Adw.Window):
             if sel < len(new_names):
                 self._project_dropdown.set_selected(sel)
 
-        # Apply filters
+        # Apply filters separately so pending stays grouped above acknowledged.
+        all_items = pending + (acknowledged if show_ack else [])
         items = all_items
         proj_idx = self._project_dropdown.get_selected()
         if proj_idx > 0 and proj_idx < len(self._project_names):
@@ -545,7 +567,7 @@ class PAACardWindow(Adw.Window):
                     'Enable the Projects Admin Agent in Settings \u2192 PAA'
                 )
                 self._empty.set_icon_name('system-shutdown-symbolic')
-            elif total > 0:
+            elif len(all_items) > 0:
                 self._empty.set_title('No Matches')
                 self._empty.set_description(
                     'No items match the current filters.'
@@ -565,6 +587,8 @@ class PAACardWindow(Adw.Window):
     def _build_card(self, item):
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         card.add_css_class('paa-card')
+        if item.status == 'acknowledged':
+            card.add_css_class('paa-card-acknowledged')
         if (self._terminal_panel.get_visible()
                 and self._discussing_item_id == item.id):
             card.add_css_class('paa-card-discussing')
@@ -614,25 +638,33 @@ class PAACardWindow(Adw.Window):
         dismiss_btn = Gtk.Button(label='Dismiss')
         dismiss_btn.add_css_class('flat')
         dismiss_btn.set_tooltip_text(
-            'Not relevant \u2014 hides this card.\n'
-            'PAA will only raise it again if the issue\n'
-            'goes away and comes back later.'
+            'Not a problem \u2014 don\'t show this again.'
         )
         dismiss_btn.connect(
             'clicked', lambda b, iid=item.id: self._on_dismiss(iid)
         )
         actions.append(dismiss_btn)
 
-        ack_btn = Gtk.Button(label='Acknowledge')
-        ack_btn.add_css_class('suggested-action')
-        ack_btn.set_tooltip_text(
-            'I see it and accept it as-is \u2014 hides this card.\n'
-            'Same as Dismiss, but logged as intentional.\n'
-            'Both hide the card; Dismiss = ignore, Acknowledge = accept.'
-        )
-        ack_btn.connect(
-            'clicked', lambda b, iid=item.id: self._on_acknowledge(iid)
-        )
+        if item.status == 'acknowledged':
+            ack_btn = Gtk.Button(label='Un-acknowledge')
+            ack_btn.add_css_class('flat')
+            ack_btn.set_tooltip_text(
+                'Move this item back to pending.'
+            )
+            ack_btn.connect(
+                'clicked', lambda b, iid=item.id: self._on_unacknowledge(iid)
+            )
+        else:
+            ack_btn = Gtk.Button(label='Acknowledge')
+            ack_btn.add_css_class('suggested-action')
+            ack_btn.set_tooltip_text(
+                'I see it and accept it for now \u2014 parks this card.\n'
+                'Hidden by default; toggle "Show acknowledged" to revisit.\n'
+                'Auto-clears if the issue is fixed elsewhere.'
+            )
+            ack_btn.connect(
+                'clicked', lambda b, iid=item.id: self._on_acknowledge(iid)
+            )
         actions.append(ack_btn)
 
         discuss_btn = Gtk.ToggleButton(label='Discuss')
@@ -664,7 +696,14 @@ class PAACardWindow(Adw.Window):
         if self._discussing_item_id == item_id:
             self._discussing_item_id = None
             self._hide_terminal()
-        self._ledger.update_status(item_id, 'approved')
+        self._ledger.update_status(item_id, 'acknowledged')
+        self._ledger.save()
+        if self._on_action_cb:
+            self._on_action_cb(self._ledger.pending_count)
+        GLib.idle_add(self._refresh)
+
+    def _on_unacknowledge(self, item_id):
+        self._ledger.update_status(item_id, 'pending')
         self._ledger.save()
         if self._on_action_cb:
             self._on_action_cb(self._ledger.pending_count)

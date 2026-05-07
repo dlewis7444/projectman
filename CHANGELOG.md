@@ -2,6 +2,16 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
+## [0.5.0] - 2026-05-07
+
+### Improved
+- **PAA Acknowledge vs Dismiss**: the two actions now have distinct meanings instead of being functionally identical. Dismiss = "not a problem, don't show again" (sticky-forever, unchanged). Acknowledge = "I see it, parking it for now" — hidden by default, surfaced via a new **Show acknowledged** toggle in the card window's filter row, and rendered dimmed with a dashed border when shown. Acknowledged cards swap their primary button to **Un-acknowledge** so a parked item can be returned to pending.
+- **PAA sweep**: extended to auto-resolve acknowledged items whose underlying issue disappears, symmetric with how pending items resolve. Fix something elsewhere and the parked entry quietly clears instead of lingering. Dismissed items stay sticky as before.
+- **PAA settings layout**: Chat Model moved out of "AI Analysis" into the top "Projects Admin Agent" group. Discuss sessions work whether or not background AI scans are enabled, so the model picker shouldn't be gated on the AI Analysis toggle. Subtitle clarified to "Default model used for Discuss sessions".
+
+### Internal
+- Legacy `'approved'` ledger status is auto-migrated to `'acknowledged'` on load.
+
 ## [0.4.4] - 2026-05-06
 
 > **Note:** version 0.4.3 was a mid-cycle bump in main.py (commit d2cf128) that was never tagged as a release; in-tree builds carrying that string contained the deactivate respawn race fixed below. This entry was originally drafted as 0.4.3 and is corrected to 0.4.4 to keep the version label honest.
