@@ -78,3 +78,76 @@ def test_child_exited_non_zellij_always_emits_exited():
 
     tv._on_child_exited(tv._terminal, 0)
     assert exited_fired == [True]
+
+
+# ── check_child_alive (defensive sweep for missed VTE child-exited) ──────────
+
+def _mock_proc_status(state_letter):
+    """Return a context manager that fakes /proc/<pid>/status reads."""
+    from io import StringIO
+    return patch('builtins.open',
+                 return_value=StringIO(f'Name:\tclaude\nState:\t{state_letter} (foo)\n'))
+
+
+def test_check_child_alive_no_pid_is_noop():
+    tv = _make_tv()
+    tv._child_pid = None
+    exited_fired = []
+    tv.connect('process-exited', lambda t, s: exited_fired.append(True))
+    tv.check_child_alive()
+    assert exited_fired == []
+
+
+def test_check_child_alive_running_does_not_fire():
+    tv = _make_tv()
+    tv._child_pid = os.getpid()  # this very process — definitely alive
+    tv._is_zellij = False
+    exited_fired = []
+    tv.connect('process-exited', lambda t, s: exited_fired.append(True))
+    tv.check_child_alive()
+    assert exited_fired == []
+    assert tv._child_pid == os.getpid()
+
+
+def test_check_child_alive_zombie_fires_exited():
+    tv = _make_tv()
+    tv._child_pid = 999999
+    tv._is_zellij = False
+    exited_fired = []
+    tv.connect('process-exited', lambda t, s: exited_fired.append(True))
+    with _mock_proc_status('Z'), patch('os.waitpid', return_value=(999999, 0)):
+        tv.check_child_alive()
+    assert exited_fired == [True]
+    assert tv._child_pid is None
+
+
+def test_check_child_alive_proc_gone_fires_exited():
+    tv = _make_tv()
+    tv._child_pid = 999999
+    tv._is_zellij = False
+    exited_fired = []
+    tv.connect('process-exited', lambda t, s: exited_fired.append(True))
+    with patch('builtins.open', side_effect=FileNotFoundError), \
+         patch('os.waitpid', side_effect=ChildProcessError):
+        tv.check_child_alive()
+    assert exited_fired == [True]
+    assert tv._child_pid is None
+
+
+def test_check_child_alive_respawn_race_does_not_double_fire():
+    """If _child_pid changes during the check (a respawn races us), don't
+    fire process-exited for the new PID."""
+    tv = _make_tv()
+    tv._child_pid = 999999
+    tv._is_zellij = False
+    exited_fired = []
+    tv.connect('process-exited', lambda t, s: exited_fired.append(True))
+
+    def waitpid_swaps_pid(*args, **kwargs):
+        tv._child_pid = 12345  # simulate respawn between read and emit
+        return (999999, 0)
+
+    with _mock_proc_status('Z'), patch('os.waitpid', side_effect=waitpid_swaps_pid):
+        tv.check_child_alive()
+    assert exited_fired == []
+    assert tv._child_pid == 12345
