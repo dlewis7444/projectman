@@ -413,6 +413,37 @@ class TerminalView(Gtk.Box):
             self._zellij_session = None
         self.emit('process-exited', status)
 
+    def check_child_alive(self):
+        """Detect missed child-exited signals.
+
+        VTE's child-exited has been observed to silently miss claude exits,
+        leaving a zombie under PM and a row stuck "attached". Poll
+        /proc/<pid>/status; if the process is gone or zombied, reap it and
+        synthesize the missing exit so the UI catches up.
+        """
+        pid = self._child_pid
+        if pid is None:
+            return
+        try:
+            with open(f'/proc/{pid}/status') as f:
+                state = next(
+                    (line.split()[1] for line in f if line.startswith('State:')),
+                    None,
+                )
+        except FileNotFoundError:
+            state = 'gone'
+        except OSError:
+            return
+        if state not in ('Z', 'gone'):
+            return
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            pass
+        # Guard against a racing respawn: only fire if the PID hasn't changed.
+        if self._child_pid == pid:
+            self._on_child_exited(self._terminal, 0)
+
     def _kill_child(self):
         if self._child_pid is not None:
             for pid in (-self._child_pid, self._child_pid):

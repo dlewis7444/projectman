@@ -4,7 +4,7 @@ import subprocess
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, Gdk
+from gi.repository import Gtk, Adw, Gdk, GLib
 
 from sidebar import Sidebar
 from terminal import TerminalView
@@ -114,7 +114,15 @@ class AppWindow(Adw.ApplicationWindow):
         watcher.connect('status-changed', self._on_status_changed)
         self.connect('close-request', self._on_close_request)
         self._sidebar.start_polling()
+        # Defensive sweep for missed VTE child-exited signals — see
+        # TerminalView.check_child_alive for the failure mode.
+        GLib.timeout_add_seconds(5, self._sweep_dead_terminals)
         self._setup_shortcuts()
+
+    def _sweep_dead_terminals(self):
+        for tv in list(self._terminals.values()):
+            tv.check_child_alive()
+        return GLib.SOURCE_CONTINUE
 
     def _on_zellij_sessions_changed(self, watcher):
         """A session appeared or disappeared — reconcile sidebar state."""
