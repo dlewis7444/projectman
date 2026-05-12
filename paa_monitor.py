@@ -45,6 +45,16 @@ _GENERIC_BARE_NAMES = frozenset({
 })
 
 
+# Patterns suggesting an absolute path reference lives on a remote host.
+_REMOTE_CONTEXT_RE = re.compile(
+    r'\bon\s+(?:the\s+)?\w+'  # "on <host>", "on the host", "on the server"
+    r'|\bcontainer\b'          # "in the container", "container at …"
+    r'|\bremote\b',            # "remote host", "remote path"
+    re.IGNORECASE,
+)
+
+_CLAUDE_PROJECTS_DIR = os.path.expanduser('~/.claude/projects')
+
 _PLACEHOLDER_COMPONENT_RE = re.compile(
     r'^(?:Y{2,4}(?:[-_]?M{1,2})?(?:[-_]?D{1,2})?'
     r'|YYYYMMDD|YYMMDD|HHMMSS|HH[-:_]MM(?:[-:_]SS)?'
@@ -73,7 +83,7 @@ def extract_file_references(content):
         if ' ' in token:
             continue
         # Placeholders and globs aren't literal file refs
-        if any(c in token for c in '<>*?['):
+        if any(c in token for c in '<>*?[{'):
             continue
         # Strip :line or :line-line suffix
         clean = re.sub(r':\d+(-\d+)?$', '', token)
@@ -119,6 +129,50 @@ def _find_in_tree(root, filename):
     return False
 
 
+def _line_suggests_remote(ref, content):
+    """True if the line containing ref's backtick looks like a remote-host reference."""
+    escaped = re.escape(ref)
+    for line in content.splitlines():
+        if re.search(r'`' + escaped + r'`', line) and _REMOTE_CONTEXT_RE.search(line):
+            return True
+    return False
+
+
+def _find_in_siblings(project_path, ref):
+    """True if ref exists under any sibling project directory.
+
+    For relative paths (with /): checks the exact path at each sibling root.
+    For bare names (no /): checks each sibling's top-level listing.
+    """
+    projects_root = os.path.dirname(project_path)
+    try:
+        entries = os.listdir(projects_root)
+    except OSError:
+        return False
+    for entry in entries:
+        sibling = os.path.join(projects_root, entry)
+        if sibling == project_path or not os.path.isdir(sibling):
+            continue
+        if os.path.exists(os.path.join(sibling, ref.lstrip('./'))):
+            return True
+    return False
+
+
+def _find_in_claude_memory(filename):
+    """True if filename exists in any Claude project memory directory."""
+    if not os.path.isdir(_CLAUDE_PROJECTS_DIR):
+        return False
+    try:
+        for entry in os.scandir(_CLAUDE_PROJECTS_DIR):
+            if entry.is_dir() and os.path.exists(
+                os.path.join(entry.path, 'memory', filename)
+            ):
+                return True
+    except OSError:
+        pass
+    return False
+
+
 def check_context_drift(project_name, project_path):
     """Flag CLAUDE.md references to files that no longer exist."""
     claude_md = os.path.join(project_path, 'CLAUDE.md')
@@ -153,6 +207,9 @@ def check_context_drift(project_name, project_path):
         if os.path.exists(full):
             valid_basenames.add(os.path.basename(ref))
         else:
+            # Fix 2: skip absolute paths whose line context implies a remote host.
+            if os.path.isabs(ref) and _line_suggests_remote(ref, content):
+                continue
             failing.append(ref)
     items = []
     for ref in failing:
@@ -168,6 +225,13 @@ def check_context_drift(project_name, project_path):
                 continue
             if _find_in_tree(project_path, ref):
                 continue
+            # Fix 4: bare names may live in a Claude project memory directory.
+            if _find_in_claude_memory(ref):
+                continue
+        # Fix 3: relative paths (and bare names not caught above) may live in
+        # a sibling project under the same projects root.
+        if _find_in_siblings(project_path, ref):
+            continue
         items.append(LedgerItem(
             id=make_item_id('context-drift', project_name, ref),
             type='context-drift',
