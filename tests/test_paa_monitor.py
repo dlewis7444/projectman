@@ -561,3 +561,160 @@ def test_full_scan_budget_exhaustion_midway(tmp_path):
     # Budget enforcement is per-scan, not per-project within a scan.
     assert call_count == 2  # Both got AI checks in this scan
     assert settings.paa_budget_used == 999 + 1000  # 500 per project
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: shell brace expansion filtered from extracted references
+# ---------------------------------------------------------------------------
+
+def test_extract_refs_skips_brace_expansion():
+    """Tokens containing { are shell brace expansions, not literal file refs."""
+    content = 'Scripts live at `/usr/local/bin/tool-{start,stop}.sh` on the server.\n'
+    refs = extract_file_references(content)
+    assert len(refs) == 0
+
+
+def test_extract_refs_no_braces_still_extracted():
+    """Normal paths without braces are still extracted."""
+    content = 'Config at `/usr/local/bin/tool.sh` is the entrypoint.\n'
+    refs = extract_file_references(content)
+    assert '/usr/local/bin/tool.sh' in refs
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: absolute paths on remote hosts are not flagged
+# ---------------------------------------------------------------------------
+
+def test_context_drift_remote_absolute_on_hostname(tmp_path):
+    """Absolute path accompanied by 'on <hostname>' is not flagged."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text(
+        'PIA scripts are at `/usr/local/bin/vpn.sh` on gw; edit there.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 0, f'unexpected: {[i.summary for i in items]}'
+
+
+def test_context_drift_remote_absolute_on_the_host(tmp_path):
+    """Absolute path described as 'on the host' is not flagged."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text(
+        'The settings file on the host is `/etc/app/settings.yml`.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 0, f'unexpected: {[i.summary for i in items]}'
+
+
+def test_context_drift_remote_absolute_in_container(tmp_path):
+    """Absolute path in container context is not flagged."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text(
+        'Bind-mounted into the container at `/etc/app/settings.yml`.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 0, f'unexpected: {[i.summary for i in items]}'
+
+
+def test_context_drift_absolute_no_remote_context_does_flag(tmp_path):
+    """Absolute path with no remote context is flagged when absent locally."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text(
+        'Edit `/nonexistent-paa-test-12345/config.yml` to configure.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 1
+    assert '/nonexistent-paa-test-12345/config.yml' in items[0].summary
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: cross-project sibling references are not flagged
+# ---------------------------------------------------------------------------
+
+def test_context_drift_sibling_project_relative_ref(tmp_path):
+    """Relative path found in a sibling project directory is not flagged."""
+    projects = tmp_path / 'projects'
+    projects.mkdir()
+    proj = projects / 'myproj'
+    proj.mkdir()
+    sibling = projects / 'otherproj'
+    (sibling / 'playbooks').mkdir(parents=True)
+    (sibling / 'playbooks' / 'deploy.yml').write_text('---\n')
+    (proj / 'CLAUDE.md').write_text(
+        'Launched via `playbooks/deploy.yml` in the AWX project.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 0, f'unexpected: {[i.summary for i in items]}'
+
+
+def test_context_drift_sibling_project_bare_name(tmp_path):
+    """Bare filename at the root of a sibling project is not flagged."""
+    projects = tmp_path / 'projects'
+    projects.mkdir()
+    proj = projects / 'myproj'
+    proj.mkdir()
+    sibling = projects / 'otherproj'
+    sibling.mkdir()
+    (sibling / 'runbook.md').write_text('# Runbook\n')
+    (proj / 'CLAUDE.md').write_text(
+        'Rotate tokens via `runbook.md` in the other project.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 0, f'unexpected: {[i.summary for i in items]}'
+
+
+def test_context_drift_not_in_any_sibling_does_flag(tmp_path):
+    """Relative path absent from current and all sibling projects is flagged."""
+    projects = tmp_path / 'projects'
+    projects.mkdir()
+    proj = projects / 'myproj'
+    proj.mkdir()
+    (projects / 'otherproj').mkdir()  # sibling exists but lacks the file
+    (proj / 'CLAUDE.md').write_text(
+        'See `playbooks/nowhere.yml` for setup.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 1
+    assert 'playbooks/nowhere.yml' in items[0].summary
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: bare names in Claude project memory directories are not flagged
+# ---------------------------------------------------------------------------
+
+def test_context_drift_claude_memory_bare_name(tmp_path, monkeypatch):
+    """Bare filename found in a Claude project memory dir is not flagged."""
+    import paa_monitor
+    fake_memory = tmp_path / '.claude' / 'projects' / 'some-encoded-project' / 'memory'
+    fake_memory.mkdir(parents=True)
+    (fake_memory / 'mouse_investigation_2026-05-06.md').write_text('# Notes\n')
+    monkeypatch.setattr(paa_monitor, '_CLAUDE_PROJECTS_DIR',
+                        str(tmp_path / '.claude' / 'projects'))
+
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text(
+        'Full findings in memory: `mouse_investigation_2026-05-06.md`.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 0, f'unexpected: {[i.summary for i in items]}'
+
+
+def test_context_drift_claude_memory_not_found_does_flag(tmp_path, monkeypatch):
+    """Bare filename absent from Claude memory and project tree is flagged."""
+    import paa_monitor
+    fake_claude = tmp_path / '.claude' / 'projects'
+    fake_claude.mkdir(parents=True)
+    monkeypatch.setattr(paa_monitor, '_CLAUDE_PROJECTS_DIR', str(fake_claude))
+
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text(
+        'See `missing_notes.md` for details.\n'
+    )
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 1
+    assert 'missing_notes.md' in items[0].summary
