@@ -259,7 +259,9 @@ class PAACardWindow(Adw.Window):
             self._settings.resolved_projects_dir, '.project-admin-agent'
         )
         system_dir = os.path.join(paa_dir, '.system')
+        claude_dir = os.path.join(paa_dir, '.claude')
         os.makedirs(system_dir, exist_ok=True)
+        os.makedirs(claude_dir, exist_ok=True)
 
         src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'paa')
         shutil.copy2(
@@ -269,6 +271,10 @@ class PAACardWindow(Adw.Window):
         shutil.copy2(
             os.path.join(src_dir, 'CLAUDE-SUPPLEMENT.md'),
             os.path.join(system_dir, 'CLAUDE-SUPPLEMENT.md'),
+        )
+        shutil.copy2(
+            os.path.join(src_dir, 'settings.json'),
+            os.path.join(claude_dir, 'settings.json'),
         )
         gather_src = os.path.join(src_dir, 'gather-context.sh')
         gather_dst = os.path.join(system_dir, 'gather-context.sh')
@@ -593,8 +599,13 @@ class PAACardWindow(Adw.Window):
                 and self._discussing_item_id == item.id):
             card.add_css_class('paa-card-discussing')
 
-        # Header: type badge + project name + critical badge
+        # Header: card id + type badge + project name + critical badge
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        id_lbl = Gtk.Label(label=item.id[:6])
+        id_lbl.add_css_class('paa-card-id')
+        id_lbl.set_selectable(True)
+        id_lbl.set_tooltip_text(f'Card ID: {item.id}')
+        header.append(id_lbl)
         badge = Gtk.Label(label=_TYPE_LABELS.get(item.type, item.type))
         badge.add_css_class('paa-card-type')
         badge.add_css_class(_SEVERITY_CSS.get(item.severity, 'paa-card-type-info'))
