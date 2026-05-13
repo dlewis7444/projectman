@@ -123,8 +123,14 @@ class AppWindow(Adw.ApplicationWindow):
         self._setup_shortcuts()
 
     def _sweep_dead_terminals(self):
-        for tv in list(self._terminals.values()):
+        for path, tv in list(self._terminals.items()):
+            before = tv._child_pid
             tv.check_child_alive()
+            # If check_child_alive cleared _child_pid, both vte's reaper and
+            # our pidfd watch missed this exit. Flash the row so we know
+            # it's happening (and how often).
+            if before is not None and tv._child_pid is None:
+                self._sidebar.flash_sweeper_caught(path)
         return GLib.SOURCE_CONTINUE
 
     def _on_zellij_sessions_changed(self, watcher):

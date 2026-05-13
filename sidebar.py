@@ -207,6 +207,20 @@ class Sidebar(Gtk.Box):
                 self._listbox.invalidate_filter()
             self._update_count_label()
 
+    def flash_sweeper_caught(self, path, duration_ms=2000):
+        """Briefly italicize the project name to signal that the polling
+        sweeper (window._sweep_dead_terminals) had to catch a missed exit
+        that our pidfd watch didn't fire on. Visual debugging aid; remove
+        once vte's reaper / glib child-watch path is fully replaced."""
+        if path not in self._rows:
+            return
+        label = self._rows[path]._name_label
+        label.add_css_class('sweeper-flash')
+        def _clear():
+            label.remove_css_class('sweeper-flash')
+            return False
+        GLib.timeout_add(duration_ms, _clear)
+
     def set_ntfy_enabled(self, enabled):
         for row in self._rows.values():
             row.update_ntfy_visibility(enabled)

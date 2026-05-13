@@ -37,6 +37,10 @@ row:hover .project-row-actions { opacity: 1; }
 /* ── Detached zellij session ──────────────────────────────────────── */
 .project-row-detached { font-style: italic; }
 
+/* ── Polling sweeper caught an exit our pidfd watch missed ───────── */
+/* Brief italic flash on the project name. See window._sweep_dead_terminals. */
+.sweeper-flash { font-style: italic; }
+
 /* ── Session expand arrow button — compact, label-based ──────────── */
 .expand-arrow { padding: 0 1px; min-width: 0; }
 
