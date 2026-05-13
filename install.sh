@@ -128,6 +128,86 @@ info "Installing hook script to $HOOK_DEST ..."
 mkdir -p "$(dirname "$HOOK_DEST")"
 cp "$SCRIPT_DIR/hooks/hook.js" "$HOOK_DEST"
 
+# ── register hooks in ~/.claude/settings.json ──────────────────────────────────
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+HOOK_CMD="node ~/.claude/projectman/hook.js"
+HOOK_STATUS="manual"  # one of: registered, already, manual, skipped
+
+register_claude_hooks() {
+    if ! command -v jq &>/dev/null; then
+        warn "jq not found — cannot auto-register hooks in $CLAUDE_SETTINGS."
+        echo "  Install jq (dnf/apt/pacman install jq), or register manually."
+        echo "  See README.md → 'Enabling status indicators'."
+        HOOK_STATUS="skipped"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
+    local existed=true
+    if [[ ! -f "$CLAUDE_SETTINGS" ]]; then
+        existed=false
+        echo '{}' > "$CLAUDE_SETTINGS"
+    fi
+
+    if ! jq empty "$CLAUDE_SETTINGS" 2>/dev/null; then
+        warn "$CLAUDE_SETTINGS is not valid JSON — leaving it untouched."
+        echo "  Fix the file, then re-run install.sh, or register hooks manually."
+        HOOK_STATUS="skipped"
+        return 0
+    fi
+
+    local jq_program='
+        def add_hook($ev; $cmd):
+            .hooks //= {} |
+            .hooks[$ev] //= [] |
+            if any(.hooks[$ev][]?.hooks[]?.command // empty; test("projectman/hook\\.js"))
+            then .
+            else .hooks[$ev] += [{hooks: [{type: "command", command: $cmd}]}] end;
+        add_hook("PreToolUse"; $cmd)
+        | add_hook("PostToolUse"; $cmd)
+        | add_hook("PostToolUseFailure"; $cmd)
+        | add_hook("UserPromptSubmit"; $cmd)
+        | add_hook("PermissionRequest"; $cmd)
+        | add_hook("Notification"; $cmd)
+        | add_hook("Stop"; $cmd)
+        | add_hook("SessionStart"; $cmd)
+        | add_hook("SessionEnd"; $cmd)
+    '
+
+    local tmp; tmp=$(mktemp)
+    if ! jq --arg cmd "$HOOK_CMD" "$jq_program" "$CLAUDE_SETTINGS" > "$tmp"; then
+        rm -f "$tmp"
+        warn "Failed to compute updated $CLAUDE_SETTINGS — left unchanged."
+        HOOK_STATUS="skipped"
+        return 0
+    fi
+
+    if cmp -s "$CLAUDE_SETTINGS" "$tmp"; then
+        rm -f "$tmp"
+        if [[ "$existed" == "true" ]]; then
+            HOOK_STATUS="already"
+        else
+            # File didn't exist; we wrote {} but added no hooks (shouldn't happen) — clean up
+            HOOK_STATUS="registered"
+        fi
+        return 0
+    fi
+
+    if [[ "$existed" == "true" ]]; then
+        local backup="$CLAUDE_SETTINGS.bak.$(date +%Y%m%d-%H%M%S)"
+        cp "$CLAUDE_SETTINGS" "$backup"
+        mv "$tmp" "$CLAUDE_SETTINGS"
+        info "Registered ProjectMan hooks in $CLAUDE_SETTINGS (backup: $backup)."
+    else
+        mv "$tmp" "$CLAUDE_SETTINGS"
+        info "Created $CLAUDE_SETTINGS with ProjectMan hooks."
+    fi
+    HOOK_STATUS="registered"
+}
+
+info "Checking Claude Code hook registration ..."
+register_claude_hooks
+
 # ── done ───────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}ProjectMan installed.${NC}"
@@ -137,8 +217,19 @@ echo "  Uninstall: $SCRIPT_DIR/install.sh --uninstall"
 echo ""
 echo "  To update, pull the latest code and re-run this script."
 echo ""
-echo "  Status indicators (the coloured dots) require the hook script to be"
-echo "  registered in Claude Code. See README.md → 'Enabling Status Indicators'."
+case "$HOOK_STATUS" in
+    registered)
+        echo "  Status indicator hooks are registered. Restart any running Claude"
+        echo "  Code sessions for the changes to take effect."
+        ;;
+    already)
+        echo "  Status indicator hooks are already registered in $CLAUDE_SETTINGS."
+        ;;
+    skipped|manual|*)
+        echo "  Status indicators (the coloured dots) require the hook script to be"
+        echo "  registered in Claude Code. See README.md → 'Enabling status indicators'."
+        ;;
+esac
 echo ""
 
 # warn if ~/.local/bin is not on PATH
