@@ -95,11 +95,8 @@ class TerminalView(Gtk.Box):
         self._zellij_session = None
         self._font_size = settings.font_size
         # PM-owned pidfd watches, one per spawned child. Each entry is a dict
-        # {pid, fd, source_id}. Runs alongside vte's internal reaper-based
-        # child watch and races it to call _fire_exit_if_current; whichever
-        # fires first wins (the other becomes a no-op). Our watch lives at
-        # G_PRIORITY_DEFAULT vs vte's G_PRIORITY_LOW, so under load we tend
-        # to fire first — covering vte's occasional missed dispatch. See
+        # {pid, fd, source_id}. Vte's reaper is no longer in the picture —
+        # _spawn does its own fork+exec and never calls watch_child. See
         # docs/pidfd-leak-investigation.md.
         self._watches = []
 
@@ -389,40 +386,64 @@ class TerminalView(Gtk.Box):
             # child-exited signal will fire and emit process-exited
 
     def _spawn(self, argv, env=None):
-        envv = [f'{k}={v}' for k, v in env.items()] if env is not None else None
-        self._terminal.spawn_async(
-            Vte.PtyFlags(0),
-            self._project.path,
-            argv,
-            envv,
-            GLib.SpawnFlags.SEARCH_PATH,
-            None,                           # child_setup
-            None,                           # child_setup_data (hidden from __doc__)
-            -1,                             # timeout
-            None,                           # cancellable
-            self._on_spawn_done,            # callback
-        )
+        """DIY fork + exec — PM owns the child watch end-to-end.
 
-    def _on_spawn_done(self, terminal, pid, error):
-        """Vte has spawned (or failed to spawn) the child.
+        Replaces Vte.Terminal.spawn_async, which routes through vte's
+        G_PRIORITY_LOW glib reaper. That reaper has been observed to leak
+        pidfds (Pid: -1 fds accumulate, the main-loop poll() returns
+        instantly forever, CPU pegs) and to miss child-exited dispatch
+        (tab stuck "attached"). See docs/pidfd-leak-investigation.md.
 
-        On success we register our own pidfd watch on top of vte's internal
-        reaper. Vte's reaper sits at G_PRIORITY_LOW and has been observed to
-        miss dispatch entirely (tab stuck "attached" + pidfd leak pegging
-        CPU — see docs/pidfd-leak-investigation.md). Our watch at
-        G_PRIORITY_DEFAULT is the authoritative signal; vte's child-exited
-        is treated as a redundant best-effort and ignored when our watch
-        already handled the exit.
+        We create the pty via Vte.Pty.new_sync (cheap, no thread), fork in
+        Python, let vte's own Pty.child_setup do the controlling-tty dance
+        on the child side, then execvp. On the parent side we set the pty
+        on the terminal (no watch_child call), open our own pidfd, and
+        register a unix-fd watch at G_PRIORITY_DEFAULT. We never call
+        vte_terminal_watch_child, so vte's reaper never gets a pidfd and
+        can't leak one.
         """
-        if pid == -1:
+        try:
+            pty = Vte.Pty.new_sync(Vte.PtyFlags(0), None)
+        except GLib.Error:
             self._child_pid = None
             return
+        pty.set_size(
+            self._terminal.get_row_count(),
+            self._terminal.get_column_count(),
+        )
+
+        working_dir = self._project.path
+        argv_list = list(argv)
+        env_dict = dict(env) if env is not None else None
+
+        pid = os.fork()
+        if pid == 0:
+            # CHILD. Use only async-signal-safe / pre-exec-safe operations.
+            try:
+                try:
+                    os.chdir(working_dir)
+                except OSError:
+                    pass
+                # vte handles setsid, TIOCSCTTY, dup2(peer, 0/1/2), reset signals
+                pty.child_setup()
+                if env_dict is not None:
+                    os.execvpe(argv_list[0], argv_list, env_dict)
+                else:
+                    os.execvp(argv_list[0], argv_list)
+            except Exception:
+                pass
+            os._exit(127)
+
+        # PARENT.
+        self._terminal.set_pty(pty)
         self._child_pid = pid
         self._add_pidfd_watch(pid)
         self.emit('process-started')
 
     def _on_child_exited(self, terminal, status):
-        """VTE's reaper fired — usually we've already handled this via pidfd."""
+        """Vte's signal — never fires in our DIY-spawn path (we don't call
+        watch_child). Left connected defensively in case some other code
+        path ever does, so we don't lose the signal."""
         self._fire_exit_if_current(self._child_pid, status)
 
     def _add_pidfd_watch(self, pid):
