@@ -94,6 +94,14 @@ class TerminalView(Gtk.Box):
         self._is_zellij = False
         self._zellij_session = None
         self._font_size = settings.font_size
+        # PM-owned pidfd watches, one per spawned child. Each entry is a dict
+        # {pid, fd, source_id}. Runs alongside vte's internal reaper-based
+        # child watch and races it to call _fire_exit_if_current; whichever
+        # fires first wins (the other becomes a no-op). Our watch lives at
+        # G_PRIORITY_DEFAULT vs vte's G_PRIORITY_LOW, so under load we tend
+        # to fire first — covering vte's occasional missed dispatch. See
+        # docs/pidfd-leak-investigation.md.
+        self._watches = []
 
         self._terminal = Vte.Terminal()
         self._terminal.set_scrollback_lines(settings.scrollback_lines)
@@ -396,30 +404,92 @@ class TerminalView(Gtk.Box):
         )
 
     def _on_spawn_done(self, terminal, pid, error):
+        """Vte has spawned (or failed to spawn) the child.
+
+        On success we register our own pidfd watch on top of vte's internal
+        reaper. Vte's reaper sits at G_PRIORITY_LOW and has been observed to
+        miss dispatch entirely (tab stuck "attached" + pidfd leak pegging
+        CPU — see docs/pidfd-leak-investigation.md). Our watch at
+        G_PRIORITY_DEFAULT is the authoritative signal; vte's child-exited
+        is treated as a redundant best-effort and ignored when our watch
+        already handled the exit.
+        """
         if pid == -1:
             self._child_pid = None
-        else:
-            self._child_pid = pid
-            self.emit('process-started')
+            return
+        self._child_pid = pid
+        self._add_pidfd_watch(pid)
+        self.emit('process-started')
 
     def _on_child_exited(self, terminal, status):
+        """VTE's reaper fired — usually we've already handled this via pidfd."""
+        self._fire_exit_if_current(self._child_pid, status)
+
+    def _add_pidfd_watch(self, pid):
+        try:
+            fd = os.pidfd_open(pid, 0)
+        except (OSError, ProcessLookupError):
+            # Child exited between spawn_finish and pidfd_open. Reap and
+            # synthesize the exit on the next main-loop iteration.
+            self._reap(pid)
+            GLib.idle_add(self._fire_exit_if_current, pid, 0)
+            return
+        source_id = GLib.unix_fd_add_full(
+            GLib.PRIORITY_DEFAULT,
+            fd,
+            GLib.IOCondition.IN,
+            self._on_pidfd_ready,
+            pid,
+        )
+        self._watches.append({'pid': pid, 'fd': fd, 'source_id': source_id})
+
+    def _on_pidfd_ready(self, fd, condition, pid):
+        status = self._reap(pid)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        self._watches = [w for w in self._watches if w['fd'] != fd]
+        self._fire_exit_if_current(pid, status)
+        return False  # one-shot — remove the source
+
+    def _reap(self, pid):
+        try:
+            r = os.waitpid(pid, os.WNOHANG)
+            if r and r[0] == pid:
+                return r[1]
+        except (ChildProcessError, OSError):
+            pass
+        return 0
+
+    def _fire_exit_if_current(self, pid, status):
+        """Emit process-exited only if this pid is the one we're tracking.
+
+        Stale exits (e.g. an old child dying after the user already restarted
+        the session) are silently dropped — their pidfd has been cleaned up,
+        and the UI has already moved on.
+        """
+        if pid != self._child_pid:
+            return False
         self._child_pid = None
         if self._is_zellij and self._zellij_session:
             if zellij.session_alive(self._zellij_session):
                 self.emit('process-detached')
-                return
-            # Session is truly gone — clear zellij state before emitting exited
+                return False
             self._is_zellij = False
             self._zellij_session = None
         self.emit('process-exited', status)
+        return False  # for idle_add — single-shot
 
     def check_child_alive(self):
-        """Detect missed child-exited signals.
+        """Defensive backup for our pidfd watch.
 
-        VTE's child-exited has been observed to silently miss claude exits,
-        leaving a zombie under PM and a row stuck "attached". Poll
-        /proc/<pid>/status; if the process is gone or zombied, reap it and
-        synthesize the missing exit so the UI catches up.
+        Our pidfd watch (registered in _add_pidfd_watch) is the primary
+        mechanism for detecting child exit. This poll is kept as a belt-and-
+        suspenders catch in case the watch ever misses (it shouldn't — we
+        register at G_PRIORITY_DEFAULT, not vte's G_PRIORITY_LOW, and we own
+        the pidfd lifecycle ourselves). If we detect a gone/zombied child,
+        reap and synthesize the exit so the UI catches up.
         """
         pid = self._child_pid
         if pid is None:
@@ -436,13 +506,9 @@ class TerminalView(Gtk.Box):
             return
         if state not in ('Z', 'gone'):
             return
-        try:
-            os.waitpid(pid, os.WNOHANG)
-        except (ChildProcessError, OSError):
-            pass
+        status = self._reap(pid)
         # Guard against a racing respawn: only fire if the PID hasn't changed.
-        if self._child_pid == pid:
-            self._on_child_exited(self._terminal, 0)
+        self._fire_exit_if_current(pid, status)
 
     def _kill_child(self):
         if self._child_pid is not None:

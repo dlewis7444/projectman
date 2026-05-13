@@ -114,8 +114,11 @@ class AppWindow(Adw.ApplicationWindow):
         watcher.connect('status-changed', self._on_status_changed)
         self.connect('close-request', self._on_close_request)
         self._sidebar.start_polling()
-        # Defensive sweep for missed VTE child-exited signals — see
-        # TerminalView.check_child_alive for the failure mode.
+        # Defensive fallback. TerminalView now runs its own pidfd watch at
+        # G_PRIORITY_DEFAULT alongside vte's G_PRIORITY_LOW reaper
+        # (terminal.py:_add_pidfd_watch); whichever wins handles the exit.
+        # This poll exists as belt-and-suspenders if both ever miss, and
+        # should rarely fire.
         GLib.timeout_add_seconds(5, self._sweep_dead_terminals)
         self._setup_shortcuts()
 

@@ -1,7 +1,7 @@
 # tests/test_terminal_zellij.py
 """
 Tests for TerminalView's zellij detach detection.
-These tests call _on_child_exited directly with mocked session_alive,
+These tests call _fire_exit_if_current directly with mocked session_alive,
 so they do NOT need a real display.  However, TerminalView.__init__ does
 construct a Vte.Terminal widget, which requires a display.  Run with:
   DISPLAY=:0 pytest tests/test_terminal_zellij.py
@@ -44,7 +44,7 @@ def test_child_exited_session_alive_emits_detached():
     tv.connect('process-exited',   lambda t, s: exited_fired.append(True))
 
     with patch('terminal.zellij.session_alive', return_value=True):
-        tv._on_child_exited(tv._terminal, 0)
+        tv._fire_exit_if_current(99, 0)
 
     assert detached_fired == [True]
     assert exited_fired == []
@@ -62,7 +62,7 @@ def test_child_exited_session_gone_emits_exited():
     tv.connect('process-exited',   lambda t, s: exited_fired.append(True))
 
     with patch('terminal.zellij.session_alive', return_value=False):
-        tv._on_child_exited(tv._terminal, 0)
+        tv._fire_exit_if_current(99, 0)
 
     assert detached_fired == []
     assert exited_fired == [True]
@@ -76,8 +76,21 @@ def test_child_exited_non_zellij_always_emits_exited():
     exited_fired = []
     tv.connect('process-exited', lambda t, s: exited_fired.append(True))
 
-    tv._on_child_exited(tv._terminal, 0)
+    tv._fire_exit_if_current(99, 0)
     assert exited_fired == [True]
+
+
+def test_fire_exit_if_current_stale_pid_is_silent():
+    """If the watched pid no longer matches _child_pid (respawn happened),
+    don't emit process-exited."""
+    tv = _make_tv()
+    tv._child_pid = 12345
+    tv._is_zellij = False
+    exited_fired = []
+    tv.connect('process-exited', lambda t, s: exited_fired.append(True))
+    tv._fire_exit_if_current(99, 0)   # stale pid
+    assert exited_fired == []
+    assert tv._child_pid == 12345    # unchanged
 
 
 # ── check_child_alive (defensive sweep for missed VTE child-exited) ──────────
