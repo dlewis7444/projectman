@@ -414,7 +414,14 @@ class TerminalView(Gtk.Box):
 
         working_dir = self._project.path
         argv_list = list(argv)
-        env_dict = dict(env) if env is not None else None
+        # Vte.Terminal.spawn_async used to inject TERM/COLORTERM into the child
+        # env for us; the DIY fork+exec path (pty.child_setup only touches the
+        # controlling tty) does not. Launched from a desktop launcher, PM has
+        # no TERM of its own, so claude would render without color. setdefault
+        # leaves a real inherited TERM alone.
+        env_dict = dict(env) if env is not None else dict(os.environ)
+        env_dict.setdefault('TERM', 'xterm-256color')
+        env_dict.setdefault('COLORTERM', 'truecolor')
 
         pid = os.fork()
         if pid == 0:
@@ -426,10 +433,7 @@ class TerminalView(Gtk.Box):
                     pass
                 # vte handles setsid, TIOCSCTTY, dup2(peer, 0/1/2), reset signals
                 pty.child_setup()
-                if env_dict is not None:
-                    os.execvpe(argv_list[0], argv_list, env_dict)
-                else:
-                    os.execvp(argv_list[0], argv_list)
+                os.execvpe(argv_list[0], argv_list, env_dict)
             except Exception:
                 pass
             os._exit(127)
