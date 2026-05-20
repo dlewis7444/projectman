@@ -13,7 +13,7 @@ from window import AppWindow
 from settings import Settings
 
 
-VERSION = '0.5.5'
+VERSION = '1.0.1'
 
 
 class ProjectManApp(Adw.Application):
@@ -97,6 +97,15 @@ class ProjectManApp(Adw.Application):
         self._projects_watcher.connect('projects-changed', self._on_projects_changed)
         self.connect('settings-changed', self._on_settings_changed)
         self._window.present()
+        # Bring ccr up before restoring sessions so custom-model terminals find
+        # the gateway already listening. save() persists a freshly minted key.
+        try:
+            import ccr
+            if ccr.available(self._settings) and self._settings.any_custom_model_active():
+                ccr.sync(self._settings)
+                self._settings.save()
+        except Exception as e:
+            print(f'ProjectMan: ccr sync failed: {e}', file=sys.stderr)
         self._window._restore_session()
         if self._settings.paa_enabled:
             self._paa_monitor.start()
@@ -132,6 +141,13 @@ class ProjectManApp(Adw.Application):
             self._last_projects_dir = new_dir
         if hasattr(self, '_paa_monitor'):
             self._paa_monitor.restart()
+        # Reconcile the ccr service (config + start/stop). sync() self-diffs,
+        # so calling it on every settings change is cheap.
+        try:
+            import ccr
+            ccr.sync(self._settings)
+        except Exception as e:
+            print(f'ProjectMan: ccr sync failed: {e}', file=sys.stderr)
 
     def _on_projects_changed(self, watcher):
         self._window._sidebar.refresh()

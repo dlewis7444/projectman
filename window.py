@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -91,6 +92,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.connect('project-zellij',      self._on_project_open_zellij)
         self._sidebar.connect('project-ntfy-toggle', self._on_ntfy_toggle)
         self._sidebar.connect('project-haiku-check', self._on_project_haiku_check)
+        self._sidebar.connect('project-model-change', self._on_project_model_change)
         self._sidebar.connect('show-archive-window', self._on_show_archive_window)
         self._sidebar.connect('show-settings',       self._on_open_settings)
         self._sidebar.connect('project-create', self._on_project_create)
@@ -121,6 +123,7 @@ class AppWindow(Adw.ApplicationWindow):
         # should rarely fire.
         GLib.timeout_add_seconds(5, self._sweep_dead_terminals)
         self._setup_shortcuts()
+        self._refresh_sidebar_models()
 
     def _sweep_dead_terminals(self):
         for path, tv in list(self._terminals.items()):
@@ -201,6 +204,14 @@ class AppWindow(Adw.ApplicationWindow):
 
     def _quit(self):
         """Destroy the main window and explicitly quit the application."""
+        # Stop the ccr service we manage so it doesn't outlive ProjectMan.
+        # If the user runs ccr independently (ccr_managed off), leave it be.
+        try:
+            import ccr
+            if self._settings.ccr_managed and ccr.available(self._settings):
+                ccr.stop(self._settings)
+        except Exception:
+            pass
         app = self.get_application()
         self.destroy()
         if app:
@@ -558,6 +569,66 @@ class AppWindow(Adw.ApplicationWindow):
         for tv in self._terminals.values():
             tv.apply_settings(settings)
         self._sidebar.set_ntfy_enabled(settings.ntfy_enabled)
+        self._refresh_sidebar_models()
+
+    def _refresh_sidebar_models(self):
+        """Push the current provider/model options into the sidebar menus."""
+        from models import build_model_options, model_label
+        ids, labels = build_model_options(self._settings.providers)
+        options = list(zip(ids, labels))
+        global_label = model_label(
+            self._settings.providers, self._settings.model_default)
+        self._sidebar.set_model_options(
+            options, self._settings.model_overrides, global_label)
+
+    def _on_project_model_change(self, sidebar, path, value):
+        """A per-project model was picked from the sidebar context menu."""
+        from models import FOLLOW_DEFAULT
+        overrides = dict(self._settings.model_overrides)
+        if value == FOLLOW_DEFAULT:
+            overrides.pop(path, None)
+        else:
+            overrides[path] = value
+        self._settings.model_overrides = overrides
+        self._settings.save()
+        try:
+            import ccr
+            ccr.sync(self._settings)
+        except Exception as e:
+            print(f'ProjectMan: ccr sync failed: {e}', file=sys.stderr)
+        self._refresh_sidebar_models()
+        self._maybe_prompt_restart(path)
+
+    def _maybe_prompt_restart(self, path):
+        """If a live session's model just changed, offer to restart it.
+
+        The model is fixed at spawn time, so a running session keeps its old
+        model until re-spawned. Never auto-kill — that would lose context.
+        """
+        tv = self._terminals.get(path)
+        if tv is None or tv._child_pid is None:
+            return
+        if tv.spawned_model_signature() == self._settings.effective_model(path):
+            return
+        project = self._find_project(path)
+        name = project.name if project else os.path.basename(path)
+        dialog = Adw.AlertDialog.new(
+            'Model Changed',
+            f'The new model for "{name}" applies to the next session. '
+            f'Restart this session now?',
+        )
+        dialog.add_response('later', 'Apply Later')
+        dialog.add_response('restart', 'Restart Now')
+        dialog.set_response_appearance('restart', Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response('later')
+        dialog.set_close_response('later')
+
+        def on_response(d, response_id):
+            if response_id == 'restart':
+                self._on_project_new_claude(self._sidebar, path)
+
+        dialog.connect('response', on_response)
+        dialog.present(self)
 
     def _on_open_settings(self, *args):
         if self._settings_win is not None:

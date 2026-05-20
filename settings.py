@@ -1,7 +1,7 @@
 import os
 import json
 import tempfile
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 
 DEFAULT_SETTINGS_PATH = os.path.expanduser('~/.ProjectMan/settings.json')
@@ -32,6 +32,19 @@ class Settings:
     paa_stale_days: int = 60
     ntfy_enabled: bool = False
     ntfy_topic: str = ''
+    # --- Model-agnostic / claude-code-router (ccr) ---
+    # providers: {provider_id: {"name": str, "base_url": str, "api_key": str,
+    #                           "transformer": str|None,
+    #                           "models": {model_id: {"name": str}}}}
+    providers: dict = field(default_factory=dict)
+    model_default: str = ''      # '' = Anthropic native; else 'provider_id/model_id'
+    # model_overrides: {project_path: 'provider_id/model_id' | ''}
+    model_overrides: dict = field(default_factory=dict)
+    ccr_managed: bool = True
+    ccr_host: str = '127.0.0.1'
+    ccr_port: int = 3456
+    ccr_api_key: str = ''        # ccr APIKEY + injected auth token; auto-minted if blank
+    ccr_binary: str = ''
 
     @property
     def resolved_projects_dir(self) -> str:
@@ -41,8 +54,41 @@ class Settings:
     def resolved_claude_binary(self) -> str:
         return self.claude_binary.strip() or 'claude'
 
+    @property
+    def resolved_ccr_binary(self) -> str:
+        return (self.ccr_binary or '').strip() or 'ccr'
+
+    def effective_model(self, project_path: str = '') -> str:
+        """Return the 'provider/model' id for a project ('' = Anthropic native).
+
+        A per-project override takes precedence over the global default. An
+        override stored as '' explicitly pins that project to native Claude.
+        """
+        if project_path and project_path in self.model_overrides:
+            return self.model_overrides[project_path] or ''
+        return self.model_default or ''
+
+    def uses_custom_model(self, project_path: str = '') -> bool:
+        """True if the effective model for this project needs ccr."""
+        model = self.effective_model(project_path)
+        if not model or '/' not in model:
+            return False
+        provider = model.split('/', 1)[0]
+        return provider in self.providers
+
+    def any_custom_model_active(self) -> bool:
+        """True if the global default or any per-project override needs ccr."""
+        candidates = [self.model_default]
+        candidates.extend(self.model_overrides.values())
+        for model in candidates:
+            if model and '/' in model and model.split('/', 1)[0] in self.providers:
+                return True
+        return False
+
     @classmethod
-    def load(cls, path: str = DEFAULT_SETTINGS_PATH) -> 'Settings':
+    def load(cls, path: str | None = None) -> 'Settings':
+        if path is None:
+            path = DEFAULT_SETTINGS_PATH
         try:
             with open(path, 'r') as f:
                 data = json.load(f)
@@ -52,7 +98,9 @@ class Settings:
         except (FileNotFoundError, json.JSONDecodeError, TypeError):
             return cls()
 
-    def save(self, path: str = DEFAULT_SETTINGS_PATH) -> None:
+    def save(self, path: str | None = None) -> None:
+        if path is None:
+            path = DEFAULT_SETTINGS_PATH
         dir_path = os.path.dirname(os.path.abspath(path))
         os.makedirs(dir_path, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix='.tmp')
@@ -60,6 +108,11 @@ class Settings:
             with os.fdopen(fd, 'w') as f:
                 json.dump(asdict(self), f, indent=2)
             os.replace(tmp_path, path)
+            # settings.json holds provider API keys in cleartext — keep it private.
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
         except Exception:
             try:
                 os.unlink(tmp_path)

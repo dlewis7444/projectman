@@ -93,6 +93,9 @@ class TerminalView(Gtk.Box):
         self._is_multiplexed = False
         self._is_zellij = False
         self._zellij_session = None
+        # 'provider/model' the live child was spawned with ('' = native Claude);
+        # lets window.py detect when a model change leaves a session stale.
+        self._spawned_model = ''
         self._font_size = settings.font_size
         # PM-owned pidfd watches, one per spawned child. Each entry is a dict
         # {pid, fd, source_id}. Vte's reaper is no longer in the picture —
@@ -315,6 +318,29 @@ class TerminalView(Gtk.Box):
         self._terminal.set_color_cursor(rgba(p['cursor']))
         self._terminal.set_color_cursor_foreground(rgba(p['cursor_fg']))
 
+    def _claude_env(self):
+        """Env dict for the claude child, or None to use native Anthropic.
+
+        When the effective model for this project is a custom provider/model,
+        point claude at the local ccr service. claude still runs unchanged —
+        hooks, history and --resume are client-side and endpoint-independent.
+        """
+        s = self._settings
+        if not s.uses_custom_model(self._project.path):
+            return None
+        # ccr accepts an explicit 'provider,model' route as the model name.
+        model = s.effective_model(self._project.path).replace('/', ',', 1)
+        env = dict(os.environ)
+        env['ANTHROPIC_BASE_URL'] = f'http://{s.ccr_host}:{s.ccr_port}'
+        env['ANTHROPIC_AUTH_TOKEN'] = s.ccr_api_key or ''
+        env['ANTHROPIC_API_KEY'] = s.ccr_api_key or ''
+        env['ANTHROPIC_MODEL'] = model
+        return env
+
+    def spawned_model_signature(self):
+        """The 'provider/model' the current child was spawned with."""
+        return self._spawned_model
+
     def spawn_claude(self, session_id=None, fresh=False, project_name=None):
         self._kill_child()
         self._terminal.reset(True, True)
@@ -339,7 +365,7 @@ class TerminalView(Gtk.Box):
                     f"trap 'exit 143' TERM HUP; {c} -c; s=$?; "
                     f'[ "$s" -gt 0 ] && [ "$s" -le 128 ] && exec {c}']
         self._is_multiplexed = False
-        self._spawn(argv)
+        self._spawn(argv, self._claude_env())
 
     def spawn_zellij(self, session_name):
         """Attach to or create a zellij session for this project.
@@ -372,6 +398,15 @@ class TerminalView(Gtk.Box):
             env = dict(os.environ)
             env['SHELL'] = wrapper
             env['ZELLIJ_REAL_SHELL'] = os.environ.get('SHELL', '/bin/bash')
+            # Custom-model env can only be set when the zellij server is first
+            # created — attaching to an existing session inherits whatever the
+            # server already has. Per-project models under zellij are therefore
+            # best-effort; the default (non-multiplexed) path is fully supported.
+            custom = self._claude_env()
+            if custom:
+                for k in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN',
+                          'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'):
+                    env[k] = custom[k]
             cmd = ['zellij', 'attach', '--create', session_name]
         self._spawn(cmd, env)
 
@@ -441,6 +476,7 @@ class TerminalView(Gtk.Box):
         # PARENT.
         self._terminal.set_pty(pty)
         self._child_pid = pid
+        self._spawned_model = self._settings.effective_model(self._project.path)
         self._add_pidfd_watch(pid)
         self.emit('process-started')
 

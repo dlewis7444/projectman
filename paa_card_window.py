@@ -309,6 +309,7 @@ class PAACardWindow(Adw.Window):
         paa_dir = self._deploy_harness()
         claude_cmd = self._settings.resolved_claude_binary
         self._spawn_cancelled = False
+        # PAA intentionally uses native Anthropic — no ccr env injection here.
         model = self._settings.paa_chat_model
         self._vte.spawn_async(
             Vte.PtyFlags(0), paa_dir,

@@ -133,3 +133,89 @@ def test_paa_budget_month_roundtrip(tmp_path):
     s.save(p)
     s2 = Settings.load(p)
     assert s2.paa_budget_month == '2026-03'
+
+
+# --- Model-agnostic / ccr settings ---------------------------------------- #
+
+def _sample_providers():
+    return {
+        'ollama': {
+            'name': 'Ollama',
+            'base_url': 'http://host:11434/v1',
+            'api_key': 'x',
+            'models': {'qwen': {'name': 'Qwen'}},
+        },
+    }
+
+
+def test_provider_defaults():
+    s = Settings()
+    assert s.providers == {}
+    assert s.model_default == ''
+    assert s.model_overrides == {}
+    assert s.ccr_managed is True
+    assert s.ccr_host == '127.0.0.1'
+    assert s.ccr_port == 3456
+    assert s.ccr_api_key == ''
+
+
+def test_resolved_ccr_binary():
+    assert Settings().resolved_ccr_binary == 'ccr'
+    assert Settings(ccr_binary='  ').resolved_ccr_binary == 'ccr'
+    assert Settings(ccr_binary='/opt/ccr').resolved_ccr_binary == '/opt/ccr'
+
+
+def test_providers_roundtrip(tmp_path):
+    path = str(tmp_path / 'settings.json')
+    s = Settings(providers=_sample_providers(), model_default='ollama/qwen')
+    s.save(path)
+    s2 = Settings.load(path)
+    assert s2.providers == _sample_providers()
+    assert s2.model_default == 'ollama/qwen'
+
+
+def test_load_old_file_without_provider_keys(tmp_path):
+    """An old settings.json predating the model fields loads with defaults."""
+    path = tmp_path / 'settings.json'
+    path.write_text(json.dumps({'font_size': 12}))
+    s = Settings.load(str(path))
+    assert s.providers == {}
+    assert s.model_default == ''
+
+
+def test_effective_model_global_default():
+    s = Settings(providers=_sample_providers(), model_default='ollama/qwen')
+    assert s.effective_model('/p/a') == 'ollama/qwen'
+
+
+def test_effective_model_per_project_override():
+    s = Settings(providers=_sample_providers(), model_default='ollama/qwen',
+                 model_overrides={'/p/a': ''})
+    assert s.effective_model('/p/a') == ''          # pinned to native
+    assert s.effective_model('/p/b') == 'ollama/qwen'  # follows default
+
+
+def test_uses_custom_model():
+    s = Settings(providers=_sample_providers(), model_default='ollama/qwen')
+    assert s.uses_custom_model('/p/a') is True
+    # native default
+    assert Settings().uses_custom_model('/p/a') is False
+    # model id whose provider is not defined
+    s2 = Settings(model_default='ghost/x')
+    assert s2.uses_custom_model('/p/a') is False
+
+
+def test_any_custom_model_active():
+    assert Settings().any_custom_model_active() is False
+    s = Settings(providers=_sample_providers(), model_default='ollama/qwen')
+    assert s.any_custom_model_active() is True
+    # custom only via a per-project override
+    s2 = Settings(providers=_sample_providers(),
+                  model_overrides={'/p/a': 'ollama/qwen'})
+    assert s2.any_custom_model_active() is True
+
+
+def test_save_hardens_permissions(tmp_path):
+    path = str(tmp_path / 'settings.json')
+    Settings(providers=_sample_providers()).save(path)
+    assert (os.stat(path).st_mode & 0o777) == 0o600

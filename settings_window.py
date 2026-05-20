@@ -18,6 +18,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._build_terminal_page()
         self._build_paa_page()
         self._build_appearance_page()
+        self._build_models_page()
         self._build_about_page()
         self._build_claude_json_page()
         self.present(parent)
@@ -555,6 +556,167 @@ class SettingsWindow(Adw.PreferencesDialog):
             toast = Adw.Toast.new(f'Error saving: {e}')
             toast.set_timeout(4)
             self.add_toast(toast)
+
+    # ------------------------------------------------------------------ #
+    #  Models page                                                         #
+    # ------------------------------------------------------------------ #
+
+    def _build_models_page(self):
+        from models import build_model_options
+        page = Adw.PreferencesPage(
+            title='Models', icon_name='network-server-symbolic'
+        )
+        self.add(page)
+
+        # -- Active model --
+        active_group = Adw.PreferencesGroup(
+            title='Active Model',
+            description='Default for new sessions. Override per project '
+                        'from the sidebar right-click menu.',
+        )
+        page.add(active_group)
+
+        self._model_combo = Adw.ComboRow(title='Default Model')
+        ids, labels = build_model_options(self._settings.providers)
+        self._model_ids = ids
+        self._model_combo.set_model(Gtk.StringList.new(labels))
+        cur = self._settings.model_default
+        self._model_combo.set_selected(ids.index(cur) if cur in ids else 0)
+        self._model_combo.connect('notify::selected', self._on_model_default_changed)
+        active_group.add(self._model_combo)
+
+        # -- Provider definitions (JSON editor) --
+        prov_group = Adw.PreferencesGroup(
+            title='Providers',
+            description='LLM providers and models as JSON. Custom models are '
+                        'reached through claude-code-router.',
+        )
+        page.add(prov_group)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_min_content_height(260)
+        self._providers_tv = Gtk.TextView()
+        self._providers_tv.set_monospace(True)
+        self._providers_tv.set_left_margin(8)
+        self._providers_tv.set_right_margin(8)
+        self._providers_tv.set_top_margin(8)
+        self._providers_tv.set_bottom_margin(8)
+        self._providers_tv.get_buffer().set_text(self._providers_json_text())
+        scrolled.set_child(self._providers_tv)
+        prov_group.add(scrolled)
+
+        btn_group = Adw.PreferencesGroup()
+        page.add(btn_group)
+        save_row = Adw.ActionRow(title='Provider Definitions')
+        save_row.set_subtitle(
+            '{"<id>": {"name", "base_url", "api_key", '
+            '"models": {"<id>": {"name"}}}}'
+        )
+        save_btn = Gtk.Button(label='Save Providers')
+        save_btn.add_css_class('suggested-action')
+        save_btn.set_valign(Gtk.Align.CENTER)
+        save_btn.connect('clicked', self._on_save_providers)
+        save_row.add_suffix(save_btn)
+        btn_group.add(save_row)
+
+        # -- claude-code-router --
+        self._build_ccr_group(page)
+
+    def _build_ccr_group(self, page):
+        import ccr
+        group = Adw.PreferencesGroup(
+            title='Claude Code Router (ccr)',
+            description='Custom models are routed through a local ccr service.',
+        )
+        page.add(group)
+
+        installed = ccr.available(self._settings)
+        status_row = Adw.ActionRow(title='Service')
+        if not installed:
+            status_row.set_subtitle('Not installed')
+            status_row.add_prefix(
+                Gtk.Image.new_from_icon_name('dialog-warning-symbolic'))
+        else:
+            running = ccr.is_running(self._settings)
+            status_row.set_subtitle(
+                'Installed — service running' if running
+                else 'Installed — service stopped')
+            status_row.add_prefix(
+                Gtk.Image.new_from_icon_name('emblem-ok-symbolic'))
+        status_row.set_sensitive(False)
+        group.add(status_row)
+
+        if not installed:
+            cmd = 'npm install -g @musistudio/claude-code-router'
+            hint_row = Adw.ActionRow(title='Install ccr')
+            hint_row.set_subtitle(cmd)
+            copy_btn = Gtk.Button(label='Copy')
+            copy_btn.set_valign(Gtk.Align.CENTER)
+            copy_btn.add_css_class('flat')
+            copy_btn.connect('clicked', lambda b, c=cmd: self.get_clipboard().set(c))
+            hint_row.add_suffix(copy_btn)
+            group.add(hint_row)
+
+        self._ccr_managed_row = Adw.SwitchRow(
+            title='Manage ccr',
+            subtitle='Let ProjectMan configure and start/stop the ccr service',
+        )
+        self._ccr_managed_row.set_active(self._settings.ccr_managed)
+        self._ccr_managed_row.set_sensitive(installed)
+        self._ccr_managed_row.connect('notify::active', self._on_ccr_managed_toggled)
+        group.add(self._ccr_managed_row)
+
+    def _providers_json_text(self):
+        import json
+        try:
+            return json.dumps(self._settings.providers, indent=2)
+        except (TypeError, ValueError):
+            return '{}'
+
+    def _refresh_model_combo(self):
+        """Rebuild the default-model combo after the providers dict changes."""
+        from models import build_model_options
+        ids, labels = build_model_options(self._settings.providers)
+        current = self._settings.model_default
+        self._model_combo.handler_block_by_func(self._on_model_default_changed)
+        self._model_combo.set_model(Gtk.StringList.new(labels))
+        self._model_ids = ids
+        self._model_combo.set_selected(ids.index(current) if current in ids else 0)
+        self._model_combo.handler_unblock_by_func(self._on_model_default_changed)
+        if current not in ids:
+            # the stored default's provider/model was removed — fall back
+            self._settings.model_default = ''
+
+    def _on_model_default_changed(self, row, _param):
+        idx = row.get_selected()
+        if 0 <= idx < len(self._model_ids):
+            self._settings.model_default = self._model_ids[idx]
+            self._save_and_notify()
+
+    def _on_save_providers(self, button):
+        import json
+        from models import validate_providers
+        buf = self._providers_tv.get_buffer()
+        text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
+        try:
+            parsed = json.loads(text or '{}')
+            validate_providers(parsed)
+        except (json.JSONDecodeError, ValueError) as e:
+            toast = Adw.Toast.new(f'Invalid: {e}')
+            toast.set_timeout(4)
+            self.add_toast(toast)
+            return
+        self._settings.providers = parsed
+        self._providers_tv.get_buffer().set_text(json.dumps(parsed, indent=2))
+        self._refresh_model_combo()
+        self._save_and_notify()
+        toast = Adw.Toast.new('Providers saved')
+        toast.set_timeout(2)
+        self.add_toast(toast)
+
+    def _on_ccr_managed_toggled(self, row, _param):
+        self._settings.ccr_managed = row.get_active()
+        self._save_and_notify()
 
     # ------------------------------------------------------------------ #
     #  Extra Pages                                                         #

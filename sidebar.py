@@ -6,6 +6,7 @@ gi.require_version('Adw', '1')
 from gi.repository import Gtk, Gio, GLib, GObject, Gdk, Pango
 
 from model import ResourceReader
+from models import FOLLOW_DEFAULT, NATIVE_LABEL
 
 
 class Sidebar(Gtk.Box):
@@ -23,6 +24,7 @@ class Sidebar(Gtk.Box):
         'project-create':       (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'show-paa-window':      (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-haiku-check':  (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
     }
 
     def __init__(self, store, history, watcher, version=''):
@@ -35,6 +37,10 @@ class Sidebar(Gtk.Box):
         self._new_project_row = None
         self._active_only = False
         self._filter_text = ''
+        # Per-project model menu state, pushed in via set_model_options().
+        self._model_options = []
+        self._model_overrides = {}
+        self._global_model_label = NATIVE_LABEL
 
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         btn_row.set_halign(Gtk.Align.END)
@@ -158,6 +164,13 @@ class Sidebar(Gtk.Box):
                         lambda r, p=proj.path: self.emit('project-haiku-check', p))
             row.connect('project-rename',
                         lambda r, new_name, p=proj.path: self.emit('project-rename', p, new_name))
+            row.connect('project-model-change',
+                        lambda r, mid, p=proj.path: self.emit('project-model-change', p, mid))
+            row.set_model_options(
+                self._model_options,
+                self._model_overrides.get(proj.path, FOLLOW_DEFAULT),
+                self._global_model_label,
+            )
             self._listbox.append(row)
             self._rows[proj.path] = row
 
@@ -224,6 +237,19 @@ class Sidebar(Gtk.Box):
     def set_ntfy_enabled(self, enabled):
         for row in self._rows.values():
             row.update_ntfy_visibility(enabled)
+
+    def set_model_options(self, options, overrides, global_label):
+        """Push provider/model menu options to every project row.
+
+        options: list of (model_id, label). overrides: {path: 'provider/model'}.
+        global_label: label of the global default model.
+        """
+        self._model_options = list(options)
+        self._model_overrides = dict(overrides)
+        self._global_model_label = global_label
+        for path, row in self._rows.items():
+            row.set_model_options(
+                options, overrides.get(path, FOLLOW_DEFAULT), global_label)
 
     def get_ntfy_active_paths(self):
         return {path for path, row in self._rows.items()
@@ -358,6 +384,7 @@ class ProjectRow(Gtk.ListBoxRow):
         'project-ntfy-toggle': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-haiku-check': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-rename':     (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self, project, history, watcher):
@@ -444,6 +471,8 @@ class ProjectRow(Gtk.ListBoxRow):
         self._menu.append('New Session',        'row.new-claude')
         self._menu.append('New Zellij Session', 'row.zellij')
         self._menu.append('Haiku Check',        'row.haiku-check')
+        self._model_submenu = Gio.Menu()
+        self._menu.append_submenu('Model', self._model_submenu)
         self._menu.append('Rename',             'row.rename')
         self._menu.append('Archive',            'row.archive')
 
@@ -471,11 +500,17 @@ class ProjectRow(Gtk.ListBoxRow):
         self._ntfy_action.connect('activate', self._on_ntfy_activate)
         ag.add_action(self._ntfy_action)
 
-        self.insert_action_group('row', ag)
+        # Per-project model selection. A single stateful 's' action lets GTK
+        # render the submenu as radio items with the active one checked.
+        self._model_action = Gio.SimpleAction.new_stateful(
+            'set-model', GLib.VariantType.new('s'),
+            GLib.Variant('s', FOLLOW_DEFAULT),
+        )
+        self._model_action.connect('activate', self._on_model_select)
+        ag.add_action(self._model_action)
 
-        self._popover = Gtk.PopoverMenu.new_from_model(self._menu)
-        self._popover.set_parent(self)
-        self._popover.set_has_arrow(False)
+        self.insert_action_group('row', ag)
+        self._rebuild_popover()
 
         click = Gtk.GestureClick.new()
         click.set_button(3)
@@ -497,18 +532,44 @@ class ProjectRow(Gtk.ListBoxRow):
                 break
         if enabled and not present:
             self._menu.insert(2, ntfy_label, 'row.ntfy-done')
-            self._popover = Gtk.PopoverMenu.new_from_model(self._menu)
-            self._popover.set_parent(self)
-            self._popover.set_has_arrow(False)
+            self._rebuild_popover()
         elif not enabled and present:
             for i in range(self._menu.get_n_items()):
                 v = self._menu.get_item_attribute_value(i, 'label', GLib.VariantType('s'))
                 if v and v.get_string() == ntfy_label:
                     self._menu.remove(i)
                     break
-            self._popover = Gtk.PopoverMenu.new_from_model(self._menu)
-            self._popover.set_parent(self)
-            self._popover.set_has_arrow(False)
+            self._rebuild_popover()
+
+    def _rebuild_popover(self):
+        """(Re)create the context-menu popover after the menu model changes."""
+        self._popover = Gtk.PopoverMenu.new_from_model(self._menu)
+        self._popover.set_parent(self)
+        self._popover.set_has_arrow(False)
+
+    def set_model_options(self, options, current, global_label):
+        """Populate the 'Model' submenu.
+
+        options: list of (model_id, label); model_id '' is native Claude.
+        current: the active selection — FOLLOW_DEFAULT, '' or 'provider/model'.
+        global_label: label of the global default, shown on the Default entry.
+        """
+        self._model_submenu.remove_all()
+        default_item = Gio.MenuItem.new(f'Default ({global_label})', None)
+        default_item.set_action_and_target_value(
+            'row.set-model', GLib.Variant('s', FOLLOW_DEFAULT))
+        self._model_submenu.append_item(default_item)
+        for model_id, label in options:
+            item = Gio.MenuItem.new(label, None)
+            item.set_action_and_target_value(
+                'row.set-model', GLib.Variant('s', model_id))
+            self._model_submenu.append_item(item)
+        self._model_action.set_state(GLib.Variant('s', current))
+        self._rebuild_popover()
+
+    def _on_model_select(self, action, value):
+        action.set_state(value)
+        self.emit('project-model-change', value.get_string())
 
     def _on_right_click(self, gesture, n_press, x, y):
         rect = Gdk.Rectangle()

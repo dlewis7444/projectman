@@ -2,6 +2,24 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
+## [1.0.1] - 2026-05-20
+
+> **Note:** version 1.0.0 was a mid-cycle bump in main.py that was never tagged as a release; in-tree builds carrying that string contained the test-isolation bug that clobbered `~/.ProjectMan/settings.json` (fixed below). This entry was originally drafted as 1.0.0 and is corrected to 1.0.1 to keep the version label honest.
+
+### Added
+- **Model-agnostic sessions**: ProjectMan can now back a Claude Code session with any LLM, not just Anthropic-hosted Claude. Claude Code stays the coder — its hooks, status dots, session history, and `--resume` are client-side and keep working unchanged regardless of which model serves the API.
+- **Providers & Models settings page**: define LLM providers and their models as JSON (shape mirrors `opencode.json`) and pick a global default model. "Anthropic (native Claude)" is the default and behaves exactly as before.
+- **Per-project model override**: a "Model" submenu in each project's right-click menu pins that project to a specific model (or back to the global default). A changed model applies to the next session — a prompt offers to restart a live one.
+- **claude-code-router (ccr) management**: when a custom model is active, ProjectMan writes ccr's config, supervises the service, and points the spawned `claude` at it via environment variables. A "Manage ccr" toggle lets you opt out and run ccr yourself.
+
+### Fixed
+- **Test isolation: settings.json no longer clobbered by `pytest`.** `Settings.save()` and `Settings.load()` resolved their default path at function-definition time, so a test that built a `Settings(...)` object and triggered `PAAMonitor.run_scan()` would write the test's settings into the developer's real `~/.ProjectMan/settings.json`. On reboot the leaked `projects_dir` (a pytest tmp path) vanished and the sidebar showed zero projects. Defaults are now resolved at call time, and a `tests/conftest.py` autouse fixture redirects both `DEFAULT_SETTINGS_PATH` and `paa_monitor._MTIME_CACHE_PATH` to a per-test temp dir.
+
+### Known limitations
+- ccr's `~/.claude-code-router/config.json` holds provider API keys in cleartext (ccr has no keyring); ProjectMan writes it `0600` in a `0700` directory and hardens `settings.json` to `0600`.
+- Tool-use reliability with non-Anthropic models varies by model; MCP tool search is disabled for non-Anthropic endpoints unless `ENABLE_TOOL_SEARCH=true`.
+- Per-project models under the zellij multiplexer are best-effort (the zellij server is shared); the default non-multiplexed path is fully supported.
+
 ## [0.5.0] - 2026-05-07
 
 ### Improved
