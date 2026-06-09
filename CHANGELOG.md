@@ -2,7 +2,7 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
-## [Unreleased]
+## [1.0.2] - 2026-06-09
 
 ### Fixed
 - **ccr dead-port guard**: custom-model projects no longer silently die with
