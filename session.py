@@ -7,14 +7,29 @@ import tempfile
 SESSION_FILE = os.path.expanduser('~/.ProjectMan/session.json')
 
 
-def save_session(path, open_paths, focused_path):
+DEFAULT_AGENT = 'claude'
+
+
+def save_session(path, open_paths, focused_path, agents=None):
     """Atomically write session state.
 
     open_paths   : iterable of project path strings
     focused_path : focused project path, or None
+    agents       : optional {path: agent_id} map. When None, entries are
+                   written in the legacy plain-string form (byte-compatible
+                   with v1). When given, each entry becomes the v2 dict form
+                   ``{"path": p, "agent": a}``, defaulting absent paths to
+                   ``DEFAULT_AGENT``.
     """
+    if agents is None:
+        entries = list(open_paths)
+    else:
+        entries = [
+            {'path': p, 'agent': agents.get(p, DEFAULT_AGENT)}
+            for p in open_paths
+        ]
     data = {
-        'open_paths': list(open_paths),
+        'open_paths': entries,
         'focused_path': focused_path,
     }
     dir_path = os.path.dirname(os.path.abspath(path))
@@ -34,11 +49,28 @@ def save_session(path, open_paths, focused_path):
                 pass
 
 
+def _entry_path(entry):
+    """Extract the project path from a session entry (v1 str or v2 dict).
+
+    Returns the path string, or None for a malformed entry (e.g. a dict with no
+    ``path`` key). v2 dict form: ``{"path": ..., "agent": ...}``.
+    """
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        p = entry.get('path')
+        return p if isinstance(p, str) else None
+    return None
+
+
 def load_session(path):
     """Load session state.
 
     Returns (open_paths, focused_path) on success, or ([], None) on any error.
-    open_paths is deduplicated and contains only string entries.
+    open_paths is deduplicated and contains only path strings — v2 dict entries
+    (``{"path": ..., "agent": ...}``) are transparently reduced to their path,
+    so every existing caller is unaffected. Use ``load_agents`` to recover the
+    per-project agent.
     """
     try:
         with open(path) as f:
@@ -49,14 +81,44 @@ def load_session(path):
         focused_path = data.get('focused_path')
         seen = set()
         deduped = []
-        for p in raw:
-            if isinstance(p, str) and p not in seen:
+        for entry in raw:
+            p = _entry_path(entry)
+            if p is not None and p not in seen:
                 seen.add(p)
                 deduped.append(p)
         return deduped, focused_path
     except (FileNotFoundError, json.JSONDecodeError, TypeError, KeyError,
             AttributeError):
         return [], None
+
+
+def load_agents(path):
+    """Return {path: agent_id} for the saved session.
+
+    v1 (str) entries and v2 dict entries missing an ``agent`` default to
+    ``DEFAULT_AGENT`` ('claude'). Returns {} on any error or missing file. The
+    map is keyed by the same deduplicated paths ``load_session`` returns.
+    """
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        raw = data.get('open_paths', [])
+        if not isinstance(raw, list):
+            return {}
+        agents = {}
+        for entry in raw:
+            p = _entry_path(entry)
+            if p is None or p in agents:
+                continue
+            if isinstance(entry, dict):
+                agent = entry.get('agent')
+                agents[p] = agent if isinstance(agent, str) and agent else DEFAULT_AGENT
+            else:
+                agents[p] = DEFAULT_AGENT
+        return agents
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, KeyError,
+            AttributeError):
+        return {}
 
 
 def filter_active_paths(open_paths, active_projects):

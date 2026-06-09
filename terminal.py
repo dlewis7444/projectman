@@ -7,6 +7,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Vte', '3.91')
 from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk, Gio
 
+import agents
 import terminal_copy
 import zellij
 
@@ -54,26 +55,22 @@ _TERMINAL_PALETTES = {
 def _ensure_zellij_shell_wrapper():
     """Write (or overwrite) ~/.ProjectMan/zellij-shell-init.sh; return its path.
 
-    This wrapper is set as SHELL when creating new zellij sessions so that
-    the initial pane auto-starts `claude -c`. It checks for a per-session
-    flag file (~/.ProjectMan/.zellij-init-<session>) and, if present, removes
-    it and runs claude, then exits (closing the pane). Subsequent panes in the
-    same session find no flag and go straight to the real shell.
+    This wrapper is set as SHELL when creating new zellij sessions so that the
+    initial pane auto-starts the project's agent. It checks for a per-session
+    flag file (~/.ProjectMan/.zellij-init-<session>) and, if present, reads its
+    content (the agent's continue command line), removes the flag, execs the
+    command, then exits (closing the pane). Subsequent panes in the same session
+    find no flag and go straight to the real shell.
+
+    The script is agent-independent (it execs whatever the flag holds); the
+    per-agent command is written into the flag by ``spawn_zellij``. For claude
+    the realized behavior is identical to the pre-seam hardcoded
+    ``claude -c || claude`` — pinned by the golden tests.
     """
     pm_dir = os.path.expanduser('~/.ProjectMan')
     wrapper_path = os.path.join(pm_dir, 'zellij-shell-init.sh')
-    script = (
-        '#!/bin/bash\n'
-        'REAL_SHELL="${ZELLIJ_REAL_SHELL:-/bin/bash}"\n'
-        'INIT_FILE="${HOME}/.ProjectMan/.zellij-init-${ZELLIJ_SESSION_NAME}"\n'
-        'if rm "$INIT_FILE" 2>/dev/null; then\n'
-        '    claude -c || claude\n'
-        '    exit 0\n'
-        'fi\n'
-        'exec "$REAL_SHELL" "$@"\n'
-    )
     with open(wrapper_path, 'w') as f:
-        f.write(script)
+        f.write(agents.build_zellij_wrapper_script())
     os.chmod(wrapper_path, 0o755)
     return wrapper_path
 
@@ -89,6 +86,10 @@ class TerminalView(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self._project = project
         self._settings = settings
+        # The agent backend for this project (claude by default). All spawn
+        # argv/env decisions route through the adapter; TerminalView keeps only
+        # the pty/fork/watch machinery, which is already agent-agnostic.
+        self._adapter = agents.get_adapter(settings.effective_agent(project.path))
         self._child_pid = None
         self._is_multiplexed = False
         self._is_zellij = False
@@ -340,34 +341,38 @@ class TerminalView(Gtk.Box):
         """The 'provider/model' the current child was spawned with."""
         return self._spawned_model
 
-    def spawn_claude(self, session_id=None, fresh=False, project_name=None):
-        # Must clear at spawn entry, not in _spawn() — _claude_env() runs
-        # during _spawn's argument evaluation and sets a fresh reason first.
+    def spawn_agent(self, mode, session_id=None):
+        """Spawn the project's agent in ``mode`` (fresh|continue|resume).
+
+        The adapter folds argv + env (incl. ccr) into a ``SpawnPlan``; this
+        method owns only the terminal-side lifecycle (clear, kill, spawn) and
+        carries the plan's fallback_reason onto the instance so window.py can
+        surface it from the process-started handler.
+        """
+        # Must clear at spawn entry, not in _spawn() — the adapter's spawn_plan
+        # (which runs ccr.spawn_env) sets a fresh reason below; clearing here
+        # avoids a stale reason from a prior failed spawn leaking through.
         self._fallback_reason = None
         self._kill_child()
         self._terminal.reset(True, True)
-        claude_cmd = self._settings.resolved_claude_binary
-        if session_id:
-            argv = [claude_cmd, '--resume', session_id]
-        elif fresh:
-            argv = [claude_cmd]
-        else:
-            # Try continuing most recent conversation; fall back to fresh if
-            # there's no history (claude -c exits non-zero).  Two guards keep
-            # PM's SIGTERM/SIGHUP from accidentally respawning claude:
-            #   - exit-code test rejects signal kills (s > 128)
-            #   - TERM/HUP trap rejects graceful-but-nonzero exits, where
-            #     claude catches the signal and cleanly returns code 1-128.
-            #     Without the trap, that case slips past the exit-code test
-            #     and bash exec's a fresh claude that never saw the signal,
-            #     leaving the project stuck "active" until SIGKILL.
-            import shlex
-            c = shlex.quote(claude_cmd)
-            argv = ['bash', '-c',
-                    f"trap 'exit 143' TERM HUP; {c} -c; s=$?; "
-                    f'[ "$s" -gt 0 ] && [ "$s" -le 128 ] && exec {c}']
+        plan = self._adapter.spawn_plan(
+            self._settings, self._project, mode, session_id=session_id
+        )
+        self._fallback_reason = plan.fallback_reason
         self._is_multiplexed = False
-        self._spawn(argv, self._claude_env())
+        self._spawn(plan.argv, plan.env)
+
+    def spawn_claude(self, session_id=None, fresh=False, project_name=None):
+        """Back-compat alias over ``spawn_agent`` (kept for this phase to
+        minimize window.py churn; removal is P2's job). Maps the old
+        (session_id, fresh) flags onto a spawn mode."""
+        if session_id:
+            mode = 'resume'
+        elif fresh:
+            mode = 'fresh'
+        else:
+            mode = 'continue'
+        self.spawn_agent(mode, session_id=session_id)
 
     def spawn_zellij(self, session_name):
         """Attach to or create a zellij session for this project.
@@ -395,11 +400,15 @@ class TerminalView(Gtk.Box):
                 os.unlink(socket_path)
             except OSError:
                 pass
-            # Create per-session init flag; wrapper reads it to auto-start claude
+            # Create per-session init flag CONTAINING the agent's continue
+            # command line; the wrapper reads+execs it (generalized from the
+            # old hardcoded `claude -c || claude`). For claude the content is
+            # exactly `claude -c || claude` — byte-identical to before.
             flag_path = os.path.join(
                 os.path.expanduser('~/.ProjectMan'), f'.zellij-init-{session_name}'
             )
-            open(flag_path, 'w').close()
+            with open(flag_path, 'w') as f:
+                f.write(self._adapter.zellij_continue_command(self._settings))
             wrapper = _ensure_zellij_shell_wrapper()
             env = dict(os.environ)
             env['SHELL'] = wrapper
@@ -602,6 +611,9 @@ class TerminalView(Gtk.Box):
     def apply_settings(self, settings):
         # Note: resets font_size to the settings default, discarding any active zoom offset.
         self._settings = settings
+        # Re-resolve the adapter in case the effective agent changed. The next
+        # spawn uses it; a live child keeps running its original agent.
+        self._adapter = agents.get_adapter(settings.effective_agent(self._project.path))
         self._font_size = settings.font_size
         self._apply_font()
         self._apply_colors()

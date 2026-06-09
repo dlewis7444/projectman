@@ -222,11 +222,18 @@ class AppWindow(Adw.ApplicationWindow):
             app.quit()
 
     def _save_session(self):
-        """Snapshot running terminals to SESSION_FILE (atomic write)."""
+        """Snapshot running terminals to SESSION_FILE (atomic write).
+
+        Persists the per-project agent id alongside each path (session.json v2)
+        so a future restore re-spawns the right agent. For an all-claude fleet
+        the effective agent is 'claude' everywhere; the dict form is written
+        regardless, and the v2 loader reads both forms.
+        """
         if not self._settings.resume_projects:
             return
         open_paths, focused = collect_session_state(self._terminals, self._active_path)
-        save_session(SESSION_FILE, open_paths, focused)
+        agents_map = {p: self._settings.effective_agent(p) for p in open_paths}
+        save_session(SESSION_FILE, open_paths, focused, agents=agents_map)
 
     def _restore_session(self):
         """Restore projects that were running at the last committed close."""

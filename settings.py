@@ -45,6 +45,14 @@ class Settings:
     ccr_port: int = 3456
     ccr_api_key: str = ''        # ccr APIKEY + injected auth token; auto-minted if blank
     ccr_binary: str = ''
+    # --- Agent-agnostic ---
+    # agents: {agent_id: {"binary": str, ...}}. claude_binary migrates into
+    #         agents['claude']['binary'] on load; the old key stays honored
+    #         when agents is absent (existing user files load unchanged).
+    agents: dict = field(default_factory=dict)
+    agent_default: str = 'claude'        # global default agent id
+    # agent_overrides: {project_path: agent_id}
+    agent_overrides: dict = field(default_factory=dict)
 
     @property
     def resolved_projects_dir(self) -> str:
@@ -52,7 +60,24 @@ class Settings:
 
     @property
     def resolved_claude_binary(self) -> str:
+        """The claude binary path: agents['claude']['binary'] wins when set,
+        otherwise the legacy ``claude_binary`` key, otherwise 'claude'."""
+        claude_cfg = self.agents.get('claude') if isinstance(self.agents, dict) else None
+        if isinstance(claude_cfg, dict):
+            from_agents = (claude_cfg.get('binary') or '').strip()
+            if from_agents:
+                return from_agents
         return self.claude_binary.strip() or 'claude'
+
+    def effective_agent(self, project_path: str = '') -> str:
+        """Return the agent id for a project (mirrors ``effective_model``).
+
+        A per-project override takes precedence over the global default. An
+        override stored as '' means 'use the default', not 'no agent'.
+        """
+        if project_path and project_path in self.agent_overrides:
+            return self.agent_overrides[project_path] or self.agent_default
+        return self.agent_default
 
     @property
     def resolved_ccr_binary(self) -> str:
@@ -94,9 +119,32 @@ class Settings:
                 data = json.load(f)
             known = {k: v for k, v in data.items()
                      if k in cls.__dataclass_fields__}
-            return cls(**known)
+            inst = cls(**known)
+            inst._migrate_claude_binary()
+            return inst
         except (FileNotFoundError, json.JSONDecodeError, TypeError):
             return cls()
+
+    def _migrate_claude_binary(self) -> None:
+        """Mirror a legacy ``claude_binary`` into ``agents['claude']['binary']``.
+
+        Idempotent and conservative: only fills the agents entry when the
+        legacy key holds a non-empty value AND the agents entry isn't already
+        set, so we never forge a misleading binary path or clobber a newer
+        agents-side value. The old key is left intact (still honored when the
+        agents map is absent — back-compat for any code/file that reads it).
+        """
+        if not isinstance(self.agents, dict):
+            self.agents = {}
+        legacy = (self.claude_binary or '').strip()
+        if not legacy:
+            return
+        claude_cfg = self.agents.get('claude')
+        if not isinstance(claude_cfg, dict):
+            claude_cfg = {}
+            self.agents['claude'] = claude_cfg
+        if not (claude_cfg.get('binary') or '').strip():
+            claude_cfg['binary'] = legacy
 
     def save(self, path: str | None = None) -> None:
         if path is None:
