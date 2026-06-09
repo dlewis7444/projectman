@@ -28,6 +28,15 @@ _START_POLL_INTERVAL = 0.25  # seconds between is_running probes after start()
 # detached). Kept so we can reap it without blocking; we never wait on it.
 _started_proc = None
 
+# Failed-start cooldown: monotonic deadline after which start retries are
+# allowed again. Set when a full start+poll cycle ends in failure; cleared on
+# any successful probe (a running server is never ignored), on config-write
+# (user may have fixed the provider), or on expiry. Suppresses only start+poll
+# — the probe still runs — so an N-project restore pays N cheap probes but
+# only ONE start_wait budget on the GTK main loop, not N×start_wait.
+_COOLDOWN_SECS = 30
+_cooldown_deadline = None  # float | None; compared against monotonic_fn()
+
 
 def _log(settings, msg):
     if getattr(settings, 'debug_logging', False):
@@ -104,7 +113,12 @@ def write_config(settings):
 
     The file holds provider API keys in cleartext (ccr has no keyring), so it
     is written 0600 inside a 0700 directory.
+
+    A successful write also clears the failed-start cooldown: the user may have
+    fixed the provider config, so the next spawn_env() should retry rather than
+    short-circuit on the cooldown.
     """
+    global _cooldown_deadline
     try:
         os.makedirs(CCR_CONFIG_DIR, exist_ok=True)
         try:
@@ -126,6 +140,7 @@ def write_config(settings):
             except OSError:
                 pass
             raise
+        _cooldown_deadline = None   # config change → user may have fixed it; retry
         return True
     except Exception as e:
         _log(settings, f'write_config failed: {e}')
@@ -199,15 +214,41 @@ def stop(settings):
     return _run(settings, 'stop')
 
 
-def restart(settings):
+_RESTART_REAP_INTERVAL = 0.25  # seconds between reap polls in restart()
+_RESTART_REAP_BUDGET = 2.0     # maximum total seconds to wait for old handle to exit
+
+
+def restart(settings, *, sleep_fn=None):
     """Restart ccr: stop the old server, then spawn a fresh detached one.
 
     `ccr restart` itself would re-spawn the same non-daemonizing foreground
     server, so it has the same kill-on-timeout hazard as `start`. Compose it
     from a run-and-wait ``stop`` (the stop CLI exits promptly) followed by a
     detached ``start``; the result reflects whether the new server spawned.
+
+    WHY bounded reap: after stop() returns the old `_started_proc` handle may
+    still be mid-shutdown (poll() is None) — overwriting it immediately drops
+    the handle unreaped. Poll at most ``_RESTART_REAP_BUDGET`` seconds before
+    proceeding; never hang regardless of outcome (old process cleanup is best-
+    effort). ``sleep_fn`` is injectable for tests (keeps them instant).
     """
+    global _started_proc
+    if sleep_fn is None:
+        sleep_fn = time.sleep
     stop(settings)
+    # Bounded wait for the old handle to exit before we overwrite it.
+    if _started_proc is not None:
+        steps = max(1, int(_RESTART_REAP_BUDGET / _RESTART_REAP_INTERVAL))
+        for _ in range(steps):
+            if _started_proc.poll() is not None:
+                _started_proc = None
+                break
+            sleep_fn(_RESTART_REAP_INTERVAL)
+        else:
+            if _started_proc is not None:
+                _log(settings, f'restart: old handle pid={_started_proc.pid} '
+                               f'still live after reap budget — overwriting')
+                _started_proc = None
     return start(settings)
 
 
@@ -237,12 +278,19 @@ def is_running(settings):
 def sync(settings):
     """Reconcile the ccr service with current settings.
 
-    No-op if ccr is not installed. Stops the service when no custom model is
-    selected; otherwise writes a fresh config (if changed) and (re)starts.
+    No-op if ccr is not installed. No-op beyond _reap_started() when
+    ccr_managed is False — the user runs ccr themselves; ProjectMan must
+    never start, stop, restart, or reconfigure it. Stops the service when no
+    custom model is selected; otherwise writes a fresh config (if changed)
+    and (re)starts.
     """
+    global _cooldown_deadline
     _reap_started(settings)
     if not available(settings):
         _log(settings, 'ccr not installed — skipping sync')
+        return
+    if not settings.ccr_managed:
+        _log(settings, 'ccr_managed=False — skipping sync (externally managed)')
         return
     if not settings.any_custom_model_active():
         if is_running(settings):
@@ -251,6 +299,9 @@ def sync(settings):
     ensure_api_key(settings)
     if config_differs(settings):
         write_config(settings)
+        # Config changed → user may have fixed the provider; clear the
+        # failed-start cooldown so the next spawn_env() retries immediately.
+        _cooldown_deadline = None
         if is_running(settings):
             restart(settings)
             return
@@ -259,12 +310,15 @@ def sync(settings):
 
 
 def spawn_env(settings, project_path, *, probe=None, start_wait=4.0,
-              sleep_fn=None):
+              sleep_fn=None, monotonic_fn=None):
     """Return (env_dict, fallback_reason) for spawning a claude child.
 
-    Pure function — no GTK; injectable ``probe``/``sleep_fn`` for tests.
+    Pure function — no GTK; injectable ``probe``/``sleep_fn``/``monotonic_fn``
+    for tests (which never sleep and never use real time deltas).
 
-    ``probe`` defaults to ``is_running``; ``sleep_fn`` to ``time.sleep``.
+    ``probe`` defaults to ``is_running``; ``sleep_fn`` to ``time.sleep``;
+    ``monotonic_fn`` to ``time.monotonic`` (used only for cooldown checks).
+
     ``start()`` is fire-and-forget (it spawns the server detached and returns
     immediately — see start() for why), and ccr's node server doesn't bind the
     port until ~2s after launch, so an immediate re-probe would falsely fall
@@ -273,16 +327,34 @@ def spawn_env(settings, project_path, *, probe=None, start_wait=4.0,
     sole readiness arbiter. The retry budget is count-based (no clock math), so
     tests inject a no-op ``sleep_fn`` and stay instant.
 
+    When ccr_managed=False and ccr is not running, a DISTINCT reason is
+    returned (mentions enabling 'Manage ccr' or starting manually). start() is
+    never called when ccr_managed=False.
+
+    The failed-start cooldown (``_cooldown_deadline``) suppresses the
+    start+poll budget after a failed cycle: while active, a not-running probe
+    returns immediately (no start, no poll, no sleeps) with the SAME failure
+    reason string as the full cycle — byte-equal so the toast aggregator
+    collapses a restore burst into one notice; the retry-suppression detail
+    goes only to the debug log. The probe itself still runs FIRST, so a
+    running server is never ignored — a successful probe clears the cooldown.
+    An N-project restore with an unbindable ccr pays N probes (≤0.5s each)
+    but only ONE start_wait budget. Also cleared by config writes
+    (``write_config``/``sync``) and expiry.
+
     Return values:
       (dict, None)   — ccr is ready; inject these env vars into the child
       (None, None)   — native path; caller spawns without custom env
       (None, str)    — ccr should be in use but isn't available/startable;
                        caller falls back to native and shows the reason string
     """
+    global _cooldown_deadline
     if probe is None:
         probe = is_running
     if sleep_fn is None:
         sleep_fn = time.sleep
+    if monotonic_fn is None:
+        monotonic_fn = time.monotonic
 
     _reap_started(settings)
 
@@ -299,6 +371,43 @@ def spawn_env(settings, project_path, *, probe=None, start_wait=4.0,
         return (None, reason)
 
     if not probe(settings):
+        # ccr not running. Behaviour splits on whether ProjectMan manages ccr.
+        if not settings.ccr_managed:
+            # Running-externally path for managed=False is above (probe True);
+            # not-running with managed=False → distinct reason, never start().
+            reason = (
+                f'ccr is not running on {settings.ccr_host}:{settings.ccr_port} '
+                'and ProjectMan is not managing it — spawning with native '
+                'Anthropic. Enable "Manage ccr" in Settings or start ccr manually.'
+            )
+            _log(settings, f'spawn_env: {reason}')
+            return (None, reason)
+
+        # ccr_managed=True with an active failed-start cooldown: what the
+        # cooldown suppresses is the start+poll budget (the N×4s restore
+        # multiplier), NOT the probe — each spawn during cooldown pays at most
+        # the one probe above (a ≤0.5s connection-refused timeout). A running
+        # server is never ignored: the probe-True path below clears the
+        # cooldown (the "cleared by any successful probe" clause — e.g. the
+        # user ran `ccr start` manually mid-cooldown). Also cleared by config
+        # writes (write_config/sync) and natural expiry.
+        now = monotonic_fn()
+        if _cooldown_deadline is not None and now < _cooldown_deadline:
+            # Byte-equal to the full-failure reason below: identical strings
+            # are what let aggregate_fallback_notices() collapse a restore
+            # burst (one full failure + N-1 suppressed) into ONE toast — a
+            # per-spawn time-varying suffix split it (VM gate s2 finding).
+            # Users care that ccr didn't start, not that the retry was
+            # memoized; the suppression detail is debug-log-only.
+            remaining = int(_cooldown_deadline - now)
+            reason = (
+                f'ccr did not start on {settings.ccr_host}:{settings.ccr_port} — '
+                'spawning with native Anthropic.'
+            )
+            _log(settings, f'spawn_env: {reason} '
+                           f'(retry suppressed {remaining}s after recent failure)')
+            return (None, reason)
+
         # Not running — ensure exactly ONE start is in flight, then poll until
         # the server binds or the budget runs out. A detached start from
         # sync() (or a concurrent spawn) may still be binding its port; firing
@@ -317,6 +426,10 @@ def spawn_env(settings, project_path, *, probe=None, start_wait=4.0,
             if probe(settings):
                 break
         else:
+            # Full poll budget exhausted without ccr binding its port. Record
+            # the cooldown so subsequent spawns return immediately instead of
+            # each waiting start_wait seconds (N-project restore penalty).
+            _cooldown_deadline = monotonic_fn() + _COOLDOWN_SECS
             reason = (
                 f'ccr did not start on {settings.ccr_host}:{settings.ccr_port} — '
                 'spawning with native Anthropic.'
@@ -324,7 +437,9 @@ def spawn_env(settings, project_path, *, probe=None, start_wait=4.0,
             _log(settings, f'spawn_env: {reason}')
             return (None, reason)
 
-    # ccr is reachable; build the env dict (same values as the old _claude_env).
+    # ccr is reachable — this IS the successful-probe cooldown clear (the
+    # initial probe or a poll-loop probe came back True) — build the env dict.
+    _cooldown_deadline = None
     model = settings.effective_model(project_path).replace('/', ',', 1)
     env = dict(os.environ)
     env['ANTHROPIC_BASE_URL'] = f'http://{settings.ccr_host}:{settings.ccr_port}'
@@ -332,3 +447,46 @@ def spawn_env(settings, project_path, *, probe=None, start_wait=4.0,
     env['ANTHROPIC_API_KEY'] = settings.ccr_api_key or ''
     env['ANTHROPIC_MODEL'] = model
     return (env, None)
+
+
+# ---------------------------------------------------------------------------
+# Toast aggregation — pure helper (no GTK); tested in test_ccr_p15.py.
+# ---------------------------------------------------------------------------
+
+def aggregate_fallback_notices(events):
+    """Collapse (project_name, reason) fallback events into display string(s).
+
+    WHY: N failing projects → N identical toasts dismissed one-by-one is poor
+    UX. This helper groups events by reason: a single event returns the verbatim
+    P0 string; multiple events with the SAME reason collapse to one aggregate;
+    events with DIFFERENT reasons produce separate strings (one per reason).
+
+    Return value:
+      ``None``/``''``  — empty input; caller shows nothing
+      ``str``          — single reason (one or more projects, collapsed)
+      ``list[str]``    — two or more distinct reasons (one string each)
+
+    The single-project P0 format ``'ccr unavailable — running native Claude. <reason>'``
+    is UNCHANGED for the single-project case (spec requirement: verbatim P0 string).
+    """
+    if not events:
+        return None
+
+    # Group by reason text, preserving insertion order.
+    from collections import OrderedDict
+    groups: dict = OrderedDict()
+    for _name, reason in events:
+        groups.setdefault(reason, 0)
+        groups[reason] += 1
+
+    def _format(reason, count):
+        if count == 1:
+            return f'ccr unavailable — running native Claude. {reason}'
+        return (
+            f'ccr unavailable — {count} projects running native Claude. {reason}'
+        )
+
+    strings = [_format(r, c) for r, c in groups.items()]
+    if len(strings) == 1:
+        return strings[0]
+    return strings

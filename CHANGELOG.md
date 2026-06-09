@@ -4,6 +4,39 @@ All notable changes to ProjectMan will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **`ccr_managed=False` now fully honoured**: the "Manage ccr" toggle previously
+  only suppressed the on-quit `stop()`. `sync()` and `spawn_env()` now treat
+  `ccr_managed=False` as a hard gate — they never write config, start, stop, or
+  restart ccr regardless of custom-model settings. When ccr is not managed and
+  not running, `spawn_env()` returns a **distinct** fallback reason that mentions
+  "Manage ccr" / starting manually rather than the generic start-failed string.
+  If ccr happens to already be running (externally), it is used as before.
+- **N-project restore no longer pays N×4s**: a failed `start+poll` cycle now
+  sets a ~30-second module-level cooldown. While the cooldown is active, a
+  not-running probe makes `spawn_env()` return immediately — no start, no
+  4-second poll wait — with the **same** failure reason string as the full
+  cycle, so a restore burst aggregates into one toast; the retry-suppression
+  detail goes to the debug log only. The probe itself still runs first (one
+  ≤0.5s check), so a ccr started manually mid-cooldown is detected and used
+  immediately — any successful probe clears the cooldown. Also cleared by
+  expiry and by a `sync()` config-write (user may have fixed the provider).
+  Worst case for an N-project restore with an unbindable ccr: ONE 4s poll
+  budget total, not N×4s.
+- **`restart()` bounded reap-wait**: `restart()` now polls the old `_started_proc`
+  handle for up to 2s (in 0.25s steps) after `stop()` before overwriting it,
+  preventing the handle from being dropped unreaped while the old server is still
+  mid-shutdown. Proceeds to `start()` regardless of outcome (never hangs).
+
+### Changed
+- **ccr fallback toasts are deduplicated**: multiple projects falling back within
+  ~2s (e.g. during a restore) collapse to a single toast —
+  `ccr unavailable — N projects running native Claude. <reason>` — rather than
+  N individually dismissed toasts. There is at most one ccr toast in the overlay
+  at a time; a new aggregate replaces any still-displayed one via
+  `Adw.Toast.dismiss()` + re-add rather than queueing. The single-project format
+  is verbatim-unchanged: `ccr unavailable — running native Claude. <reason>`.
+
 ### Internal
 - **Agent adapter seam** (no user-facing change): introduced a pure `agents.py`
   module defining the `AgentAdapter` contract (`AgentCaps`, `SessionRef`,

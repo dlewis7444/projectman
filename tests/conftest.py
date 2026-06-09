@@ -8,6 +8,10 @@ because ``Settings.save()`` and ``_save_mtime_cache()`` default to those paths.
 The autouse fixture below redirects both to a sibling temp dir for every test.
 A sibling (rather than nested) dir keeps the per-test ``tmp_path`` clean for
 tests that assert on its directory contents.
+
+ccr module-level state (_started_proc, _cooldown_deadline) is also reset between
+tests so that a test that leaves the cooldown active (e.g. a failed-start test)
+does not bleed into the next test's spawn_env() call.
 """
 import pytest
 
@@ -31,3 +35,20 @@ def _isolate_projectman_paths(tmp_path_factory, monkeypatch):
     except ImportError:
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_ccr_module_state():
+    """Reset ccr module-level mutable state between tests.
+
+    _started_proc and _cooldown_deadline are module globals that tests can
+    leave in a non-default state. Without this reset a failed-start test
+    that sets _cooldown_deadline bleeds into subsequent spawn_env() calls and
+    causes spurious cooldown-suppressed failures.
+    """
+    import ccr
+    ccr._started_proc = None
+    ccr._cooldown_deadline = None
+    yield
+    ccr._started_proc = None
+    ccr._cooldown_deadline = None

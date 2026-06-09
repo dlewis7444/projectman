@@ -16,7 +16,7 @@ Design source: docs/superpowers/specs/2026-06-09-llm-agnostic-agents-design.md
 (Part I, "Architecture: four contracts" + "AgentAdapter protocol").
 """
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass

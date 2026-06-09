@@ -117,6 +117,12 @@ class AppWindow(Adw.ApplicationWindow):
         toolbar_view.set_content(self._toast_overlay)
         self.set_content(toolbar_view)
 
+        # ccr toast aggregation state: pending (project_name, reason) events
+        # batched for ~2s before display; at most ONE ccr toast shown at a time.
+        self._ccr_pending: list = []    # buffered (name, reason) pairs
+        self._ccr_toast_timer = None    # GLib.timeout_add source id | None
+        self._ccr_toast: Adw.Toast | None = None  # currently displayed toast
+
         watcher.connect('status-changed', self._on_status_changed)
         self.connect('close-request', self._on_close_request)
         self._sidebar.start_polling()
@@ -364,24 +370,63 @@ class AppWindow(Adw.ApplicationWindow):
             self._terminals[self._active_path].spawn_claude(project_name=pname)
         return True
 
-    def _show_ccr_fallback_toast(self, reason):
-        """Show a non-blocking toast when ccr is unavailable and we fell back.
+    def _show_ccr_fallback_toast(self, project_name, reason):
+        """Enqueue a fallback notice for aggregation; flush after a ~2s window.
 
-        One toast per spawn attempt; never modal, never auto-retry (spec §6).
+        Multiple projects failing within the same restore batch fire within
+        milliseconds of each other. Batching them for 2s lets the aggregator
+        collapse N identical-reason events into one toast instead of N toasts
+        dismissed one-by-one (UX). There is at most ONE ccr toast in the
+        overlay at any time; a new aggregate dismisses any still-displayed one
+        and re-adds rather than queueing (persistent timeout(0), spec §6).
         """
-        toast = Adw.Toast.new(f'ccr unavailable — running native Claude. {reason}')
-        toast.set_timeout(0)   # persistent until the user dismisses
+        self._ccr_pending.append((project_name, reason))
+        # Arm (or re-arm) the 2s flush timer; each new event resets the window
+        # so closely spaced starts all land in the same batch.
+        if self._ccr_toast_timer is not None:
+            GLib.source_remove(self._ccr_toast_timer)
+        self._ccr_toast_timer = GLib.timeout_add(2000, self._flush_ccr_toast)
+
+    def _flush_ccr_toast(self):
+        """Collapse pending ccr fallback events and show one toast."""
+        import ccr as _ccr
+        self._ccr_toast_timer = None
+        events = list(self._ccr_pending)
+        self._ccr_pending.clear()
+        if not events:
+            return GLib.SOURCE_REMOVE
+        text = _ccr.aggregate_fallback_notices(events)
+        # aggregate_fallback_notices returns str or list[str]; for the window
+        # we always show a single toast — join multiple reasons with a separator.
+        if isinstance(text, list):
+            text = ' | '.join(text)
+        if not text:
+            return GLib.SOURCE_REMOVE
+        # Dismiss any still-displayed ccr toast before adding the new one so
+        # it replaces rather than queues.
+        if self._ccr_toast is not None:
+            self._ccr_toast.dismiss()
+            self._ccr_toast = None
+        toast = Adw.Toast.new(text)
+        toast.set_timeout(0)   # persistent until the user dismisses (spec §6)
+        toast.connect('dismissed', self._on_ccr_toast_dismissed)
+        self._ccr_toast = toast
         self._toast_overlay.add_toast(toast)
+        return GLib.SOURCE_REMOVE
+
+    def _on_ccr_toast_dismissed(self, _toast):
+        """Clear the live-toast reference when the user dismisses it."""
+        self._ccr_toast = None
 
     def _get_or_create_terminal(self, project):
         if project.path not in self._terminals:
             tv = TerminalView(project, self._settings)
 
-            def _on_started(t, p=project.path):
+            def _on_started(t, p=project.path, n=project.name):
                 self._sidebar.set_project_state(p, 'attached', is_zellij=t._is_zellij)
                 # Surface ccr fallback notice if this spawn fell back to native.
                 if t._fallback_reason:
-                    self._show_ccr_fallback_toast(t._fallback_reason)
+                    self._show_ccr_fallback_toast(n, t._fallback_reason)
 
             tv.connect('process-started', _on_started)
             tv.connect('process-exited',
