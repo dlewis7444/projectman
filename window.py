@@ -110,7 +110,11 @@ class AppWindow(Adw.ApplicationWindow):
         self._stack.add_named(placeholder, '__placeholder__')
         self._paned.set_end_child(self._stack)
 
-        toolbar_view.set_content(self._paned)
+        # ToastOverlay wraps the whole content area so fallback notices for the
+        # ccr dead-port guard float above the terminal without blocking it.
+        self._toast_overlay = Adw.ToastOverlay()
+        self._toast_overlay.set_child(self._paned)
+        toolbar_view.set_content(self._toast_overlay)
         self.set_content(toolbar_view)
 
         watcher.connect('status-changed', self._on_status_changed)
@@ -353,11 +357,26 @@ class AppWindow(Adw.ApplicationWindow):
             self._terminals[self._active_path].spawn_claude(project_name=pname)
         return True
 
+    def _show_ccr_fallback_toast(self, reason):
+        """Show a non-blocking toast when ccr is unavailable and we fell back.
+
+        One toast per spawn attempt; never modal, never auto-retry (spec §6).
+        """
+        toast = Adw.Toast.new(f'ccr unavailable — running native Claude. {reason}')
+        toast.set_timeout(0)   # persistent until the user dismisses
+        self._toast_overlay.add_toast(toast)
+
     def _get_or_create_terminal(self, project):
         if project.path not in self._terminals:
             tv = TerminalView(project, self._settings)
-            tv.connect('process-started',
-                       lambda t, p=project.path: self._sidebar.set_project_state(p, 'attached', is_zellij=t._is_zellij))
+
+            def _on_started(t, p=project.path):
+                self._sidebar.set_project_state(p, 'attached', is_zellij=t._is_zellij)
+                # Surface ccr fallback notice if this spawn fell back to native.
+                if t._fallback_reason:
+                    self._show_ccr_fallback_toast(t._fallback_reason)
+
+            tv.connect('process-started', _on_started)
             tv.connect('process-exited',
                        lambda t, s, p=project.path: self._sidebar.set_project_state(p, 'inactive', is_zellij=False))
             tv.connect('process-detached',

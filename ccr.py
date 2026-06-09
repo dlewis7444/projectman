@@ -12,6 +12,7 @@ Nothing here raises into the GTK main loop.
 
 import os
 import json
+import time
 import socket
 import secrets
 import tempfile
@@ -20,7 +21,12 @@ import subprocess
 CCR_CONFIG_DIR = os.path.expanduser('~/.claude-code-router')
 CCR_CONFIG_PATH = os.path.join(CCR_CONFIG_DIR, 'config.json')
 
-_CMD_TIMEOUT = 10  # seconds for ccr start/stop/restart/status
+_CMD_TIMEOUT = 10  # seconds for the run-and-wait commands: stop/status
+_START_POLL_INTERVAL = 0.25  # seconds between is_running probes after start()
+
+# Handle for the most recent detached `ccr start` (see start() for why it is
+# detached). Kept so we can reap it without blocking; we never wait on it.
+_started_proc = None
 
 
 def _log(settings, msg):
@@ -157,15 +163,65 @@ def _run(settings, *args):
 
 
 def start(settings):
-    return _run(settings, 'start')
+    """Launch the ccr service detached; return True iff the process was spawned.
+
+    WHY detached (not _run): ccr v2.0.0 does NOT daemonize in a non-tty context
+    (the desktop launch case) — the CLI process IS the foreground server and
+    never exits on its own. ``subprocess.run(..., timeout=_CMD_TIMEOUT)`` would
+    therefore wait the full timeout on a process that never returns and then
+    KILL the very server it just started (verified on the test VM). So we spawn
+    with ``Popen(..., start_new_session=True)`` and DEVNULL stdio: the child
+    gets its own session (PM-exit signals don't reach it; ProjectMan stops it
+    explicitly via ``stop()`` on close), and PM does not block on it. Readiness
+    is decided solely by the port probe in ``spawn_env()`` / callers — start()'s
+    return only reports whether the spawn syscall succeeded.
+    """
+    global _started_proc
+    _reap_started()
+    try:
+        _started_proc = subprocess.Popen(
+            [settings.resolved_ccr_binary, 'start'],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        _log(settings, f'ccr start -> detached pid {_started_proc.pid}')
+        return True
+    except (FileNotFoundError, OSError) as e:
+        _log(settings, f'ccr start (detached) failed: {e}')
+        _started_proc = None
+        return False
 
 
 def stop(settings):
+    # `ccr stop` is a normal run-and-exit CLI command — safe to wait on.
     return _run(settings, 'stop')
 
 
 def restart(settings):
-    return _run(settings, 'restart')
+    """Restart ccr: stop the old server, then spawn a fresh detached one.
+
+    `ccr restart` itself would re-spawn the same non-daemonizing foreground
+    server, so it has the same kill-on-timeout hazard as `start`. Compose it
+    from a run-and-wait ``stop`` (the stop CLI exits promptly) followed by a
+    detached ``start``; the result reflects whether the new server spawned.
+    """
+    stop(settings)
+    return start(settings)
+
+
+def _reap_started(settings=None):
+    """Non-blocking zombie hygiene for the detached ``start`` child.
+
+    If the recorded handle's process has exited, clear it (so the OS can free
+    the entry and we don't keep a stale handle). Never waits, never blocks —
+    a still-running server (poll() is None) is left untouched. Called at the
+    entry of ``spawn_env()`` and ``sync()``.
+    """
+    global _started_proc
+    if _started_proc is not None and _started_proc.poll() is not None:
+        _started_proc = None
 
 
 def is_running(settings):
@@ -184,6 +240,7 @@ def sync(settings):
     No-op if ccr is not installed. Stops the service when no custom model is
     selected; otherwise writes a fresh config (if changed) and (re)starts.
     """
+    _reap_started(settings)
     if not available(settings):
         _log(settings, 'ccr not installed — skipping sync')
         return
@@ -199,3 +256,79 @@ def sync(settings):
             return
     if not is_running(settings):
         start(settings)
+
+
+def spawn_env(settings, project_path, *, probe=None, start_wait=4.0,
+              sleep_fn=None):
+    """Return (env_dict, fallback_reason) for spawning a claude child.
+
+    Pure function — no GTK; injectable ``probe``/``sleep_fn`` for tests.
+
+    ``probe`` defaults to ``is_running``; ``sleep_fn`` to ``time.sleep``.
+    ``start()`` is fire-and-forget (it spawns the server detached and returns
+    immediately — see start() for why), and ccr's node server doesn't bind the
+    port until ~2s after launch, so an immediate re-probe would falsely fall
+    back on every cold start. Instead the probe is re-polled up to
+    ``start_wait`` seconds in _START_POLL_INTERVAL steps; the port probe is the
+    sole readiness arbiter. The retry budget is count-based (no clock math), so
+    tests inject a no-op ``sleep_fn`` and stay instant.
+
+    Return values:
+      (dict, None)   — ccr is ready; inject these env vars into the child
+      (None, None)   — native path; caller spawns without custom env
+      (None, str)    — ccr should be in use but isn't available/startable;
+                       caller falls back to native and shows the reason string
+    """
+    if probe is None:
+        probe = is_running
+    if sleep_fn is None:
+        sleep_fn = time.sleep
+
+    _reap_started(settings)
+
+    # Common path: project uses native Anthropic — skip every socket check.
+    if not settings.uses_custom_model(project_path):
+        return (None, None)
+
+    if not available(settings):
+        reason = (
+            'ccr binary not found — spawning with native Anthropic. '
+            'Install claude-code-router or clear the custom model setting.'
+        )
+        _log(settings, f'spawn_env: {reason}')
+        return (None, reason)
+
+    if not probe(settings):
+        # Not running — ensure exactly ONE start is in flight, then poll until
+        # the server binds or the budget runs out. A detached start from
+        # sync() (or a concurrent spawn) may still be binding its port; firing
+        # another would race ccr's pidfile bookkeeping — the bind-race loser
+        # clobbers then deletes the winner's pidfile on exit, leaving the
+        # surviving server unstoppable by `ccr stop` (VM gate round-3
+        # finding). The entry _reap_started() already cleared any finished
+        # handle, so a live handle here means a start is genuinely pending.
+        if _started_proc is None:
+            start(settings)
+        else:
+            _log(settings, 'spawn_env: ccr start already in flight — polling')
+        attempts = max(1, int(start_wait / _START_POLL_INTERVAL))
+        for _ in range(attempts):
+            sleep_fn(_START_POLL_INTERVAL)
+            if probe(settings):
+                break
+        else:
+            reason = (
+                f'ccr did not start on {settings.ccr_host}:{settings.ccr_port} — '
+                'spawning with native Anthropic.'
+            )
+            _log(settings, f'spawn_env: {reason}')
+            return (None, reason)
+
+    # ccr is reachable; build the env dict (same values as the old _claude_env).
+    model = settings.effective_model(project_path).replace('/', ',', 1)
+    env = dict(os.environ)
+    env['ANTHROPIC_BASE_URL'] = f'http://{settings.ccr_host}:{settings.ccr_port}'
+    env['ANTHROPIC_AUTH_TOKEN'] = settings.ccr_api_key or ''
+    env['ANTHROPIC_API_KEY'] = settings.ccr_api_key or ''
+    env['ANTHROPIC_MODEL'] = model
+    return (env, None)

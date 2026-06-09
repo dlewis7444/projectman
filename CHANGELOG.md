@@ -2,6 +2,28 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **ccr dead-port guard**: custom-model projects no longer silently die with
+  connection-refused when `claude-code-router` is not installed or fails to
+  start. `ccr.spawn_env()` now gates on ccr actually being reachable before
+  injecting `ANTHROPIC_BASE_URL`; if it isn't, the spawn falls back to native
+  Anthropic and a non-blocking Adw toast explains why (never a modal, never
+  auto-retry). Both the direct-claude and zellij-create paths are guarded.
+  ccr is now started **detached** (`Popen` with its own session and no pipes)
+  rather than run-and-waited: `ccr` v2.0.0 does not daemonize in a non-tty
+  (desktop-launch) context — the CLI process *is* the foreground server and
+  never exits, so the previous `subprocess.run(..., timeout=10)` waited out the
+  timeout and then killed the very server it had just started. The port probe
+  is now the sole readiness arbiter: after a detached start the guard polls the
+  port for up to ~4s in 0.25s steps before declaring failure. This also fixes
+  1.0.1's startup `sync()` autostart, which had been silently killed at the
+  10s timeout on every desktop (non-tty) launch. Starts are **single-flight**:
+  a spawn arriving while a detached start is still binding its port polls
+  instead of starting a second server — a double start races ccr's pidfile
+  bookkeeping and leaves the surviving server unstoppable by `ccr stop`.
+
 ## [1.0.1] - 2026-05-20
 
 > **Note:** version 1.0.0 was a mid-cycle bump in main.py that was never tagged as a release; in-tree builds carrying that string contained the test-isolation bug that clobbered `~/.ProjectMan/settings.json` (fixed below). This entry was originally drafted as 1.0.0 and is corrected to 1.0.1 to keep the version label honest.

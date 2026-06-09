@@ -96,6 +96,9 @@ class TerminalView(Gtk.Box):
         # 'provider/model' the live child was spawned with ('' = native Claude);
         # lets window.py detect when a model change leaves a session stale.
         self._spawned_model = ''
+        # Set by _claude_env() when ccr is wanted but unavailable; cleared on
+        # successful ccr spawn. window.py reads this from process-started.
+        self._fallback_reason = None
         self._font_size = settings.font_size
         # PM-owned pidfd watches, one per spawned child. Each entry is a dict
         # {pid, fd, source_id}. Vte's reaper is no longer in the picture —
@@ -321,20 +324,16 @@ class TerminalView(Gtk.Box):
     def _claude_env(self):
         """Env dict for the claude child, or None to use native Anthropic.
 
-        When the effective model for this project is a custom provider/model,
-        point claude at the local ccr service. claude still runs unchanged —
-        hooks, history and --resume are client-side and endpoint-independent.
+        Delegates to ccr.spawn_env() which gates on ccr actually being
+        installed and running before injecting the custom-provider vars.
+        When ccr is unavailable or fails to start, spawn proceeds native and
+        _fallback_reason carries the explanation for window.py to surface.
         """
-        s = self._settings
-        if not s.uses_custom_model(self._project.path):
-            return None
-        # ccr accepts an explicit 'provider,model' route as the model name.
-        model = s.effective_model(self._project.path).replace('/', ',', 1)
-        env = dict(os.environ)
-        env['ANTHROPIC_BASE_URL'] = f'http://{s.ccr_host}:{s.ccr_port}'
-        env['ANTHROPIC_AUTH_TOKEN'] = s.ccr_api_key or ''
-        env['ANTHROPIC_API_KEY'] = s.ccr_api_key or ''
-        env['ANTHROPIC_MODEL'] = model
+        import ccr as _ccr
+        env, reason = _ccr.spawn_env(self._settings, self._project.path)
+        # Store reason (or clear a stale one) so window.py can read it from
+        # the process-started handler without changing the signal signature.
+        self._fallback_reason = reason
         return env
 
     def spawned_model_signature(self):
@@ -342,6 +341,9 @@ class TerminalView(Gtk.Box):
         return self._spawned_model
 
     def spawn_claude(self, session_id=None, fresh=False, project_name=None):
+        # Must clear at spawn entry, not in _spawn() — _claude_env() runs
+        # during _spawn's argument evaluation and sets a fresh reason first.
+        self._fallback_reason = None
         self._kill_child()
         self._terminal.reset(True, True)
         claude_cmd = self._settings.resolved_claude_binary
@@ -374,6 +376,10 @@ class TerminalView(Gtk.Box):
         in the initial pane, then drops to the real shell.
         Existing sessions: attached with `zellij attach <name>`.
         """
+        # Must clear at spawn entry — the attach branch never calls
+        # _claude_env(), so a stale reason from a prior failed custom-model
+        # spawn would otherwise raise a spurious toast on a healthy attach.
+        self._fallback_reason = None
         self._kill_child()
         self._terminal.reset(True, True)
         self._is_zellij = True
