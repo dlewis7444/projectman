@@ -4,6 +4,26 @@ All notable changes to ProjectMan will be documented in this file.
 
 ## [Unreleased]
 
+### Internal
+- **Agent adapter seam** (no user-facing change): introduced a pure `agents.py`
+  module defining the `AgentAdapter` contract (`AgentCaps`, `SessionRef`,
+  `SpawnPlan`) and `ClaudeAdapter` as backend #0, wrapping today's Claude spawn
+  behavior bit-for-bit. `terminal.py` now routes every spawn through the
+  adapter's `spawn_plan()` (argv + ccr env folded together); `spawn_claude()`
+  remains as a thin back-compat alias over `spawn_agent(mode, session_id)`. The
+  continue-with-fallback bash wrapper and the zellij init wrapper are
+  generalized: the per-session zellij flag file now carries the agent's
+  continue command line and the shell wrapper execs its content rather than
+  hardcoding `claude -c || claude`. `session.json` gained a v2 dict entry form
+  (`{"path", "agent"}`) read alongside the legacy string form (agent defaults
+  to `claude`); `settings.py` gained `agents`/`agent_default`/`agent_overrides`
+  plus `effective_agent()`, with `claude_binary` migrating into
+  `agents['claude']['binary']` on load (old key still honored). Golden
+  characterization tests pin the Claude adapter's spawn argv/env and the zellij
+  wrapper/flag strings to the pre-refactor behavior byte-for-byte. Groundwork
+  for the agent-agnostic program; Claude remains the only adapter and the
+  default this release.
+
 ### Fixed
 - **ccr dead-port guard**: custom-model projects no longer silently die with
   connection-refused when `claude-code-router` is not installed or fails to
