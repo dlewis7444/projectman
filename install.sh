@@ -7,6 +7,8 @@ INSTALL_DIR="$HOME/.local/share/projectman"
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$HOME/.local/share/applications"
 HOOK_DEST="$HOME/.claude/projectman/hook.js"
+OPENCODE_PLUGIN_DIR="$HOME/.config/opencode/plugins"
+OPENCODE_PLUGIN_DEST="$OPENCODE_PLUGIN_DIR/projectman.js"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── colours ────────────────────────────────────────────────────────────────────
@@ -27,6 +29,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     echo ""
     echo "  Uninstalled."
     echo "  The hook script at $HOOK_DEST was left in place."
+    echo "  The opencode status bridge at $OPENCODE_PLUGIN_DEST was left in place."
     echo "  The data directory ~/.ProjectMan/ was left in place."
     exit 0
 fi
@@ -86,6 +89,9 @@ cp -r "$SCRIPT_DIR/paa"    "$INSTALL_DIR/"
 cp -r "$SCRIPT_DIR/themes" "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/images/ProjectMan.jpg" "$INSTALL_DIR/"
 cp -r "$SCRIPT_DIR/icons" "$INSTALL_DIR/"
+# Bundle the agent status bridges so the Settings → Agents "Install bridge"
+# button can find them in the installed tree (install.sh installs them too).
+cp -r "$SCRIPT_DIR/bridges" "$INSTALL_DIR/"
 
 # ── wrapper script ─────────────────────────────────────────────────────────────
 info "Creating $BIN_DIR/projectman ..."
@@ -208,6 +214,29 @@ register_claude_hooks() {
 info "Checking Claude Code hook registration ..."
 register_claude_hooks
 
+# ── opencode status bridge ──────────────────────────────────────────────────────
+# Drop the opencode status-bridge plugin into ~/.config/opencode/plugins/ so
+# opencode sessions light up the sidebar dots (the opencode half of the status
+# contract). Idempotent: only copies when missing or changed, mirroring the
+# hook-install pattern. opencode need not be installed for this to be harmless.
+OPENCODE_BRIDGE_STATUS="skipped"  # one of: installed, already, skipped
+install_opencode_bridge() {
+    local src="$SCRIPT_DIR/bridges/opencode/projectman.js"
+    if [[ ! -f "$src" ]]; then
+        return 0  # nothing to install (shouldn't happen in a full checkout)
+    fi
+    mkdir -p "$OPENCODE_PLUGIN_DIR"
+    if [[ -f "$OPENCODE_PLUGIN_DEST" ]] && cmp -s "$src" "$OPENCODE_PLUGIN_DEST"; then
+        OPENCODE_BRIDGE_STATUS="already"
+        return 0
+    fi
+    cp "$src" "$OPENCODE_PLUGIN_DEST"
+    OPENCODE_BRIDGE_STATUS="installed"
+}
+
+info "Installing opencode status bridge ..."
+install_opencode_bridge
+
 # ── done ───────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}ProjectMan installed.${NC}"
@@ -228,6 +257,15 @@ case "$HOOK_STATUS" in
     skipped|manual|*)
         echo "  Status indicators (the coloured dots) require the hook script to be"
         echo "  registered in Claude Code. See README.md → 'Enabling status indicators'."
+        ;;
+esac
+case "$OPENCODE_BRIDGE_STATUS" in
+    installed)
+        echo "  opencode status bridge installed to $OPENCODE_PLUGIN_DEST."
+        echo "  Restart any running opencode sessions for it to take effect."
+        ;;
+    already)
+        echo "  opencode status bridge already up to date at $OPENCODE_PLUGIN_DEST."
         ;;
 esac
 echo ""

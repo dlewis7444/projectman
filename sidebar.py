@@ -16,7 +16,7 @@ class Sidebar(Gtk.Box):
         'session-activated':    (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         'project-archive':      (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-deactivate':   (GObject.SignalFlags.RUN_FIRST, None, (str,)),
-        'project-new-claude':   (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        'project-new-session':  (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-zellij':       (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-ntfy-toggle':  (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-rename':       (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
@@ -26,6 +26,7 @@ class Sidebar(Gtk.Box):
         'show-paa-window':      (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-haiku-check':  (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
+        'project-agent-change': (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
     }
 
     def __init__(self, store, history, watcher, version='', settings=None):
@@ -161,8 +162,8 @@ class Sidebar(Gtk.Box):
                         lambda r, p=proj.path: self.emit('project-archive', p))
             row.connect('project-deactivate',
                         lambda r, p=proj.path: self.emit('project-deactivate', p))
-            row.connect('project-new-claude',
-                        lambda r, p=proj.path: self.emit('project-new-claude', p))
+            row.connect('project-new-session',
+                        lambda r, p=proj.path: self.emit('project-new-session', p))
             row.connect('project-zellij',
                         lambda r, p=proj.path: self.emit('project-zellij', p))
             row.connect('project-ntfy-toggle',
@@ -173,6 +174,8 @@ class Sidebar(Gtk.Box):
                         lambda r, new_name, p=proj.path: self.emit('project-rename', p, new_name))
             row.connect('project-model-change',
                         lambda r, mid, p=proj.path: self.emit('project-model-change', p, mid))
+            row.connect('project-agent-change',
+                        lambda r, aid, p=proj.path: self.emit('project-agent-change', p, aid))
             row.set_model_options(
                 self._model_options,
                 self._model_overrides.get(proj.path, FOLLOW_DEFAULT),
@@ -397,12 +400,13 @@ class ProjectRow(Gtk.ListBoxRow):
         'session-activated':  (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         'project-archive':    (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-deactivate': (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'project-new-claude': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'project-new-session': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-zellij':     (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-ntfy-toggle': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-haiku-check': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-rename':     (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        'project-agent-change': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self, project, history, watcher, settings=None):
@@ -441,11 +445,24 @@ class ProjectRow(Gtk.ListBoxRow):
         self._status_dot.set_valign(Gtk.Align.CENTER)
         top.append(self._status_dot)
 
+        # Name + an effective-agent subtitle (B3). Vertical so the subtitle
+        # sits under the name; the box carries the hexpand the name used to.
+        name_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        name_box.set_hexpand(True)
+        name_box.set_valign(Gtk.Align.CENTER)
         self._name_label = Gtk.Label(label=project.name)
         self._name_label.set_halign(Gtk.Align.START)
-        self._name_label.set_hexpand(True)
         self._name_label.set_ellipsize(Pango.EllipsizeMode.END)
-        top.append(self._name_label)
+        name_box.append(self._name_label)
+        self._subtitle_label = Gtk.Label()
+        self._subtitle_label.set_halign(Gtk.Align.START)
+        self._subtitle_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self._subtitle_label.add_css_class('dim-label')
+        self._subtitle_label.add_css_class('caption')
+        self._subtitle_label.add_css_class('pm-agent-subtitle')
+        self._subtitle_label.set_visible(False)
+        name_box.append(self._subtitle_label)
+        top.append(name_box)
 
         self._rename_entry = Gtk.Entry()
         self._rename_entry.set_hexpand(True)
@@ -466,7 +483,7 @@ class ProjectRow(Gtk.ListBoxRow):
         self._deactivate_btn = Gtk.Button.new_from_icon_name('media-playback-stop-symbolic')
         self._deactivate_btn.add_css_class('flat')
         self._deactivate_btn.set_valign(Gtk.Align.CENTER)
-        self._deactivate_btn.set_tooltip_text('Deactivate Claude session')
+        self._deactivate_btn.set_tooltip_text('Deactivate session')
         self._deactivate_btn.set_sensitive(False)  # only enabled when process running
         self._deactivate_btn.connect('clicked', lambda b: self._show_confirm_popover(b, lambda: self.emit('project-deactivate')))
         actions_box.append(self._deactivate_btn)
@@ -506,7 +523,9 @@ class ProjectRow(Gtk.ListBoxRow):
     def set_settings(self, settings):
         """Re-bind settings and re-apply caps gating (effective agent changed)."""
         self._settings = settings
+        self._populate_agent_submenu()
         self._apply_caps()
+        self._rebuild_popover()
 
     def _apply_caps(self):
         """Show/hide caps-gated menu entries for the effective adapter (A5).
@@ -525,6 +544,31 @@ class ProjectRow(Gtk.ListBoxRow):
         # enumerate sessions, so there's no empty dropdown to open.
         if hasattr(self, '_arrow'):
             self._arrow.set_visible(caps.sessions)
+        self._update_subtitle()
+
+    def _update_subtitle(self):
+        """Show the effective agent (+ model when set) as the row subtitle (B3).
+
+        Surfaces a non-default configuration without opening the menus: shown
+        only when the effective agent isn't the default OR a model is pinned, so
+        a plain default/native row stays clean. ``agent · provider/model``.
+        """
+        if not hasattr(self, '_subtitle_label'):
+            return
+        if self._settings is None:
+            self._subtitle_label.set_visible(False)
+            return
+        agent_id = self._settings.effective_agent(self._project.path)
+        model = self._settings.effective_model(self._project.path)
+        is_default_agent = agent_id == self._settings.agent_default == agents.DEFAULT_AGENT
+        if is_default_agent and not model:
+            self._subtitle_label.set_visible(False)
+            return
+        parts = [self._agent_display_name(agent_id)]
+        if model:
+            parts.append(model)
+        self._subtitle_label.set_text(' · '.join(parts))
+        self._subtitle_label.set_visible(True)
 
     def _set_menu_item_present(self, label, present, inserter):
         """Ensure a top-level menu item with ``label`` is present/absent.
@@ -557,9 +601,11 @@ class ProjectRow(Gtk.ListBoxRow):
 
     def _setup_context_menu(self):
         self._menu = Gio.Menu()
-        self._menu.append('New Session',        'row.new-claude')
+        self._menu.append('New Session',        'row.new-session')
         self._menu.append('New Zellij Session', 'row.zellij')
         self._menu.append('Haiku Check',        'row.haiku-check')
+        self._agent_submenu = Gio.Menu()
+        self._menu.append_submenu('Agent', self._agent_submenu)
         self._model_submenu = Gio.Menu()
         self._menu.append_submenu('Model', self._model_submenu)
         self._menu.append('Rename',             'row.rename')
@@ -574,7 +620,7 @@ class ProjectRow(Gtk.ListBoxRow):
             ag.add_action(action)
             return action
 
-        self._new_claude_action = _add('new-claude', 'project-new-claude')
+        self._new_session_action = _add('new-session', 'project-new-session')
         _add('zellij',       'project-zellij')
         _add('haiku-check',  'project-haiku-check')
         _add('archive',      'project-archive')
@@ -597,6 +643,16 @@ class ProjectRow(Gtk.ListBoxRow):
         )
         self._model_action.connect('activate', self._on_model_select)
         ag.add_action(self._model_action)
+
+        # Per-project agent selection (B3) — same stateful-radio pattern.
+        # The value is FOLLOW_DEFAULT, or an agent id ('claude'/'opencode').
+        self._agent_action = Gio.SimpleAction.new_stateful(
+            'set-agent', GLib.VariantType.new('s'),
+            GLib.Variant('s', FOLLOW_DEFAULT),
+        )
+        self._agent_action.connect('activate', self._on_agent_select)
+        ag.add_action(self._agent_action)
+        self._populate_agent_submenu()
 
         self.insert_action_group('row', ag)
         self._rebuild_popover()
@@ -660,6 +716,45 @@ class ProjectRow(Gtk.ListBoxRow):
         action.set_state(value)
         self.emit('project-model-change', value.get_string())
 
+    # --- Agent submenu (B3) ----------------------------------------------
+
+    def _populate_agent_submenu(self):
+        """Build the 'Agent' submenu: Follow default + one per registered
+        adapter, the active one checked (stateful-radio pattern, like Model).
+
+        The active selection is the per-project override (FOLLOW_DEFAULT when
+        none). The default entry shows the global default agent's display name.
+        """
+        self._agent_submenu.remove_all()
+        default_id = (self._settings.agent_default
+                      if self._settings is not None else agents.DEFAULT_AGENT)
+        default_label = self._agent_display_name(default_id)
+        default_item = Gio.MenuItem.new(f'Follow default ({default_label})', None)
+        default_item.set_action_and_target_value(
+            'row.set-agent', GLib.Variant('s', FOLLOW_DEFAULT))
+        self._agent_submenu.append_item(default_item)
+        for agent_id, adapter in agents.ADAPTERS.items():
+            item = Gio.MenuItem.new(adapter.display_name, None)
+            item.set_action_and_target_value(
+                'row.set-agent', GLib.Variant('s', agent_id))
+            self._agent_submenu.append_item(item)
+        # Current selection: the stored override, or FOLLOW_DEFAULT.
+        current = FOLLOW_DEFAULT
+        if self._settings is not None:
+            override = self._settings.agent_overrides.get(self._project.path)
+            if override:
+                current = override
+        self._agent_action.set_state(GLib.Variant('s', current))
+
+    @staticmethod
+    def _agent_display_name(agent_id):
+        adapter = agents.ADAPTERS.get(agent_id)
+        return adapter.display_name if adapter else agent_id
+
+    def _on_agent_select(self, action, value):
+        action.set_state(value)
+        self.emit('project-agent-change', value.get_string())
+
     def _on_right_click(self, gesture, n_press, x, y):
         rect = Gdk.Rectangle()
         rect.x = int(x)
@@ -705,13 +800,13 @@ class ProjectRow(Gtk.ListBoxRow):
         # (A5: caps.resume_by_id) — otherwise only the New Session entry shows.
         if not self._caps().resume_by_id:
             return
-        refs = self._adapter().list_sessions(self._project)
+        refs = self._adapter().list_sessions(self._project, self._settings)
         for i, ref in enumerate(refs):
             self._session_listbox.append(SessionHistoryRow(ref, is_default=(i == 0)))
 
     def _on_session_activated(self, listbox, row):
         if isinstance(row, NewSessionRow):
-            self.emit('project-new-claude')
+            self.emit('project-new-session')
         elif isinstance(row, SessionHistoryRow):
             self.emit('session-activated', self._project.path, row._ref.id)
 
@@ -725,7 +820,7 @@ class ProjectRow(Gtk.ListBoxRow):
         elif state == 'inactive':
             self._is_zellij = False
         self._deactivate_btn.set_sensitive(state == 'attached')
-        self._new_claude_action.set_enabled(not self._is_zellij)
+        self._new_session_action.set_enabled(not self._is_zellij)
         if self._new_session_row is not None:
             self._new_session_row.set_sensitive(not self._is_zellij)
             self._new_session_row.set_activatable(not self._is_zellij)
@@ -787,7 +882,7 @@ class ProjectRow(Gtk.ListBoxRow):
 
 
 class NewSessionRow(Gtk.ListBoxRow):
-    """Top entry in the session history dropdown — starts a fresh Claude session."""
+    """Top entry in the session history dropdown — starts a fresh session."""
     def __init__(self):
         super().__init__()
         self.add_css_class('session-history-row')

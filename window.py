@@ -98,11 +98,12 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.connect('session-activated',   self._on_session_activated)
         self._sidebar.connect('project-archive',     self._on_project_archive)
         self._sidebar.connect('project-deactivate',  self._on_project_deactivate)
-        self._sidebar.connect('project-new-claude',  self._on_project_new_claude)
+        self._sidebar.connect('project-new-session', self._on_project_new_session)
         self._sidebar.connect('project-zellij',      self._on_project_open_zellij)
         self._sidebar.connect('project-ntfy-toggle', self._on_ntfy_toggle)
         self._sidebar.connect('project-haiku-check', self._on_project_haiku_check)
         self._sidebar.connect('project-model-change', self._on_project_model_change)
+        self._sidebar.connect('project-agent-change', self._on_project_agent_change)
         self._sidebar.connect('show-archive-window', self._on_show_archive_window)
         self._sidebar.connect('show-settings',       self._on_open_settings)
         self._sidebar.connect('project-create', self._on_project_create)
@@ -114,7 +115,7 @@ class AppWindow(Adw.ApplicationWindow):
         placeholder = Adw.StatusPage()
         placeholder.set_title('Select a Project')
         placeholder.set_description(
-            'Click a project in the sidebar to start a Claude session'
+            'Click a project in the sidebar to start a session'
         )
         placeholder.set_icon_name('folder-symbolic')
         self._stack.add_named(placeholder, '__placeholder__')
@@ -202,7 +203,7 @@ class AppWindow(Adw.ApplicationWindow):
         names_str = '\n'.join(f'\u2022 {n}' for n in working_names)
         dialog = Adw.AlertDialog.new(
             'Interrupt Active Work?',
-            f'Claude is currently working on:\n{names_str}\n\n'
+            f'Work is currently in progress on:\n{names_str}\n\n'
             f'Closing ProjectMan may interrupt incomplete operations.',
         )
         dialog.add_response('cancel', 'Keep Running')
@@ -666,7 +667,7 @@ class AppWindow(Adw.ApplicationWindow):
 
     # --- other terminal actions ---
 
-    def _on_project_new_claude(self, sidebar, path):
+    def _on_project_new_session(self, sidebar, path):
         project = self._find_project(path)
         if not project:
             return
@@ -735,22 +736,52 @@ class AppWindow(Adw.ApplicationWindow):
         self._refresh_sidebar_models()
         self._maybe_prompt_restart(path)
 
-    def _maybe_prompt_restart(self, path):
-        """If a live session's model just changed, offer to restart it.
+    def _on_project_agent_change(self, sidebar, path, value):
+        """A per-project agent was picked from the sidebar 'Agent' submenu (B3).
 
-        The model is fixed at spawn time, so a running session keeps its old
-        model until re-spawned. Never auto-kill — that would lose context.
+        Writes ``agent_overrides`` (FOLLOW_DEFAULT clears it), persists, refreshes
+        the sidebar so the subtitle/badge + radio state follow, and offers to
+        restart a live session whose running agent now differs.
+        """
+        from models import FOLLOW_DEFAULT
+        overrides = dict(self._settings.agent_overrides)
+        if value == FOLLOW_DEFAULT:
+            overrides.pop(path, None)
+        else:
+            overrides[path] = value
+        self._settings.agent_overrides = overrides
+        self._settings.save()
+        # Push the change through apply_settings so terminals + sidebar rows
+        # re-resolve the effective agent (subtitle, caps gating, radio state).
+        self.apply_settings(self._settings)
+        self._maybe_prompt_restart(path)
+
+    def _maybe_prompt_restart(self, path):
+        """If a live session's agent OR model just changed, offer to restart it.
+
+        Both the agent and the model are fixed at spawn time, so a running
+        session keeps its old agent/model until re-spawned. Never auto-kill —
+        that would lose context. The dialog wording adapts to which of the two
+        (or both) changed (B3 generalization of the Model-only prompt).
         """
         tv = self._terminals.get(path)
         if tv is None or tv._child_pid is None:
             return
-        if tv.spawned_model_signature() == self._settings.effective_model(path):
+        model_stale = tv.spawned_model_signature() != self._settings.effective_model(path)
+        agent_stale = tv.spawned_agent_signature() != self._settings.effective_agent(path)
+        if not model_stale and not agent_stale:
             return
         project = self._find_project(path)
         name = project.name if project else os.path.basename(path)
+        if agent_stale and model_stale:
+            title, what = 'Agent Changed', 'agent and model'
+        elif agent_stale:
+            title, what = 'Agent Changed', 'agent'
+        else:
+            title, what = 'Model Changed', 'model'
         dialog = Adw.AlertDialog.new(
-            'Model Changed',
-            f'The new model for "{name}" applies to the next session. '
+            title,
+            f'The new {what} for "{name}" applies to the next session. '
             f'Restart this session now?',
         )
         dialog.add_response('later', 'Apply Later')
@@ -761,7 +792,7 @@ class AppWindow(Adw.ApplicationWindow):
 
         def on_response(d, response_id):
             if response_id == 'restart':
-                self._on_project_new_claude(self._sidebar, path)
+                self._on_project_new_session(self._sidebar, path)
 
         dialog.connect('response', on_response)
         dialog.present(self)
@@ -801,10 +832,11 @@ class AppWindow(Adw.ApplicationWindow):
 
     def _send_ntfy(self, project_name):
         topic = self._settings.ntfy_topic
+        # De-Clauded payload (agent-neutral): "<project> finished".
         subprocess.Popen([
             'curl', '-s',
             '-H', f'Title: {project_name}',
-            '-d', 'Claude finished',
+            '-d', f'{project_name} finished',
             f'https://ntfy.sh/{topic}'
         ])
 

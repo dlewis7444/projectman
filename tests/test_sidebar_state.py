@@ -87,7 +87,7 @@ class _FakeCapsAdapter:
         self.caps = caps
         self._refs = refs or []
 
-    def list_sessions(self, project):
+    def list_sessions(self, project, settings=None):
         return list(self._refs)
 
 
@@ -191,3 +191,100 @@ def test_session_activated_emits_ref_id(monkeypatch):
         child = child.get_next_sibling()
     row._on_session_activated(row._session_listbox, hist_row)
     assert got == [('/tmp/emit', 'the-id')]
+
+
+# ===========================================================================
+# P2 Part B — B3 UI: Agent submenu, subtitle/badge, signal rename.
+# ===========================================================================
+
+def _make_row_with_settings(settings, path='/tmp/test'):
+    from model import Project, HistoryReader, StatusWatcher
+    from sidebar import ProjectRow
+    proj = Project(name='test', path=path)
+    return ProjectRow(proj, HistoryReader(), StatusWatcher(), settings=settings)
+
+
+def test_agent_submenu_lists_registered_adapters():
+    """The Agent submenu offers Follow default + each registered adapter."""
+    from settings import Settings
+    row = _make_row_with_settings(Settings(agent_default='claude'))
+    labels = []
+    from gi.repository import GLib
+    for i in range(row._agent_submenu.get_n_items()):
+        v = row._agent_submenu.get_item_attribute_value(i, 'label', GLib.VariantType('s'))
+        if v:
+            labels.append(v.get_string())
+    assert labels[0].startswith('Follow default')
+    assert 'Claude Code' in labels
+    assert 'opencode' in labels
+
+
+def test_agent_submenu_present_in_menu():
+    from settings import Settings
+    row = _make_row_with_settings(Settings())
+    assert 'Agent' in _menu_labels(row)
+
+
+def test_agent_radio_reflects_override():
+    from settings import Settings
+    s = Settings(agent_default='claude', agent_overrides={'/tmp/p': 'opencode'})
+    row = _make_row_with_settings(s, path='/tmp/p')
+    assert row._agent_action.get_state().get_string() == 'opencode'
+
+
+def test_agent_radio_follow_default_when_no_override():
+    from models import FOLLOW_DEFAULT
+    from settings import Settings
+    row = _make_row_with_settings(Settings(agent_default='opencode'), path='/tmp/p')
+    assert row._agent_action.get_state().get_string() == FOLLOW_DEFAULT
+
+
+def test_agent_select_emits_change_signal():
+    from settings import Settings
+    from gi.repository import GLib
+    row = _make_row_with_settings(Settings(), path='/tmp/p')
+    got = []
+    row.connect('project-agent-change', lambda r, aid: got.append(aid))
+    row._on_agent_select(row._agent_action, GLib.Variant('s', 'opencode'))
+    assert got == ['opencode']
+    assert row._agent_action.get_state().get_string() == 'opencode'
+
+
+def test_subtitle_hidden_for_plain_default():
+    """Default agent + native model → no subtitle clutter."""
+    from settings import Settings
+    row = _make_row_with_settings(Settings(agent_default='claude'), path='/tmp/p')
+    assert row._subtitle_label.get_visible() is False
+
+
+def test_subtitle_shows_non_default_agent():
+    from settings import Settings
+    s = Settings(agent_default='claude', agent_overrides={'/tmp/p': 'opencode'})
+    row = _make_row_with_settings(s, path='/tmp/p')
+    assert row._subtitle_label.get_visible() is True
+    assert 'opencode' in row._subtitle_label.get_text()
+
+
+def test_subtitle_shows_agent_and_model():
+    from settings import Settings
+    s = Settings(agent_default='opencode',
+                 model_overrides={'/tmp/p': 'ollama/qwen3.5:cloud'})
+    row = _make_row_with_settings(s, path='/tmp/p')
+    assert row._subtitle_label.get_visible() is True
+    txt = row._subtitle_label.get_text()
+    assert 'opencode' in txt and 'ollama/qwen3.5:cloud' in txt
+
+
+def test_new_session_signal_rename():
+    """The signal is project-new-session (renamed from project-new-claude)."""
+    from settings import Settings
+    from sidebar import Sidebar, ProjectRow
+    # ProjectRow exposes the renamed signal.
+    assert GObject_signal_exists(ProjectRow, 'project-new-session')
+    assert not GObject_signal_exists(ProjectRow, 'project-new-claude')
+    assert GObject_signal_exists(Sidebar, 'project-new-session')
+
+
+def GObject_signal_exists(cls, name):
+    from gi.repository import GObject
+    return GObject.signal_lookup(name, cls) != 0

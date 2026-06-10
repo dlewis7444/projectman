@@ -107,6 +107,8 @@ class TerminalView(Gtk.Box):
         # 'provider/model' the live child was spawned with ('' = native Claude);
         # lets window.py detect when a model change leaves a session stale.
         self._spawned_model = ''
+        # Agent id the live child was spawned with (parallel to _spawned_model).
+        self._spawned_agent = self._adapter.id
         # Set by the adapter's spawn plan / zellij_spawn_env when a custom-model
         # backend (ccr) is wanted but unavailable; cleared on a successful spawn.
         # window.py reads this from the process-started handler.
@@ -337,6 +339,10 @@ class TerminalView(Gtk.Box):
         """The 'provider/model' the current child was spawned with."""
         return self._spawned_model
 
+    def spawned_agent_signature(self):
+        """The agent id the current child was spawned with."""
+        return self._spawned_agent
+
     def spawn_agent(self, mode, session_id=None):
         """Spawn the project's agent in ``mode`` (fresh|continue|resume).
 
@@ -420,7 +426,8 @@ class TerminalView(Gtk.Box):
                 os.path.expanduser('~/.ProjectMan'), f'.zellij-init-{session_name}'
             )
             with open(flag_path, 'w') as f:
-                f.write(self._adapter.zellij_continue_command(self._settings))
+                f.write(self._adapter.zellij_continue_command(
+                    self._settings, self._project))
             wrapper = _ensure_zellij_shell_wrapper()
             # Custom-model env can only be set when the zellij server is first
             # created — attaching to an existing session inherits whatever the
@@ -505,6 +512,10 @@ class TerminalView(Gtk.Box):
         self._terminal.set_pty(pty)
         self._child_pid = pid
         self._spawned_model = self._settings.effective_model(self._project.path)
+        # The agent id the live child was actually spawned with — lets window.py
+        # detect when an agent override leaves a running session stale (B3),
+        # parallel to _spawned_model. Uses the adapter that produced this spawn.
+        self._spawned_agent = self._adapter.id
         self._add_pidfd_watch(pid)
         self.emit('process-started')
 

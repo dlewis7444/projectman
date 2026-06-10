@@ -223,3 +223,131 @@ def test_status_watcher_parent_state_independent_of_worktrees(tmp_path, monkeypa
     w._reload()
     proj = Project(name='maincoexist', path=os.path.realpath(proj_path))
     assert w.get_project_status(proj) == 'done'
+
+
+# ── StatusWatcher dual-watch (P2/B2, Decision 2) ──────────────────────────────
+# The watcher reads BOTH the new ~/.ProjectMan/status dir and the legacy
+# ~/.claude/projectman/status dir during the deprecation window. The conftest
+# autouse fixture points LEGACY_STATUS_DIR at a non-existent temp path; these
+# tests override both dirs explicitly to exercise the merge.
+
+def _write_status(dirpath, fname, cwd, state, ts, session='s'):
+    (dirpath / fname).write_text(json.dumps({
+        'state': state, 'event': 'X', 'cwd': cwd, 'ts': ts, 'session': session,
+    }))
+
+
+def test_dual_watch_reads_legacy_dir(tmp_path, monkeypatch):
+    """A status file ONLY in the legacy dir still lights the dot (unmigrated
+    hook.js keeps working through the deprecation window)."""
+    import model
+    new_dir = tmp_path / 'new'
+    legacy_dir = tmp_path / 'legacy'
+    new_dir.mkdir()
+    legacy_dir.mkdir()
+    monkeypatch.setattr(model, 'STATUS_DIR', str(new_dir))
+    monkeypatch.setattr(model, 'LEGACY_STATUS_DIR', str(legacy_dir))
+    _write_status(legacy_dir, 'p.json', '/tmp/dualproj', 'working', 100)
+    w = StatusWatcher()
+    w._reload()
+    assert w._status[os.path.realpath('/tmp/dualproj')].state == 'working'
+
+
+def test_dual_watch_reads_new_dir(tmp_path, monkeypatch):
+    import model
+    new_dir = tmp_path / 'new'
+    legacy_dir = tmp_path / 'legacy'
+    new_dir.mkdir()
+    legacy_dir.mkdir()
+    monkeypatch.setattr(model, 'STATUS_DIR', str(new_dir))
+    monkeypatch.setattr(model, 'LEGACY_STATUS_DIR', str(legacy_dir))
+    _write_status(new_dir, 'p.json', '/tmp/dualproj2', 'waiting', 100)
+    w = StatusWatcher()
+    w._reload()
+    assert w._status[os.path.realpath('/tmp/dualproj2')].state == 'waiting'
+
+
+def test_dual_watch_same_cwd_newer_ts_wins(tmp_path, monkeypatch):
+    """The same cwd in both dirs → the snapshot with the newer ts wins,
+    regardless of which dir it lives in."""
+    import model
+    new_dir = tmp_path / 'new'
+    legacy_dir = tmp_path / 'legacy'
+    new_dir.mkdir()
+    legacy_dir.mkdir()
+    monkeypatch.setattr(model, 'STATUS_DIR', str(new_dir))
+    monkeypatch.setattr(model, 'LEGACY_STATUS_DIR', str(legacy_dir))
+    key = os.path.realpath('/tmp/dualboth')
+    # Legacy is NEWER here — it must win even though new dir is scanned last.
+    _write_status(legacy_dir, 'p.json', '/tmp/dualboth', 'working', ts=200)
+    _write_status(new_dir, 'p.json', '/tmp/dualboth', 'done', ts=100)
+    w = StatusWatcher()
+    w._reload()
+    assert w._status[key].state == 'working'
+    # Flip: new dir newer → new wins.
+    _write_status(new_dir, 'p.json', '/tmp/dualboth', 'done', ts=300)
+    w._reload()
+    assert w._status[key].state == 'done'
+
+
+def test_dual_watch_same_cwd_tie_new_dir_wins(tmp_path, monkeypatch):
+    """On an exact ts tie the NEW dir supersedes (the migration direction)."""
+    import model
+    new_dir = tmp_path / 'new'
+    legacy_dir = tmp_path / 'legacy'
+    new_dir.mkdir()
+    legacy_dir.mkdir()
+    monkeypatch.setattr(model, 'STATUS_DIR', str(new_dir))
+    monkeypatch.setattr(model, 'LEGACY_STATUS_DIR', str(legacy_dir))
+    key = os.path.realpath('/tmp/dualtie')
+    _write_status(legacy_dir, 'p.json', '/tmp/dualtie', 'working', ts=500)
+    _write_status(new_dir, 'p.json', '/tmp/dualtie', 'done', ts=500)
+    w = StatusWatcher()
+    w._reload()
+    assert w._status[key].state == 'done'
+
+
+def test_dual_watch_missing_legacy_dir_not_fatal(tmp_path, monkeypatch):
+    """Legacy dir absent → the new dir alone still publishes status."""
+    import model
+    new_dir = tmp_path / 'new'
+    new_dir.mkdir()
+    monkeypatch.setattr(model, 'STATUS_DIR', str(new_dir))
+    monkeypatch.setattr(model, 'LEGACY_STATUS_DIR', str(tmp_path / 'gone'))
+    _write_status(new_dir, 'p.json', '/tmp/dualsolo', 'done', 100)
+    w = StatusWatcher()
+    w._reload()
+    assert w._status[os.path.realpath('/tmp/dualsolo')].state == 'done'
+
+
+def test_dual_watch_both_dirs_gone_keeps_previous(tmp_path, monkeypatch):
+    """Both dirs unreadable → keep the previous status (no wipe)."""
+    import model
+    new_dir = tmp_path / 'new'
+    new_dir.mkdir()
+    monkeypatch.setattr(model, 'STATUS_DIR', str(new_dir))
+    monkeypatch.setattr(model, 'LEGACY_STATUS_DIR', str(tmp_path / 'gone1'))
+    _write_status(new_dir, 'p.json', '/tmp/dualkeep', 'done', 100)
+    w = StatusWatcher()
+    w._reload()
+    key = os.path.realpath('/tmp/dualkeep')
+    assert key in w._status
+    # Now both dirs vanish.
+    monkeypatch.setattr(model, 'STATUS_DIR', str(tmp_path / 'gone2'))
+    w._reload()
+    assert key in w._status   # previous status retained
+
+
+def test_status_watcher_start_monitors_both_dirs(tmp_path, monkeypatch):
+    """start() registers one inotify monitor per dir (new + legacy)."""
+    import model
+    new_dir = tmp_path / 'new'
+    legacy_dir = tmp_path / 'legacy'
+    monkeypatch.setattr(model, 'STATUS_DIR', str(new_dir))
+    monkeypatch.setattr(model, 'LEGACY_STATUS_DIR', str(legacy_dir))
+    w = StatusWatcher()
+    w.start()
+    assert len(w._monitors) == 2
+    assert new_dir.is_dir() and legacy_dir.is_dir()   # created if missing
+    for m in w._monitors:
+        m.cancel()

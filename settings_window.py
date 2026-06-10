@@ -19,6 +19,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._build_paa_page()
         self._build_appearance_page()
         self._build_models_page()
+        self._build_agents_page()
         self._build_about_page()
         self._build_claude_json_page()
         self.present(parent)
@@ -47,13 +48,11 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._projects_dir_row.set_activatable_widget(choose_btn)
         projects_group.add(self._projects_dir_row)
 
-        self._claude_binary_row = Adw.EntryRow(title='Claude Binary')
-        self._claude_binary_row.set_text(self._settings.claude_binary)
-        self._claude_binary_row.set_show_apply_button(True)
-        self._claude_binary_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
-        self._claude_binary_row.set_tooltip_text('Leave blank to use "claude" from PATH')
-        self._claude_binary_row.connect('apply', self._on_claude_binary_apply)
-        projects_group.add(self._claude_binary_row)
+        # (The Claude binary row moved to the Agents page — every agent's
+        # binary is configured there now under agents['<id>']['binary'].
+        # resolved_claude_binary reads agents['claude']['binary'] first, so the
+        # Agents page fully drives the claude binary; the legacy claude_binary
+        # key stays honored as a fallback for older settings files.)
 
         # Group: Startup
         startup_group = Adw.PreferencesGroup(title='Startup')
@@ -373,10 +372,6 @@ class SettingsWindow(Adw.PreferencesDialog):
             self._save_and_notify()
         except GLib.Error:
             pass  # user cancelled
-
-    def _on_claude_binary_apply(self, row):
-        self._settings.claude_binary = row.get_text().strip()
-        self._save_and_notify()
 
     def _on_resume_toggled(self, row, _param):
         self._settings.resume_projects = row.get_active()
@@ -717,6 +712,136 @@ class SettingsWindow(Adw.PreferencesDialog):
     def _on_ccr_managed_toggled(self, row, _param):
         self._settings.ccr_managed = row.get_active()
         self._save_and_notify()
+
+    # ------------------------------------------------------------------ #
+    #  Agents page (B3 — minimal this phase; full doctor is P3)            #
+    # ------------------------------------------------------------------ #
+
+    def _build_agents_page(self):
+        import agents
+        page = Adw.PreferencesPage(
+            title='Agents', icon_name='applications-engineering-symbolic'
+        )
+        self.add(page)
+
+        default_group = Adw.PreferencesGroup(
+            title='Default Agent',
+            description='The coding agent used for new sessions. Override per '
+                        'project from the sidebar right-click menu.',
+        )
+        page.add(default_group)
+
+        self._agent_default_ids = list(agents.ADAPTERS.keys())
+        labels = [agents.ADAPTERS[a].display_name for a in self._agent_default_ids]
+        self._agent_default_combo = Adw.ComboRow(title='Default Agent')
+        self._agent_default_combo.set_model(Gtk.StringList.new(labels))
+        cur = self._settings.agent_default
+        self._agent_default_combo.set_selected(
+            self._agent_default_ids.index(cur) if cur in self._agent_default_ids else 0)
+        self._agent_default_combo.connect(
+            'notify::selected', self._on_agent_default_changed)
+        default_group.add(self._agent_default_combo)
+
+        # Per-agent config: binary path + doctor-lite check.
+        self._agent_binary_rows = {}
+        for agent_id in self._agent_default_ids:
+            adapter = agents.ADAPTERS[agent_id]
+            group = Adw.PreferencesGroup(title=adapter.display_name)
+            page.add(group)
+
+            cfg = self._settings.agents.get(agent_id, {}) if isinstance(
+                self._settings.agents, dict) else {}
+            binary_row = Adw.EntryRow(title='Binary')
+            binary_row.set_text((cfg.get('binary') or '') if isinstance(cfg, dict) else '')
+            binary_row.set_show_apply_button(True)
+            binary_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+            binary_row.set_tooltip_text(
+                f'Leave blank to use "{agent_id}" from PATH')
+            binary_row.connect(
+                'apply', lambda r, aid=agent_id: self._on_agent_binary_apply(aid, r))
+            group.add(binary_row)
+            self._agent_binary_rows[agent_id] = binary_row
+
+            # Doctor-lite: <binary> --version.
+            check_row = Adw.ActionRow(title='Status')
+            check_row.set_subtitle('Run a check to verify the binary')
+            check_btn = Gtk.Button(label='Check')
+            check_btn.set_valign(Gtk.Align.CENTER)
+            check_btn.add_css_class('flat')
+            check_btn.connect(
+                'clicked', lambda b, aid=agent_id, r=check_row: self._on_agent_doctor(aid, r))
+            check_row.add_suffix(check_btn)
+            group.add(check_row)
+
+            # Status-bridge install button (only for agents that ship one).
+            if agents.agent_bridge_source(self._app_dir(), agent_id) is not None \
+                    or agent_id == 'opencode':
+                bridge_row = Adw.ActionRow(title='Status bridge')
+                bridge_row.set_subtitle(
+                    f'Install the {adapter.display_name} status bridge plugin')
+                bridge_btn = Gtk.Button(label='Install bridge')
+                bridge_btn.set_valign(Gtk.Align.CENTER)
+                bridge_btn.add_css_class('flat')
+                bridge_btn.connect(
+                    'clicked', lambda b, aid=agent_id: self._on_install_bridge(aid))
+                bridge_row.add_suffix(bridge_btn)
+                group.add(bridge_row)
+
+    @staticmethod
+    def _app_dir():
+        return os.path.dirname(os.path.abspath(__file__))
+
+    def _on_agent_default_changed(self, row, _param):
+        idx = row.get_selected()
+        if 0 <= idx < len(self._agent_default_ids):
+            self._settings.agent_default = self._agent_default_ids[idx]
+            self._save_and_notify()
+
+    def _on_agent_binary_apply(self, agent_id, row):
+        agents_cfg = dict(self._settings.agents) if isinstance(
+            self._settings.agents, dict) else {}
+        entry = dict(agents_cfg.get(agent_id) or {}) if isinstance(
+            agents_cfg.get(agent_id), dict) else {}
+        value = row.get_text().strip()
+        entry['binary'] = value
+        agents_cfg[agent_id] = entry
+        self._settings.agents = agents_cfg
+        if agent_id == 'claude':
+            # Keep the legacy claude_binary key in sync. Without this, clearing
+            # the row would leave a stale legacy value that resolved_claude_binary
+            # falls back to — the clear would silently not take effect.
+            self._settings.claude_binary = value
+        self._save_and_notify()
+
+    def _on_agent_doctor(self, agent_id, row):
+        import agents
+        ok, detail = agents.agent_doctor(self._settings, agent_id)
+        row.set_subtitle(detail or ('ok' if ok else 'check failed'))
+        # Swap the prefix icon to reflect the result. The Image is created once
+        # per row on first check and updated thereafter — repeated checks must
+        # not stack prefix icons (Adw.ActionRow has no clear-prefixes API).
+        icon = 'emblem-ok-symbolic' if ok else 'dialog-warning-symbolic'
+        existing = getattr(row, '_pm_doctor_icon', None)
+        if existing is None:
+            existing = Gtk.Image.new_from_icon_name(icon)
+            row.add_prefix(existing)
+            row._pm_doctor_icon = existing
+        else:
+            existing.set_from_icon_name(icon)
+
+    def _on_install_bridge(self, agent_id):
+        import agents
+        result = agents.install_agent_bridge(self._app_dir(), agent_id)
+        msgs = {
+            'installed': 'Status bridge installed',
+            'already': 'Status bridge already up to date',
+            'missing-source': 'Bridge source not found in the app directory',
+            'no-bridge': 'This agent has no status bridge',
+            'error': 'Failed to install the status bridge',
+        }
+        toast = Adw.Toast.new(msgs.get(result, result))
+        toast.set_timeout(3)
+        self.add_toast(toast)
 
     # ------------------------------------------------------------------ #
     #  Extra Pages                                                         #
