@@ -5,6 +5,14 @@ All notable changes to ProjectMan will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Signal-safe shutdown (SIGTERM/SIGHUP).** A logout, system stop, or terminal
+  hangup now saves the session FIRST, then tears down the live **direct-spawn**
+  children by their process group, then stops the managed ccr service — instead
+  of dying with no session save and orphaning setsid process groups. Zellij
+  terminals are deliberately left alive (their sessions persist by design). The
+  handler is one-shot (`GLib.SOURCE_REMOVE`) so a second signal mid-shutdown
+  cannot re-enter. Kill selection is the pure `session.plan_emergency_kill`; the
+  teardown is `AppWindow.emergency_shutdown`.
 - **opencode is a first-class second agent.** Pick it per project from the
   sidebar right-click **Agent** submenu, or as the default in **Settings →
   Agents**. Spawn/continue/resume map to `opencode` / `opencode -c` /
@@ -43,6 +51,21 @@ All notable changes to ProjectMan will be documented in this file.
   `spawn_resume` (the `spawn_claude` alias is retained, deprecated).
 
 ### Fixed
+- **A second activation no longer spawns a duplicate window.** A DBus
+  re-activation of the running app used to run the full build path again —
+  duplicate window plus a re-restore of every project. `_on_activate` now
+  presents the existing window and returns immediately when one is already up.
+- **Closing a stray window no longer quits the whole app.** The close handler
+  used to call `app.quit()` unconditionally, so closing any duplicate window
+  would have taken unrelated sessions down too. `_quit` now quits the app only
+  when the closing window is the primary one (pure `session.should_quit_app`),
+  clearing `app._window` before quitting so a racing re-activation cannot
+  present a destroyed window; a stray window just destroys itself.
+- **The application id is test-overridable.** It was hardcoded, so any test or
+  harness that constructed/activated the app shared DBus identity with the
+  user's live instance. main.py now reads `PM_APP_ID` (falling back to the
+  `APP_ID` constant), and an autouse conftest fixture pins every test run to
+  `io.github.projectman.test` — a blanket guard independent of the display gate.
 - **Session save records the RUNNING agent, not the settings-effective one.**
   A project restored under saved-agent-wins (e.g. saved as opencode while
   settings resolve claude) was re-saved with the settings agent, so the next

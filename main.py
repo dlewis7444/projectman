@@ -4,9 +4,10 @@ gi.require_version('Adw', '1')
 gi.require_version('Vte', '3.91')
 
 import os
+import signal
 import subprocess
 import sys
-from gi.repository import Gtk, Adw, Gdk, Gio, GObject
+from gi.repository import Gtk, Adw, Gdk, Gio, GObject, GLib
 
 from model import ProjectStore, HistoryReader, StatusWatcher, ProjectsWatcher
 from window import AppWindow
@@ -15,6 +16,11 @@ from settings import Settings
 
 VERSION = '1.0.3'
 
+# Single source of truth for the real DBus application id. A test or harness
+# overrides it via PM_APP_ID so it can never share identity with the user's
+# live instance (incident bug c).
+APP_ID = 'io.github.projectman'
+
 
 class ProjectManApp(Adw.Application):
     __gsignals__ = {
@@ -22,7 +28,7 @@ class ProjectManApp(Adw.Application):
     }
 
     def __init__(self, debug_flag=False):
-        super().__init__(application_id='io.github.projectman')
+        super().__init__(application_id=os.environ.get('PM_APP_ID') or APP_ID)
         self._debug_flag = debug_flag
         self.connect('startup', self._on_startup)
         self.connect('activate', self._on_activate)
@@ -60,7 +66,32 @@ class ProjectManApp(Adw.Application):
         self.set_accels_for_action('app.zoom-out', ['<Control>minus'])
         self.set_accels_for_action('app.zoom-reset', ['<Control>0'])
 
+        # Signal-safe shutdown: SIGTERM (logout/system stop) and SIGHUP
+        # (terminal hangup) must save the session and tear down direct children
+        # cleanly instead of orphaning setsid process groups.
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self._on_unix_signal)
+
+    def _on_unix_signal(self):
+        """SIGTERM/SIGHUP handler: emergency shutdown, then quit. One-shot.
+
+        Returns GLib.SOURCE_REMOVE so the source is removed after the first
+        signal — a second signal arriving mid-shutdown cannot re-enter this
+        handler.
+        """
+        window = getattr(self, '_window', None)
+        if window is not None:
+            window.emergency_shutdown()
+        self.quit()
+        return GLib.SOURCE_REMOVE
+
     def _on_activate(self, app):
+        # A second activation (e.g. a DBus re-activate) must raise the existing
+        # window, never rebuild — rebuilding spawns a duplicate window and
+        # re-restores every project (incident bug a).
+        if getattr(self, '_window', None) is not None:
+            self._window.present()
+            return
         old_dir = os.path.expanduser('~/.projectman')
         new_dir = os.path.expanduser('~/.ProjectMan')
         if not os.path.exists(new_dir) and os.path.exists(old_dir):

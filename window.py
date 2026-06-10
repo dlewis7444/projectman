@@ -14,7 +14,8 @@ from shutdown_window import ShutdownWindow
 from model import Project
 from session import (
     save_session, load_session, load_agents, filter_active_paths,
-    collect_session_state, collect_agents_map, plan_restore, SESSION_FILE,
+    collect_session_state, collect_agents_map, plan_restore,
+    plan_emergency_kill, should_quit_app, SESSION_FILE,
 )
 
 
@@ -223,20 +224,56 @@ class AppWindow(Adw.ApplicationWindow):
         self._save_session()      # snapshot before SIGTERM
         ShutdownWindow(parent=self, running=running, on_complete=self._quit)
 
-    def _quit(self):
-        """Destroy the main window and explicitly quit the application."""
-        # Stop the ccr service we manage so it doesn't outlive ProjectMan.
-        # If the user runs ccr independently (ccr_managed off), leave it be.
+    def _stop_managed_ccr(self):
+        """Stop the ccr service we manage so it doesn't outlive ProjectMan.
+
+        If the user runs ccr independently (ccr_managed off), leave it be.
+        Shared by the interactive quit path and the emergency (signal) path so
+        the gate logic lives in exactly one place.
+        """
         try:
             import ccr
             if self._settings.ccr_managed and ccr.available(self._settings):
                 ccr.stop(self._settings)
         except Exception:
             pass
+
+    def _quit(self):
+        """Destroy this window; quit the app only if it is the primary one.
+
+        Closing a stray/duplicate window must not take the whole app (and its
+        unrelated sessions) down — gated by ``should_quit_app``. When this IS
+        the primary window, clear ``app._window`` BEFORE quitting so a racing
+        re-activation cannot present a destroyed window.
+        """
+        self._stop_managed_ccr()
         app = self.get_application()
+        quit_app = should_quit_app(getattr(app, '_window', None), self)
+        if quit_app and app is not None:
+            app._window = None
         self.destroy()
-        if app:
+        if quit_app and app is not None:
             app.quit()
+
+    def emergency_shutdown(self):
+        """Non-interactive fast-path teardown for SIGTERM/SIGHUP.
+
+        NO dialogs, NO ShutdownWindow. Ordering contract: save → kill → ccr.
+        1. Save the session FIRST so the snapshot lands even if a later kill
+           hangs.
+        2. Kill the live DIRECT-spawn children (process groups, via the
+           terminal's own ``_kill_child``). Zellij terminals are NEVER killed —
+           their sessions persist by design.
+        3. Stop the ccr service we manage (same guard as the quit path).
+        Returns the list of killed paths (for the signal handler / logging).
+        Never prompts, never waits on children.
+        """
+        self._save_session()
+        killed = plan_emergency_kill(self._terminals)
+        for path in killed:
+            self._terminals[path]._kill_child()
+        self._stop_managed_ccr()
+        return killed
 
     def _save_session(self):
         """Snapshot running terminals to SESSION_FILE (atomic write).
