@@ -88,6 +88,12 @@ function isBusyStatus(props) {
 }
 
 // Same slug rule as Claude's hook.js so a cwd maps to one stable filename.
+// KNOWN COLLISION (M-P3.4, deferred): mapping both '.' and '/' to '-' conflates
+// `/p/a.b` with `/p/a/b` (same filename → sibling projects clobber each other's
+// dot). A collision-safe scheme is a cross-writer contract change (this bridge +
+// hook.js + a future grok hook + StatusWatcher must move in lockstep), so it has
+// its own design round; until then this MUST stay byte-identical to hook.js's
+// rule (the two share the status dir).
 function slugFor(cwd) {
   return cwd.replace(/[\/\.]/g, "-").replace(/^-+/, "")
 }

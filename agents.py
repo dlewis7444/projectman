@@ -30,6 +30,16 @@ class AgentCaps:
     rich_status: bool = False   # lifecycle events → live status dots
     model_select: bool = False  # per-project model is meaningful
     headless_json: bool = False # `-p`-style structured output (PAA-relevant)
+    # Continue-fallback policy (M-P3.3): when continue (`-c`) finds nothing to
+    # resume, does the wrapper fall back to a fresh session? The decision is the
+    # ADAPTER's, not the wrapper's hardcode — an agent whose continue exits
+    # non-zero for reasons OTHER than "nothing to continue" (a bad flag, an auth
+    # error) must be able to refuse the fresh fallback so a resume error doesn't
+    # silently launch a fresh agent. claude/opencode exit 1 cleanly on
+    # nothing-to-continue, so they keep the fallback (True). Grok's
+    # nothing-to-continue behavior is a bench UNKNOWN and plugs in here once
+    # probed.
+    continue_falls_back_to_fresh: bool = True
 
 
 @dataclass
@@ -59,7 +69,7 @@ class SpawnPlan:
 # claude-specific wrappers currently hardcoded in terminal.py).
 # ---------------------------------------------------------------------------
 
-def build_continue_wrapper(continue_argv, fresh_argv):
+def build_continue_wrapper(continue_argv, fresh_argv, *, fallback=True):
     """Wrap a continue-then-fresh fallback in a bash trap/exit-code guard.
 
     Generalizes the wrapper currently hardcoded in ``terminal.py:spawn_claude``.
@@ -74,26 +84,40 @@ def build_continue_wrapper(continue_argv, fresh_argv):
         the trap that case slips past the exit-code test and bash exec's a fresh
         agent that never saw the signal, leaving the project stuck "active".
 
-    For claude's argvs (``continue_argv=[bin, '-c']``, ``fresh_argv=[bin]``) the
-    returned list is byte-identical to the pre-refactor wrapper — pinned by the
-    golden test. Returns a ``['bash', '-c', <script>]`` argv list.
+    ``fallback`` is the ADAPTER's continue-fallback policy (M-P3.3,
+    ``AgentCaps.continue_falls_back_to_fresh``): when False the wrapper runs the
+    continue command alone (still under the signal trap) and NEVER exec's fresh —
+    for an agent whose non-zero exit doesn't reliably mean "nothing to continue".
+
+    For claude's argvs (``continue_argv=[bin, '-c']``, ``fresh_argv=[bin]``) with
+    the default ``fallback=True`` the returned list is byte-identical to the
+    pre-refactor wrapper — pinned by the golden test. Returns a
+    ``['bash', '-c', <script>]`` argv list.
     """
     cont = shlex.join(continue_argv)
+    if not fallback:
+        return ['bash', '-c', f"trap 'exit 143' TERM HUP; exec {cont}"]
     fresh = shlex.join(fresh_argv)
     return ['bash', '-c',
             f"trap 'exit 143' TERM HUP; {cont}; s=$?; "
             f'[ "$s" -gt 0 ] && [ "$s" -le 128 ] && exec {fresh}']
 
 
-def build_zellij_continue_command(continue_argv, fresh_argv):
+def build_zellij_continue_command(continue_argv, fresh_argv, *, fallback=True):
     """Shell command line the zellij init pane runs to continue-or-start.
 
     Generalizes the hardcoded ``claude -c || claude``. The per-session flag file
     now CONTAINS this string and the wrapper execs it, so any agent's continue
-    command rides the same path. For claude's argvs the result is
+    command rides the same path. ``fallback`` is the adapter's continue-fallback
+    policy (M-P3.3): when False the command is the continue command ALONE — no
+    ``|| <fresh>`` tail — so a resume error doesn't silently launch a fresh
+    agent. For claude's argvs with the default ``fallback=True`` the result is
     ``'claude -c || claude'`` — byte-identical to today (golden-pinned).
     """
-    return f'{shlex.join(continue_argv)} || {shlex.join(fresh_argv)}'
+    cont = shlex.join(continue_argv)
+    if not fallback:
+        return cont
+    return f'{cont} || {shlex.join(fresh_argv)}'
 
 
 # Generalized zellij shell wrapper. Unlike the pre-refactor script it does NOT
@@ -198,7 +222,8 @@ class ClaudeAdapter:
             argv = self.fresh_argv(settings)
         elif mode == 'continue':
             argv = build_continue_wrapper(
-                self.continue_argv(settings), self.fresh_argv(settings)
+                self.continue_argv(settings), self.fresh_argv(settings),
+                fallback=self.caps.continue_falls_back_to_fresh,
             )
         else:
             raise ValueError(f"unknown spawn mode: {mode!r}")
@@ -215,10 +240,12 @@ class ClaudeAdapter:
         ``project`` is accepted for protocol uniformity with model-as-argv
         adapters (opencode folds the per-project model into this string); claude
         routes the model through ccr env, so the command itself is
-        project-independent.
+        project-independent. The fallback (``|| <fresh>``) is the adapter's
+        declared policy (M-P3.3), not the builder's hardcode.
         """
         return build_zellij_continue_command(
-            self.continue_argv(settings), self.fresh_argv(settings)
+            self.continue_argv(settings), self.fresh_argv(settings),
+            fallback=self.caps.continue_falls_back_to_fresh,
         )
 
     def zellij_spawn_env(self, settings, project):
@@ -538,6 +565,7 @@ class OpencodeAdapter:
             argv = build_continue_wrapper(
                 self.continue_argv(settings, project),
                 self.fresh_argv(settings, project),
+                fallback=self.caps.continue_falls_back_to_fresh,
             )
         else:
             raise ValueError(f"unknown spawn mode: {mode!r}")
@@ -548,16 +576,20 @@ class OpencodeAdapter:
     def zellij_continue_command(self, settings, project=None):
         """Flag-file content. The model folds into BOTH halves so the create
         pane's continue-or-fresh both target the chosen provider/model:
-        ``opencode -m <model> -c || opencode -m <model>``.
+        ``opencode -m <model> -c || opencode -m <model>``. The fallback is the
+        adapter's declared policy (M-P3.3), not the builder's hardcode.
         """
+        fallback = self.caps.continue_falls_back_to_fresh
         if project is None:
             # Defensive: a model-less command if no project context (shouldn't
             # happen via terminal.py, which always passes the project).
             return build_zellij_continue_command(
-                [self._binary(settings), '-c'], [self._binary(settings)])
+                [self._binary(settings), '-c'], [self._binary(settings)],
+                fallback=fallback)
         return build_zellij_continue_command(
             self.continue_argv(settings, project),
             self.fresh_argv(settings, project),
+            fallback=fallback,
         )
 
     def zellij_spawn_env(self, settings, project):
@@ -636,18 +668,67 @@ ADAPTERS = {
 
 DEFAULT_AGENT = 'claude'
 
+# Ids that ship with ProjectMan. A custom/user-supplied adapter may NEVER claim
+# one of these (M-P3.5): builtins win, no silent dict shadowing.
+BUILTIN_AGENT_IDS = frozenset(ADAPTERS)
 
-def get_adapter(agent_id):
-    """Return the adapter for ``agent_id``, defaulting to claude.
 
-    An unknown id resolves to the Claude adapter — the safe default keeps a
-    stale session.json/settings override (e.g. pointing at an agent removed
-    later) from breaking restore. Callers that need to TELL the difference
-    between "claude was asked for" and "X was asked for but is missing" use
-    ``resolve_adapter`` instead (A6/m3): this function deliberately hides it so
-    the spawn path never breaks on a bad id.
+def register_adapter(adapter):
+    """Register a custom adapter, REFUSING any id collision (M-P3.5).
+
+    The registry was a plain dict, so a custom adapter whose ``id`` equalled a
+    builtin (``claude``/``opencode``) silently overwrote it — a custom 'claude'
+    shadowed ``ClaudeAdapter`` with no warning. This is the only guarded entry
+    point for adding adapters at runtime (settings-loaded customs go through it):
+    it raises ``ValueError`` loudly on a collision rather than clobbering, so a
+    builtin can never be replaced and two customs can't fight over one id.
+
+    Precedence is explicit: builtins always win; a duplicate of ANY already
+    registered id (builtin or a prior custom) is refused. Returns the registered
+    adapter on success. (Builtins are wired into ``ADAPTERS`` at import time, not
+    through this function.)
     """
-    return ADAPTERS.get(agent_id) or ADAPTERS[DEFAULT_AGENT]
+    agent_id = getattr(adapter, 'id', None)
+    if not agent_id:
+        raise ValueError("adapter must declare a non-empty id")
+    if agent_id in BUILTIN_AGENT_IDS:
+        raise ValueError(
+            f"adapter id {agent_id!r} collides with a built-in agent; "
+            "built-in adapters cannot be replaced"
+        )
+    if agent_id in ADAPTERS:
+        raise ValueError(
+            f"adapter id {agent_id!r} is already registered; "
+            "ids must be unique"
+        )
+    ADAPTERS[agent_id] = adapter
+    return adapter
+
+
+def get_adapter(agent_id, settings=None):
+    """Return the adapter for ``agent_id``, falling back when it's unknown.
+
+    A registered id returns its adapter. An unknown id resolves to a FALLBACK so
+    a stale session.json/settings override (e.g. pointing at an agent removed
+    later) never breaks the spawn path. The fallback honors the M-P3.2 contract:
+
+      * ``settings`` given → ``fallback_adapter(settings)`` (``agent_default``
+        first, then first-available) — so the Claude-less promise holds even
+        with a stale/bogus override: a fleet defaulting to opencode falls back
+        to opencode, never silently to claude;
+      * ``settings`` omitted → the legacy claude default, so single-arg callers
+        keep today's exact behavior (the spawn path never breaks on a bad id).
+
+    Callers that need to TELL the difference between "claude was asked for" and
+    "X was asked for but is missing" use ``resolve_adapter`` instead (A6/m3);
+    this function deliberately hides the miss.
+    """
+    hit = ADAPTERS.get(agent_id)
+    if hit is not None:
+        return hit
+    if settings is not None:
+        return fallback_adapter(settings)
+    return ADAPTERS[DEFAULT_AGENT]
 
 
 # ---------------------------------------------------------------------------
@@ -747,23 +828,55 @@ def agent_doctor(settings, agent_id, *, run_fn=None):
     return (False, detail or f'{binary}: exited {rc}')
 
 
-def resolve_adapter(agent_id):
-    """Resolve ``agent_id`` to ``(adapter, missing_name)`` (A6/m3).
+def fallback_adapter(settings=None):
+    """The adapter to use when a requested agent isn't available (M-P3.2).
+
+    The Claude-less promise must hold even when the requested agent is missing,
+    so the fallback is NOT hardcoded to claude. Resolution order:
+
+      1. ``settings.agent_default`` if it is a registered adapter — the user's
+         chosen default is the natural fallback;
+      2. otherwise the first registered adapter in insertion order — so a fleet
+         with claude removed still resolves to *something* real;
+      3. only if the registry is somehow empty, ``ADAPTERS[DEFAULT_AGENT]`` (the
+         legacy claude default) as a last resort.
+
+    ``settings`` is optional: without it (or with an unregistered/blank default)
+    the order degrades to "first-available", which on the shipped registry is
+    claude — so callers that pass no settings keep today's behavior.
+    """
+    if settings is not None:
+        default_id = getattr(settings, 'agent_default', '') or ''
+        if default_id and default_id in ADAPTERS:
+            return ADAPTERS[default_id]
+    for adapter in ADAPTERS.values():
+        return adapter
+    return ADAPTERS[DEFAULT_AGENT]
+
+
+def resolve_adapter(agent_id, settings=None):
+    """Resolve ``agent_id`` to ``(adapter, missing_name)`` (A6/m3, M-P3.2).
 
     Distinguishes default-resolution from named-but-missing so the UI can warn:
 
       * known id (incl. an explicit ``'claude'``) → ``(adapter, None)``
-      * a falsy id (``''``/``None`` — "use the default") → ``(claude, None)``;
-        no name was requested, so nothing is missing.
-      * a non-empty id with no registered adapter → ``(claude, <that id>)``;
-        ``missing_name`` is the unknown id the caller asked for, so window.py
-        can show a one-shot "agent 'X' not available — using Claude Code" toast.
+      * a falsy id (``''``/``None`` — "use the default") →
+        ``(fallback_adapter(settings), None)``; no name was requested, so
+        nothing is missing.
+      * a non-empty id with no registered adapter →
+        ``(fallback_adapter(settings), <that id>)``; ``missing_name`` is the
+        unknown id the caller asked for, so window.py can show a one-shot
+        "agent 'X' not available — using <actual fallback>" toast.
 
-    The returned adapter is always usable — the fallback to claude is identical
-    to ``get_adapter``; only the diagnostic differs.
+    The fallback is NO LONGER hardcoded to claude (M-P3.2): it follows
+    ``settings.agent_default`` then first-available, so the returned adapter is
+    the agent that will ACTUALLY run — the toast names it truthfully. The
+    returned adapter is always usable; only the diagnostic differs from
+    ``get_adapter``. ``settings`` is optional so legacy single-arg callers keep
+    the first-available (claude, on the shipped registry) fallback.
     """
     if agent_id and agent_id in ADAPTERS:
         return ADAPTERS[agent_id], None
     if not agent_id:
-        return ADAPTERS[DEFAULT_AGENT], None
-    return ADAPTERS[DEFAULT_AGENT], agent_id
+        return fallback_adapter(settings), None
+    return fallback_adapter(settings), agent_id

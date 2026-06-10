@@ -4,6 +4,32 @@ All notable changes to ProjectMan will be documented in this file.
 
 ## [Unreleased]
 
+### Internal
+- **Unknown-agent fallback no longer hardcodes Claude (M-P3.2).** When a named
+  agent isn't registered (a stale/typo'd override), the fallback now resolves
+  `agent_default` first, then the first-available registered adapter — so the
+  Claude-less promise holds even with a bogus override. The spawn path
+  (`get_adapter(id, settings)`), the diagnostic (`resolve_adapter(id, settings)`
+  + new `fallback_adapter`), and the "agent X not available" toast all name the
+  agent that will actually run, instead of always saying "Claude Code".
+- **Continue→fresh fallback is now the adapter's declared policy (M-P3.3).** The
+  zellij continue command and the direct-spawn continue wrapper no longer
+  hardcode the `<agent> -c || <agent>` exit-semantics for every agent; each
+  adapter declares it via `AgentCaps.continue_falls_back_to_fresh`. claude and
+  opencode keep today's exact behavior (byte-identical wrapper output, golden-
+  pinned); an adapter whose non-zero exit doesn't reliably mean "nothing to
+  continue" can refuse the fresh fallback so a resume error never silently
+  launches a fresh agent.
+- **Adapter registration refuses id collisions (M-P3.5).** New
+  `register_adapter()` is the single guarded entry point for custom adapters: it
+  raises loudly on any id that already exists — built-ins always win, two customs
+  can't fight over one id — replacing the plain-dict path where a custom `claude`
+  silently shadowed the built-in.
+- Regression net for the above plus a headless pin that the sidebar status dot
+  consumes `caps.rich_status` (M-P3.1, landed last cycle); the slug-collision
+  hazard (M-P3.4) is documented at the `slugFor`/hook.js slug sites pending its
+  own design round.
+
 ## [1.1.1] - 2026-06-10
 
 _(Version 1.1.0 was never released; the label is retired.)_

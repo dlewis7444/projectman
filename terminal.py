@@ -99,7 +99,10 @@ class TerminalView(Gtk.Box):
         # honoring an explicit restore agent across settings reloads.
         self._explicit_agent = agent_id
         resolved = agent_id if agent_id is not None else settings.effective_agent(project.path)
-        self._adapter = agents.get_adapter(resolved)
+        # Pass settings so a named-but-missing agent falls back per the M-P3.2
+        # policy (agent_default → first-available) rather than hardcoding claude:
+        # the Claude-less promise must hold even for a stale/bogus override.
+        self._adapter = agents.get_adapter(resolved, settings)
         self._child_pid = None
         self._is_multiplexed = False
         self._is_zellij = False
@@ -641,7 +644,7 @@ class TerminalView(Gtk.Box):
         # settings changes must not silently swap a running restored agent.
         resolved = (self._explicit_agent if self._explicit_agent is not None
                     else settings.effective_agent(self._project.path))
-        self._adapter = agents.get_adapter(resolved)
+        self._adapter = agents.get_adapter(resolved, settings)
         self._font_size = settings.font_size
         self._apply_font()
         self._apply_colors()

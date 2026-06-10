@@ -485,20 +485,24 @@ class AppWindow(Adw.ApplicationWindow):
         self._ccr_toast = None
 
     def _maybe_warn_unknown_agent(self, agent_id):
-        """One-shot toast when a NAMED agent isn't available (A6/m3).
+        """One-shot toast when a NAMED agent isn't available (A6/m3, M-P3.2).
 
         ``resolve_adapter`` returns a non-None ``missing`` only when a non-empty
-        id has no registered adapter; the spawn still proceeds on claude. The
-        warning is shown once per distinct missing id (``_warned_agents``) so a
-        multi-project restore naming the same dead agent doesn't toast N times.
+        id has no registered adapter; the spawn still proceeds on the fallback.
+        The fallback is NOT hardcoded to claude (M-P3.2): it follows
+        ``settings.agent_default`` then first-available, so the toast names the
+        adapter that will ACTUALLY run rather than always saying "Claude Code".
+        The warning is shown once per distinct missing id (``_warned_agents``)
+        so a multi-project restore naming the same dead agent doesn't toast N
+        times.
         """
         import agents
-        _adapter, missing = agents.resolve_adapter(agent_id)
+        adapter, missing = agents.resolve_adapter(agent_id, self._settings)
         if not missing or missing in self._warned_agents:
             return
         self._warned_agents.add(missing)
         toast = Adw.Toast.new(
-            f"agent '{missing}' not available — using Claude Code"
+            f"agent '{missing}' not available — using {adapter.display_name}"
         )
         toast.set_timeout(5)
         self._toast_overlay.add_toast(toast)

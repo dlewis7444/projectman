@@ -33,6 +33,14 @@ process.stdin.on('end', () => {
 
     fs.mkdirSync(STATUS_DIR, { recursive: true })
 
+    // KNOWN COLLISION (M-P3.4, deferred): this rule maps both '.' and '/' to
+    // '-', so `/p/a.b` and `/p/a/b` produce the SAME status filename and two
+    // such sibling projects clobber each other's dot. A collision-safe slug
+    // (distinct separators or a hash) is a cross-writer contract change — every
+    // status writer (this hook, the opencode bridge, a future grok hook) and
+    // StatusWatcher's reader must move in lockstep — so it has its own design
+    // round. Until then any slug change here MUST be mirrored in
+    // bridges/*/slugFor and model.StatusWatcher.
     const slug = cwd.replace(/[\/\.]/g, '-').replace(/^-+/, '')
     const slugPath = path.join(STATUS_DIR, slug + '.json')
 

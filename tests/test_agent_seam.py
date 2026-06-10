@@ -637,3 +637,350 @@ class TestCapsGatingContract:
         assert a.caps.model_select is False   # → Model submenu hidden
         assert a.caps.sessions is False        # → expander hidden
         assert a.caps.resume_by_id is False    # → no resume rows
+
+
+# ===========================================================================
+# P3 Part A — mandate hardening. Each block pins one fresh-review mandate.
+# ===========================================================================
+
+# --- A1 / M-P3.2: unknown-agent fallback must never hardcode claude ----------
+
+@pytest.fixture
+def _registry_snapshot():
+    """Save/restore ``agents.ADAPTERS`` so a test can model a different fleet
+    (e.g. claude removed) without leaking into the rest of the suite."""
+    import agents
+    saved = dict(agents.ADAPTERS)
+    yield agents.ADAPTERS
+    agents.ADAPTERS.clear()
+    agents.ADAPTERS.update(saved)
+
+
+class TestUnknownAgentFallbackNotHardcodedClaude:
+    """M-P3.2: a named-but-missing agent falls back to ``agent_default`` first,
+    then first-available — NEVER a hardcoded claude. The toast/diagnostic and
+    the spawn path must both name the agent that will ACTUALLY run, so the
+    Claude-less promise holds even with a stale/bogus override."""
+
+    def test_a1a_default_opencode_bogus_override_resolves_opencode(self):
+        """T-A1a: agent_default=opencode + override='bogus' → the resolved
+        adapter is opencode (the spawn path too), and the diagnostic names
+        opencode — not claude."""
+        import agents
+        from settings import Settings
+        s = Settings(agent_default='opencode',
+                     agent_overrides={'/p': 'bogus'})
+        effective = s.effective_agent('/p')
+        assert effective == 'bogus'
+        adapter, missing = agents.resolve_adapter(effective, s)
+        assert adapter.id == 'opencode'          # the ACTUAL fallback
+        assert adapter.display_name == 'opencode'  # the toast names opencode
+        assert missing == 'bogus'                # the dead id, for the warning
+        # The spawn path (get_adapter, what TerminalView resolves) agrees:
+        assert agents.get_adapter(effective, s).id == 'opencode'
+
+    def test_a1b_both_bogus_uses_first_available_not_claude(self,
+                                                            _registry_snapshot):
+        """T-A1b: agent_default ALSO bogus → first-available registered adapter.
+        Proven against a claude-LESS fleet so 'first-available' is provably the
+        mechanism, not 'happens to be claude'."""
+        import agents
+        from settings import Settings
+        # Model a fleet with claude removed entirely; opencode is first.
+        opencode = _registry_snapshot['opencode']
+        _registry_snapshot.clear()
+        _registry_snapshot['opencode'] = opencode
+        s = Settings(agent_default='alsobogus',
+                     agent_overrides={'/p': 'bogus'})
+        adapter, missing = agents.resolve_adapter(s.effective_agent('/p'), s)
+        assert adapter.id == 'opencode'   # first-available, NOT claude
+        assert missing == 'bogus'
+        assert agents.get_adapter('bogus', s).id == 'opencode'
+
+    def test_a1b_registered_default_wins_over_first_available(self,
+                                                              _registry_snapshot):
+        """A registered ``agent_default`` beats first-available even when it is
+        NOT the first key — the order is default-first, then first-available."""
+        import agents
+        from settings import Settings
+        # Re-order so opencode is first and claude second.
+        claude = _registry_snapshot['claude']
+        opencode = _registry_snapshot['opencode']
+        _registry_snapshot.clear()
+        _registry_snapshot['opencode'] = opencode
+        _registry_snapshot['claude'] = claude
+        s = Settings(agent_default='claude')
+        adapter, _ = agents.resolve_adapter('bogus', s)
+        assert adapter.id == 'claude'   # default wins over the first key
+
+    def test_a1c_default_claude_unchanged(self):
+        """T-A1c regression: an all-claude fleet still resolves to claude with
+        no diagnostic — the common path is untouched."""
+        import agents
+        from settings import Settings
+        s = Settings(agent_default='claude')
+        adapter, missing = agents.resolve_adapter(s.effective_agent('/p'), s)
+        assert adapter.id == 'claude'
+        assert missing is None
+        assert agents.get_adapter('claude', s).id == 'claude'
+
+    def test_a1c_get_adapter_no_settings_still_hides_miss_as_claude(self):
+        """The legacy single-arg ``get_adapter`` contract is preserved: with no
+        settings a miss falls back to claude (spawn path never breaks)."""
+        import agents
+        assert agents.get_adapter('codex').id == 'claude'
+
+    def test_a1_fallback_adapter_helper_order(self, _registry_snapshot):
+        """The helper itself: registered default wins; else first-available;
+        a blank/unregistered default falls through to first-available."""
+        import agents
+        from settings import Settings
+        # Registered default wins.
+        assert agents.fallback_adapter(
+            Settings(agent_default='opencode')).id == 'opencode'
+        # Unregistered default → first-available (claude, shipped order).
+        assert agents.fallback_adapter(
+            Settings(agent_default='nope')).id == 'claude'
+        # No settings at all → first-available.
+        assert agents.fallback_adapter(None).id == 'claude'
+
+
+# --- A2 / M-P3.3: continue-fallback policy is adapter-owned ------------------
+
+class _FakeNoFallbackAdapter:
+    """A minimal adapter that declares continue does NOT fall back to fresh —
+    the codex/grok-shaped case the wrapper used to assume away."""
+    id = 'fake-nofb'
+    display_name = 'Fake (no continue fallback)'
+
+    def __init__(self):
+        import agents
+        self.caps = agents.AgentCaps(
+            continue_=True, continue_falls_back_to_fresh=False,
+        )
+
+    def continue_argv(self, settings, project=None):
+        return ['fakeagent', 'resume', '--last']
+
+    def fresh_argv(self, settings, project=None):
+        return ['fakeagent']
+
+    def zellij_continue_command(self, settings, project=None):
+        import agents
+        return agents.build_zellij_continue_command(
+            self.continue_argv(settings), self.fresh_argv(settings),
+            fallback=self.caps.continue_falls_back_to_fresh,
+        )
+
+
+class TestContinueFallbackPolicyIsAdapterOwned:
+    """M-P3.3: the continue→fresh fallback is the ADAPTER's declared policy
+    (``caps.continue_falls_back_to_fresh``), not the wrapper's global hardcode.
+    claude/opencode keep today's exact behavior (byte-identical); a no-fallback
+    adapter yields a command with no fresh tail."""
+
+    def test_a2a_no_fallback_zellij_command_has_no_pipe(self):
+        """T-A2a: a fake adapter declaring no-fallback yields a zellij continue
+        command WITHOUT the ``||`` fresh tail (a resume error must not silently
+        launch a fresh agent)."""
+        import agents
+        cmd = _FakeNoFallbackAdapter().zellij_continue_command(None)
+        assert '||' not in cmd
+        assert cmd == 'fakeagent resume --last'
+
+    def test_a2a_no_fallback_builder_wrapper_has_no_exec_fresh(self):
+        """The direct-spawn wrapper for a no-fallback adapter runs the continue
+        command under the signal trap and never exec's fresh."""
+        import agents
+        argv = agents.build_continue_wrapper(
+            ['fakeagent', 'resume', '--last'], ['fakeagent'], fallback=False)
+        script = argv[-1]
+        assert "trap 'exit 143' TERM HUP;" in script   # signal guard kept
+        # No fresh-fallback machinery:
+        assert 's=$?' not in script
+        assert '-le 128' not in script
+        assert 'fakeagent resume --last' in script
+        # The only exec is of the continue command itself.
+        assert script.endswith('exec fakeagent resume --last')
+
+    def test_a2b_claude_zellij_command_byte_identical(self):
+        """T-A2b: claude's zellij continue command is byte-identical to today's
+        golden (``claude -c || claude``) — fallback defaults to True."""
+        import agents
+        from settings import Settings
+        a = agents.get_adapter('claude')
+        assert a.zellij_continue_command(Settings()) == GOLDEN_ZELLIJ_CONTINUE_CMD
+        assert a.zellij_continue_command(Settings()) == 'claude -c || claude'
+
+    def test_a2b_claude_continue_wrapper_byte_identical(self):
+        """T-A2b: claude's direct-spawn continue wrapper is byte-identical to
+        the pre-refactor golden (the fresh-fallback tail intact)."""
+        import agents
+        from settings import Settings
+
+        class _P:
+            path = '/proj'
+        plan = agents.get_adapter('claude').spawn_plan(Settings(), _P(),
+                                                       'continue')
+        assert plan.argv == GOLDEN_CONTINUE_NATIVE
+
+    def test_a2b_opencode_zellij_command_byte_identical(self):
+        """T-A2b: opencode's zellij continue command keeps the ``|| <fresh>``
+        tail (it folds the model into both halves) — unchanged by the policy
+        seam since opencode declares the fallback True."""
+        import agents
+        from settings import Settings
+
+        class _P:
+            path = '/proj'
+        a = agents.get_adapter('opencode')
+        # No model set → bare opencode on both halves, with the fresh tail.
+        assert a.zellij_continue_command(Settings(), _P()) == 'opencode -c || opencode'
+        # Model set → folded into BOTH halves, tail preserved.
+        s = Settings(agent_default='opencode',
+                     model_overrides={'/proj': 'ollama/qwen'})
+        assert a.zellij_continue_command(s, _P()) == (
+            'opencode -m ollama/qwen -c || opencode -m ollama/qwen')
+
+    def test_a2b_opencode_continue_wrapper_unchanged(self):
+        """T-A2b: opencode's direct continue wrapper keeps the fresh-fallback
+        body (both halves carry the model)."""
+        import agents
+        from settings import Settings
+
+        class _P:
+            path = '/proj'
+        s = Settings(agent_default='opencode',
+                     model_overrides={'/proj': 'ollama/qwen'})
+        plan = agents.get_adapter('opencode').spawn_plan(s, _P(), 'continue')
+        script = plan.argv[-1]
+        # The fresh-fallback machinery is present (fallback=True).
+        assert 's=$?' in script and '-le 128' in script
+        assert 'opencode -m ollama/qwen -c' in script
+
+    def test_a2_default_caps_keep_fallback_true(self):
+        """The shipped adapters declare the fallback policy True (today's
+        behavior); the new field defaults True so nothing else changes."""
+        import agents
+        assert agents.AgentCaps().continue_falls_back_to_fresh is True
+        assert agents.get_adapter('claude').caps.continue_falls_back_to_fresh is True
+        assert agents.get_adapter('opencode').caps.continue_falls_back_to_fresh is True
+
+
+# --- A3 / M-P3.5: duplicate/builtin adapter id collision guard ---------------
+
+class TestRegisterAdapterCollisionGuard:
+    """M-P3.5: ``register_adapter`` REFUSES an id that already exists — builtins
+    win, no silent dict shadowing. A custom 'claude' must not replace
+    ClaudeAdapter."""
+
+    def test_a3a_registering_builtin_id_raises_and_builtin_survives(self,
+                                                                    _registry_snapshot):
+        """T-A3a: registering id 'claude' raises ValueError and the real
+        ClaudeAdapter survives intact (not shadowed)."""
+        import agents
+        before = agents.ADAPTERS['claude']
+
+        class _Imposter:
+            id = 'claude'
+            display_name = 'Not Claude'
+        with pytest.raises(ValueError):
+            agents.register_adapter(_Imposter())
+        # The builtin is unchanged — no silent overwrite.
+        assert agents.ADAPTERS['claude'] is before
+        assert type(agents.ADAPTERS['claude']).__name__ == 'ClaudeAdapter'
+        assert agents.get_adapter('claude').id == 'claude'
+
+    def test_a3a_registering_opencode_id_also_refused(self, _registry_snapshot):
+        """The guard covers every builtin, not just claude."""
+        import agents
+        before = agents.ADAPTERS['opencode']
+
+        class _Imposter:
+            id = 'opencode'
+        with pytest.raises(ValueError):
+            agents.register_adapter(_Imposter())
+        assert agents.ADAPTERS['opencode'] is before
+
+    def test_a3b_novel_id_registers_and_resolves(self, _registry_snapshot):
+        """T-A3b: a novel id registers and then resolves through the seam."""
+        import agents
+
+        class _Novel:
+            id = 'novel-agent'
+            display_name = 'Novel Agent'
+        returned = agents.register_adapter(_Novel())
+        assert returned.id == 'novel-agent'
+        assert 'novel-agent' in agents.ADAPTERS
+        assert agents.get_adapter('novel-agent').id == 'novel-agent'
+        adapter, missing = agents.resolve_adapter('novel-agent')
+        assert adapter.id == 'novel-agent'
+        assert missing is None
+
+    def test_a3_duplicate_custom_id_also_refused(self, _registry_snapshot):
+        """Two customs cannot fight over one id — the second is refused (the
+        first registration wins)."""
+        import agents
+
+        class _First:
+            id = 'dup-id'
+            display_name = 'First'
+
+        class _Second:
+            id = 'dup-id'
+            display_name = 'Second'
+        agents.register_adapter(_First())
+        with pytest.raises(ValueError):
+            agents.register_adapter(_Second())
+        assert agents.ADAPTERS['dup-id'].display_name == 'First'
+
+    def test_a3_empty_id_refused(self, _registry_snapshot):
+        """An adapter with no id is refused rather than registered under ''."""
+        import agents
+
+        class _Anon:
+            id = ''
+        with pytest.raises(ValueError):
+            agents.register_adapter(_Anon())
+        assert '' not in agents.ADAPTERS
+
+    def test_a3_builtin_ids_constant_matches_shipped(self):
+        """The builtins frozenset matches the shipped adapters (the source of
+        'builtins win')."""
+        import agents
+        assert agents.BUILTIN_AGENT_IDS == frozenset({'claude', 'opencode'})
+
+
+# --- A4 / M-P3.1 verify-only: rich_status gates the sidebar dot remap --------
+
+class TestSidebarDotConsumesRichStatus:
+    """M-P3.1 (verify-only, landed last cycle): pin — HEADLESS — that the
+    sidebar's idle→done dot remap is gated on the effective adapter's
+    ``caps.rich_status``. The behavioral GTK assertions (T5/T6) live in
+    test_sidebar_state.py but are DISPLAY-GATED (bench-only); this source-guard
+    keeps the contract pinned in the headless suite so P3's churn can't silently
+    drop it. No code change this commit — a regression net only."""
+
+    def test_update_status_gates_remap_on_rich_status(self):
+        """sidebar.update_status must only remap watcher-'idle'→'done' when the
+        adapter's rich_status is true (via ``_remap_idle_to_done``)."""
+        src = _source('sidebar.py')
+        # The remap is conditional on the rich_status helper, not unconditional.
+        assert "if status == 'idle' and self._remap_idle_to_done():" in src
+        # An unconditional remap (the pre-guard hazard) must NOT be present.
+        assert "if status == 'idle':\n            status = 'done'" not in src
+
+    def test_remap_helper_reads_caps_rich_status(self):
+        """``_remap_idle_to_done`` resolves the effective adapter and returns its
+        ``caps.rich_status`` — the capability is genuinely consumed, not dead."""
+        src = _source('sidebar.py')
+        assert 'def _remap_idle_to_done(self):' in src
+        assert 'self._adapter().caps.rich_status' in src
+
+    def test_caps_declares_rich_status_for_both_builtins(self):
+        """Both shipped (bridged) agents declare rich_status True, so the remap
+        stays correct for them; a future bridgeless agent (rich_status False)
+        keeps the honest idle dot."""
+        import agents
+        assert agents.get_adapter('claude').caps.rich_status is True
+        assert agents.get_adapter('opencode').caps.rich_status is True
