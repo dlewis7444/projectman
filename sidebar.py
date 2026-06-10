@@ -5,6 +5,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Gio, GLib, GObject, Gdk, Pango
 
+import agents
 from model import ResourceReader
 from models import FOLLOW_DEFAULT, NATIVE_LABEL
 
@@ -27,11 +28,16 @@ class Sidebar(Gtk.Box):
         'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
     }
 
-    def __init__(self, store, history, watcher, version=''):
+    def __init__(self, store, history, watcher, version='', settings=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.add_css_class('pm-sidebar')
         self._store = store
+        # ``history`` retained only for back-compat construction; the expander
+        # now pulls sessions through the per-project adapter (A1), not the
+        # HistoryReader directly. ``settings`` lets each row resolve its
+        # effective agent so the seam is load-bearing.
         self._history = history
+        self._settings = settings
         self._watcher = watcher
         self._rows = {}
         self._new_project_row = None
@@ -144,7 +150,8 @@ class Sidebar(Gtk.Box):
             self._listbox.remove(row)
 
         for proj in self._store.load_projects():
-            row = ProjectRow(proj, self._history, self._watcher)
+            row = ProjectRow(proj, self._history, self._watcher,
+                             settings=self._settings)
             if proj.path in running_state:
                 row._process_state = running_state[proj.path]
                 row.update_status()
@@ -237,6 +244,17 @@ class Sidebar(Gtk.Box):
     def set_ntfy_enabled(self, enabled):
         for row in self._rows.values():
             row.update_ntfy_visibility(enabled)
+
+    def set_settings(self, settings):
+        """Push updated settings so rows re-resolve their effective agent.
+
+        Called from window.apply_settings after an agent/model override change
+        so the per-row caps gating (A5) and session source (A1) follow the new
+        effective agent.
+        """
+        self._settings = settings
+        for row in self._rows.values():
+            row.set_settings(settings)
 
     def set_model_options(self, options, overrides, global_label):
         """Push provider/model menu options to every project row.
@@ -387,10 +405,11 @@ class ProjectRow(Gtk.ListBoxRow):
         'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
-    def __init__(self, project, history, watcher):
+    def __init__(self, project, history, watcher, settings=None):
         super().__init__()
         self._project = project
         self._history = history
+        self._settings = settings
         self._watcher = watcher
         self._expanded = False
         self._sessions_loaded = False
@@ -465,6 +484,76 @@ class ProjectRow(Gtk.ListBoxRow):
         outer.append(self._revealer)
 
         self._setup_context_menu()
+        self._apply_caps()
+
+    # --- agent seam (A1 sessions, A5 caps gating) -------------------------
+
+    def _adapter(self):
+        """The effective agent adapter for this project (claude if unknown).
+
+        Resolved through the seam so the expander, the session-resume action,
+        and the Model submenu all degrade on the adapter's declared caps rather
+        than assuming claude. Falls back to the claude adapter when settings
+        weren't injected (defensive — keeps headless/legacy construction sane).
+        """
+        agent_id = (self._settings.effective_agent(self._project.path)
+                    if self._settings is not None else 'claude')
+        return agents.get_adapter(agent_id)
+
+    def _caps(self):
+        return self._adapter().caps
+
+    def set_settings(self, settings):
+        """Re-bind settings and re-apply caps gating (effective agent changed)."""
+        self._settings = settings
+        self._apply_caps()
+
+    def _apply_caps(self):
+        """Show/hide caps-gated menu entries for the effective adapter (A5).
+
+        * Model submenu     — caps.model_select
+        * History expander  — caps.sessions (the expand arrow + new-session row)
+        * Session resume     — caps.resume_by_id (gated where the row is built)
+
+        Idempotent: safe to call after construction and on every settings push.
+        """
+        caps = self._caps()
+        # Model submenu visibility.
+        self._set_menu_item_present('Model', caps.model_select,
+                                    self._insert_model_submenu)
+        # History expander: hide the arrow entirely when the agent can't
+        # enumerate sessions, so there's no empty dropdown to open.
+        if hasattr(self, '_arrow'):
+            self._arrow.set_visible(caps.sessions)
+
+    def _set_menu_item_present(self, label, present, inserter):
+        """Ensure a top-level menu item with ``label`` is present/absent.
+
+        Generic helper mirroring update_ntfy_visibility's add/remove dance so
+        caps gating reuses one code path. ``inserter`` re-adds the item when it
+        must reappear (its position/submodel is caller-defined).
+        """
+        idx = None
+        for i in range(self._menu.get_n_items()):
+            v = self._menu.get_item_attribute_value(i, 'label', GLib.VariantType('s'))
+            if v and v.get_string() == label:
+                idx = i
+                break
+        if present and idx is None:
+            inserter()
+            self._rebuild_popover()
+        elif not present and idx is not None:
+            self._menu.remove(idx)
+            self._rebuild_popover()
+
+    def _insert_model_submenu(self):
+        """Re-attach the Model submenu (used by caps gating to restore it).
+
+        Appended at the end on re-add (the initial build placed it mid-menu);
+        the position only shifts on a low→high caps transition, which is rare
+        and cosmetic.
+        """
+        self._menu.append_submenu('Model', self._model_submenu)
 
     def _setup_context_menu(self):
         self._menu = Gio.Menu()
@@ -609,14 +698,22 @@ class ProjectRow(Gtk.ListBoxRow):
         self._new_session_row.set_sensitive(not self._is_zellij)
         self._new_session_row.set_activatable(not self._is_zellij)
         self._session_listbox.append(self._new_session_row)
-        for i, sess in enumerate(self._history.get_sessions(self._project)):
-            self._session_listbox.append(SessionHistoryRow(sess, is_default=(i == 0)))
+        # A1: sessions come through the per-project adapter's list_sessions
+        # (SessionRefs), NOT the HistoryReader directly. The adapter is the
+        # seam; for claude it wraps HistoryReader, but the row never knows that.
+        # resume-by-id rows are only enumerated when the adapter supports it
+        # (A5: caps.resume_by_id) — otherwise only the New Session entry shows.
+        if not self._caps().resume_by_id:
+            return
+        refs = self._adapter().list_sessions(self._project)
+        for i, ref in enumerate(refs):
+            self._session_listbox.append(SessionHistoryRow(ref, is_default=(i == 0)))
 
     def _on_session_activated(self, listbox, row):
         if isinstance(row, NewSessionRow):
             self.emit('project-new-claude')
         elif isinstance(row, SessionHistoryRow):
-            self.emit('session-activated', self._project.path, row._session.session_id)
+            self.emit('session-activated', self._project.path, row._ref.id)
 
     def set_process_state(self, state: str, is_zellij: bool = None):
         """state: 'inactive' | 'attached' | 'detached'"""
@@ -714,9 +811,15 @@ class NewSessionRow(Gtk.ListBoxRow):
 
 
 class SessionHistoryRow(Gtk.ListBoxRow):
-    def __init__(self, session, is_default=False):
+    """A restorable past session, rendered from an ``agents.SessionRef`` (A1).
+
+    The row reads ``ref.id``/``ref.title``/``ref.last_active`` \u2014 the canonical
+    sessions contract \u2014 not the old Claude-specific ``Session.session_id``. The
+    adapter is the only thing that knows how to interpret ``ref.id``.
+    """
+    def __init__(self, ref, is_default=False):
         super().__init__()
-        self._session = session
+        self._ref = ref
         self.add_css_class('session-history-row')
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -725,7 +828,7 @@ class SessionHistoryRow(Gtk.ListBoxRow):
         box.set_margin_top(4)
         box.set_margin_bottom(4)
 
-        title_text = session.title[:40] if session.title else '(untitled)'
+        title_text = ref.title[:40] if ref.title else '(untitled)'
         title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         title = Gtk.Label(label=title_text)
         title.set_halign(Gtk.Align.START)
@@ -740,7 +843,7 @@ class SessionHistoryRow(Gtk.ListBoxRow):
         box.append(title_row)
 
         try:
-            dt = datetime.fromtimestamp(session.last_active / 1000)
+            dt = datetime.fromtimestamp(ref.last_active / 1000)
             ts_text = dt.strftime('%b %d, %H:%M')
         except (ValueError, OSError):
             ts_text = ''
@@ -753,9 +856,9 @@ class SessionHistoryRow(Gtk.ListBoxRow):
         self.set_child(box)
 
         # Full title tooltip
-        full_title = session.title if session.title else '(untitled)'
+        full_title = ref.title if ref.title else '(untitled)'
         try:
-            dt = datetime.fromtimestamp(session.last_active / 1000)
+            dt = datetime.fromtimestamp(ref.last_active / 1000)
             tooltip = f'{full_title}\n{dt.strftime("%Y-%m-%d %H:%M")}'
         except (ValueError, OSError):
             tooltip = full_title

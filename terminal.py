@@ -82,14 +82,24 @@ class TerminalView(Gtk.Box):
         'process-detached': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
-    def __init__(self, project, settings):
+    def __init__(self, project, settings, agent_id=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self._project = project
         self._settings = settings
         # The agent backend for this project (claude by default). All spawn
         # argv/env decisions route through the adapter; TerminalView keeps only
         # the pty/fork/watch machinery, which is already agent-agnostic.
-        self._adapter = agents.get_adapter(settings.effective_agent(project.path))
+        #
+        # ``agent_id`` is the explicit agent for this terminal (A2/M2). When
+        # given it OVERRIDES ``settings.effective_agent`` — this is how restore
+        # recreates the agent that was actually running (saved-agent-wins),
+        # even if settings now name a different default. When None, the
+        # effective agent from settings is used (settings-wins on a new
+        # activation). The resolved id is remembered so ``apply_settings`` keeps
+        # honoring an explicit restore agent across settings reloads.
+        self._explicit_agent = agent_id
+        resolved = agent_id if agent_id is not None else settings.effective_agent(project.path)
+        self._adapter = agents.get_adapter(resolved)
         self._child_pid = None
         self._is_multiplexed = False
         self._is_zellij = False
@@ -97,8 +107,9 @@ class TerminalView(Gtk.Box):
         # 'provider/model' the live child was spawned with ('' = native Claude);
         # lets window.py detect when a model change leaves a session stale.
         self._spawned_model = ''
-        # Set by _claude_env() when ccr is wanted but unavailable; cleared on
-        # successful ccr spawn. window.py reads this from process-started.
+        # Set by the adapter's spawn plan / zellij_spawn_env when a custom-model
+        # backend (ccr) is wanted but unavailable; cleared on a successful spawn.
+        # window.py reads this from the process-started handler.
         self._fallback_reason = None
         self._font_size = settings.font_size
         # PM-owned pidfd watches, one per spawned child. Each entry is a dict
@@ -322,21 +333,6 @@ class TerminalView(Gtk.Box):
         self._terminal.set_color_cursor(rgba(p['cursor']))
         self._terminal.set_color_cursor_foreground(rgba(p['cursor_fg']))
 
-    def _claude_env(self):
-        """Env dict for the claude child, or None to use native Anthropic.
-
-        Delegates to ccr.spawn_env() which gates on ccr actually being
-        installed and running before injecting the custom-provider vars.
-        When ccr is unavailable or fails to start, spawn proceeds native and
-        _fallback_reason carries the explanation for window.py to surface.
-        """
-        import ccr as _ccr
-        env, reason = _ccr.spawn_env(self._settings, self._project.path)
-        # Store reason (or clear a stale one) so window.py can read it from
-        # the process-started handler without changing the signal signature.
-        self._fallback_reason = reason
-        return env
-
     def spawned_model_signature(self):
         """The 'provider/model' the current child was spawned with."""
         return self._spawned_model
@@ -362,10 +358,25 @@ class TerminalView(Gtk.Box):
         self._is_multiplexed = False
         self._spawn(plan.argv, plan.env)
 
+    def spawn_continue(self, project_name=None):
+        """Continue the agent's most recent conversation (``-c`` semantics)."""
+        self.spawn_agent('continue')
+
+    def spawn_fresh(self, project_name=None):
+        """Start a brand-new agent session."""
+        self.spawn_agent('fresh')
+
+    def spawn_resume(self, session_id, project_name=None):
+        """Resume a specific session by id."""
+        self.spawn_agent('resume', session_id=session_id)
+
     def spawn_claude(self, session_id=None, fresh=False, project_name=None):
-        """Back-compat alias over ``spawn_agent`` (kept for this phase to
-        minimize window.py churn; removal is P2's job). Maps the old
-        (session_id, fresh) flags onto a spawn mode."""
+        """Deprecated agent-neutral alias over ``spawn_agent`` (the name is a
+        historical artifact — it spawns whatever the project's adapter is, not
+        necessarily claude). Retained so the P1 consumption-seam tests keep
+        passing; window.py now calls ``spawn_continue``/``spawn_fresh``/
+        ``spawn_resume`` directly. Maps the old (session_id, fresh) flags onto a
+        spawn mode."""
         if session_id:
             mode = 'resume'
         elif fresh:
@@ -381,9 +392,10 @@ class TerminalView(Gtk.Box):
         in the initial pane, then drops to the real shell.
         Existing sessions: attached with `zellij attach <name>`.
         """
-        # Must clear at spawn entry — the attach branch never calls
-        # _claude_env(), so a stale reason from a prior failed custom-model
-        # spawn would otherwise raise a spurious toast on a healthy attach.
+        # Must clear at spawn entry — the attach branch never consults the
+        # adapter's zellij_spawn_env(), so a stale reason from a prior failed
+        # custom-model spawn would otherwise raise a spurious toast on a healthy
+        # attach.
         self._fallback_reason = None
         self._kill_child()
         self._terminal.reset(True, True)
@@ -410,18 +422,19 @@ class TerminalView(Gtk.Box):
             with open(flag_path, 'w') as f:
                 f.write(self._adapter.zellij_continue_command(self._settings))
             wrapper = _ensure_zellij_shell_wrapper()
-            env = dict(os.environ)
-            env['SHELL'] = wrapper
-            env['ZELLIJ_REAL_SHELL'] = os.environ.get('SHELL', '/bin/bash')
             # Custom-model env can only be set when the zellij server is first
             # created — attaching to an existing session inherits whatever the
             # server already has. Per-project models under zellij are therefore
             # best-effort; the default (non-multiplexed) path is fully supported.
-            custom = self._claude_env()
-            if custom:
-                for k in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN',
-                          'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'):
-                    env[k] = custom[k]
+            # The adapter owns the env decision (A3/M3): for claude this is the
+            # ccr env; for opencode (and any model-as-argv agent) it is None.
+            # terminal.py no longer calls ccr or names ANTHROPIC_* keys.
+            custom, self._fallback_reason = self._adapter.zellij_spawn_env(
+                self._settings, self._project
+            )
+            env = dict(custom) if custom is not None else dict(os.environ)
+            env['SHELL'] = wrapper
+            env['ZELLIJ_REAL_SHELL'] = os.environ.get('SHELL', '/bin/bash')
             cmd = ['zellij', 'attach', '--create', session_name]
         self._spawn(cmd, env)
 
@@ -612,8 +625,12 @@ class TerminalView(Gtk.Box):
         # Note: resets font_size to the settings default, discarding any active zoom offset.
         self._settings = settings
         # Re-resolve the adapter in case the effective agent changed. The next
-        # spawn uses it; a live child keeps running its original agent.
-        self._adapter = agents.get_adapter(settings.effective_agent(self._project.path))
+        # spawn uses it; a live child keeps running its original agent. An
+        # explicit construction-time agent (a restored session, A2) is sticky:
+        # settings changes must not silently swap a running restored agent.
+        resolved = (self._explicit_agent if self._explicit_agent is not None
+                    else settings.effective_agent(self._project.path))
+        self._adapter = agents.get_adapter(resolved)
         self._font_size = settings.font_size
         self._apply_font()
         self._apply_colors()

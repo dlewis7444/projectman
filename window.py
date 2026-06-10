@@ -13,7 +13,7 @@ from archive_window import ArchiveWindow
 from shutdown_window import ShutdownWindow
 from model import Project
 from session import (
-    save_session, load_session, filter_active_paths,
+    save_session, load_session, load_agents, filter_active_paths,
     collect_session_state, plan_restore, SESSION_FILE,
 )
 
@@ -28,6 +28,15 @@ class AppWindow(Adw.ApplicationWindow):
         self._version = version
         self._terminals = {}
         self._active_path = None
+        # Per-project agent map populated from session.json during a restore
+        # pass (saved-agent-wins, A2). _get_or_create_terminal consults it when
+        # no explicit agent_id is passed, so the focused project — activated via
+        # the normal _on_project_activated path — still recreates its saved
+        # agent. Empty outside a restore; new activations fall through to
+        # settings.effective_agent.
+        self._restore_agents: dict = {}
+        # Distinct missing-agent ids already toasted (A6 one-shot dedup).
+        self._warned_agents: set = set()
         self._mru = []          # most-recently-used project paths, index 0 = current
         self._archive_win = None
         self._settings_win = None
@@ -82,7 +91,8 @@ class AppWindow(Adw.ApplicationWindow):
         self._paned.set_shrink_start_child(False)
         self._paned.connect('notify::position', self._on_paned_position_notify)
 
-        self._sidebar = Sidebar(store, history, watcher, version=self._version)
+        self._sidebar = Sidebar(store, history, watcher, version=self._version,
+                                settings=settings)
         self._sidebar.set_ntfy_enabled(settings.ntfy_enabled)
         self._sidebar.connect('project-activated',   self._on_project_activated)
         self._sidebar.connect('session-activated',   self._on_session_activated)
@@ -246,20 +256,27 @@ class AppWindow(Adw.ApplicationWindow):
         if self._settings.multiplexer == 'zellij':
             self._restore_zellij_session()
             return
-        # --- direct-claude mode (original behaviour) ---
+        # --- direct-agent mode (original behaviour) ---
         if not self._settings.resume_projects:
             return
         open_paths, focused_path = load_session(SESSION_FILE)
+        # saved-agent-wins on restore (A2): recreate the agent each project was
+        # actually running, overriding settings.effective_agent. v1 (str) and
+        # agent-less entries default to claude inside load_agents.
+        self._restore_agents = load_agents(SESSION_FILE)
         active = filter_active_paths(open_paths, self._store.load_projects())
         focused, background = plan_restore(open_paths, focused_path, active)
         self._sidebar.set_active_only(bool(active))
-        if focused:
-            self._on_project_activated(self._sidebar, focused)
-        for path in background:
-            project = active[path]
-            tv = self._get_or_create_terminal(project)
-            if tv._child_pid is None:
-                tv.spawn_claude(project_name=project.name)
+        try:
+            if focused:
+                self._on_project_activated(self._sidebar, focused)
+            for path in background:
+                project = active[path]
+                tv = self._get_or_create_terminal(project)
+                if tv._child_pid is None:
+                    tv.spawn_continue(project_name=project.name)
+        finally:
+            self._restore_agents = {}
 
     def _restore_zellij_session(self):
         """In zellij mode: find live pm-* sessions, mark detached, re-open last-focused.
@@ -282,6 +299,8 @@ class AppWindow(Adw.ApplicationWindow):
             return
 
         open_paths, focused_path = load_session(SESSION_FILE)
+        # saved-agent-wins on restore (A2): the same map the direct path uses.
+        self._restore_agents = load_agents(SESSION_FILE)
         all_paths = {p.path for p in self._store.load_projects()}
 
         restore_path = focused_path if focused_path and focused_path in all_paths else None
@@ -294,20 +313,23 @@ class AppWindow(Adw.ApplicationWindow):
         background = [p for p in open_paths if p != restore_path and p in all_paths]
         self._sidebar.set_active_only(bool(live) or bool(restore_path))
 
-        if restore_path:
-            self._on_project_activated(self._sidebar, restore_path)
+        try:
+            if restore_path:
+                self._on_project_activated(self._sidebar, restore_path)
 
-        for path in background:
-            project = self._find_project(path)
-            if not project:
-                continue
-            tv = self._get_or_create_terminal(project)
-            if tv._child_pid is None:
-                sname = z.session_name(project.name)
-                if sname in alive_names:
-                    tv.spawn_zellij(sname)
-                else:
-                    tv.spawn_claude(project_name=project.name)
+            for path in background:
+                project = self._find_project(path)
+                if not project:
+                    continue
+                tv = self._get_or_create_terminal(project)
+                if tv._child_pid is None:
+                    sname = z.session_name(project.name)
+                    if sname in alive_names:
+                        tv.spawn_zellij(sname)
+                    else:
+                        tv.spawn_continue(project_name=project.name)
+        finally:
+            self._restore_agents = {}
 
     def _push_mru(self, path):
         self._mru = [path] + [p for p in self._mru if p != path]
@@ -367,7 +389,7 @@ class AppWindow(Adw.ApplicationWindow):
         if self._active_path and self._active_path in self._terminals:
             project = self._find_project(self._active_path)
             pname = project.name if project else None
-            self._terminals[self._active_path].spawn_claude(project_name=pname)
+            self._terminals[self._active_path].spawn_continue(project_name=pname)
         return True
 
     def _show_ccr_fallback_toast(self, project_name, reason):
@@ -418,9 +440,49 @@ class AppWindow(Adw.ApplicationWindow):
         """Clear the live-toast reference when the user dismisses it."""
         self._ccr_toast = None
 
-    def _get_or_create_terminal(self, project):
+    def _maybe_warn_unknown_agent(self, agent_id):
+        """One-shot toast when a NAMED agent isn't available (A6/m3).
+
+        ``resolve_adapter`` returns a non-None ``missing`` only when a non-empty
+        id has no registered adapter; the spawn still proceeds on claude. The
+        warning is shown once per distinct missing id (``_warned_agents``) so a
+        multi-project restore naming the same dead agent doesn't toast N times.
+        """
+        import agents
+        _adapter, missing = agents.resolve_adapter(agent_id)
+        if not missing or missing in self._warned_agents:
+            return
+        self._warned_agents.add(missing)
+        toast = Adw.Toast.new(
+            f"agent '{missing}' not available — using Claude Code"
+        )
+        toast.set_timeout(5)
+        self._toast_overlay.add_toast(toast)
+
+    def _get_or_create_terminal(self, project, agent_id=None):
+        """Return the project's TerminalView, creating it if absent.
+
+        ``agent_id`` is the explicit agent for a freshly created terminal —
+        used by restore to recreate the agent that was actually running
+        (saved-agent-wins, A2). It is ignored once a terminal exists (a live
+        terminal keeps its agent). New non-restore activations pass None and
+        the terminal follows ``settings.effective_agent``.
+
+        When ``agent_id`` is None, the in-progress restore map
+        (``_restore_agents``) is consulted so the focused project — which is
+        activated through the ordinary _on_project_activated path rather than
+        with an explicit id — still recreates its saved agent.
+        """
+        if agent_id is None:
+            agent_id = self._restore_agents.get(project.path)
         if project.path not in self._terminals:
-            tv = TerminalView(project, self._settings)
+            # A6/m3: if the project's agent is NAMED but not registered (a stale
+            # session/settings id, or a typo), warn once. The terminal still
+            # falls back to claude — resolve_adapter only changes the diagnostic.
+            effective = (agent_id if agent_id is not None
+                         else self._settings.effective_agent(project.path))
+            self._maybe_warn_unknown_agent(effective)
+            tv = TerminalView(project, self._settings, agent_id=agent_id)
 
             def _on_started(t, p=project.path, n=project.name):
                 self._sidebar.set_project_state(p, 'attached', is_zellij=t._is_zellij)
@@ -467,7 +529,7 @@ class AppWindow(Adw.ApplicationWindow):
             if z.session_alive(sname):
                 tv.spawn_zellij(sname)
             else:
-                tv.spawn_claude(project_name=project.name)
+                tv.spawn_continue(project_name=project.name)
         tv.get_terminal().grab_focus()
 
     def _on_project_activated(self, sidebar, path):
@@ -485,7 +547,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._set_active_project(project.name)
         self._active_path = path
         self._push_mru(path)
-        tv.spawn_claude(session_id=session_id, project_name=project.name)
+        tv.spawn_resume(session_id, project_name=project.name)
         tv.get_terminal().grab_focus()
 
     # --- deactivate (kill process, keep in sidebar as inactive) ---
@@ -613,7 +675,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._set_active_project(project.name)
         self._active_path = path
         self._push_mru(path)
-        tv.spawn_claude(fresh=True, project_name=project.name)
+        tv.spawn_fresh(project_name=project.name)
         tv.get_terminal().grab_focus()
 
     def _on_project_open_zellij(self, sidebar, path):
@@ -639,6 +701,9 @@ class AppWindow(Adw.ApplicationWindow):
         self._settings = settings
         for tv in self._terminals.values():
             tv.apply_settings(settings)
+        # Push settings into the sidebar so per-row caps gating + the session
+        # source follow the (possibly changed) effective agent (A1/A5).
+        self._sidebar.set_settings(settings)
         self._sidebar.set_ntfy_enabled(settings.ntfy_enabled)
         self._refresh_sidebar_models()
 

@@ -253,15 +253,20 @@ class TestClaudeAdapterSpawnPlanParity:
         assert plan.fallback_reason is None
 
     def test_custom_model_ccr_up_injects_env(self, monkeypatch):
-        """ccr up → env carries the four Anthropic vars, comma model form."""
+        """ccr up → env carries the four Anthropic vars, comma model form.
+
+        ccr probe injection is now a Claude-INTERNAL ctor param (A4/m1), not a
+        protocol argument: ``spawn_plan``'s signature is uniform across adapters
+        ``(settings, project, mode, session_id=None)``. Tests build a
+        ClaudeAdapter with ``ccr_kwargs={'probe': ...}`` to stay instant.
+        """
         import ccr
         import agents
         monkeypatch.setattr(ccr, 'available', lambda _s: True)
-        a = agents.get_adapter('claude')
-        s = self._custom_model_settings()
         # Inject a probe that reports ccr running so no real socket/sleep happens.
-        plan = a.spawn_plan(s, self._project('/projects/myproj'), 'continue',
-                            probe=lambda _s: True)
+        a = agents.ClaudeAdapter(ccr_kwargs={'probe': lambda _s: True})
+        s = self._custom_model_settings()
+        plan = a.spawn_plan(s, self._project('/projects/myproj'), 'continue')
         assert plan.fallback_reason is None
         assert plan.env is not None
         assert plan.env['ANTHROPIC_BASE_URL'] == 'http://127.0.0.1:3456'
@@ -457,3 +462,178 @@ class TestClaudeAdapterListSessions:
         assert refs[0].last_active == 200
         assert refs[0].title == 'First'
         assert all(isinstance(r, agents.SessionRef) for r in refs)
+
+
+# ===========================================================================
+# P2 Part A — seam hardening (A1-A6). Headless; no GTK, no processes.
+# ===========================================================================
+
+def _settings(**kw):
+    from settings import Settings
+    return Settings(**kw)
+
+
+def _project(path='/projects/p'):
+    import types
+    return types.SimpleNamespace(name=os.path.basename(path), path=path)
+
+
+def _custom_model_settings(**kw):
+    from settings import Settings
+    base = dict(
+        providers={'ollama': {
+            'name': 'Ollama', 'base_url': 'http://host:11434/v1',
+            'api_key': 'k', 'models': {'qwen': {'name': 'Qwen'}}}},
+        model_default='ollama/qwen', ccr_host='127.0.0.1', ccr_port=3456,
+        ccr_api_key='secret',
+    )
+    base.update(kw)
+    return Settings(**base)
+
+
+class TestSpawnPlanUniformSignature:
+    """A4/m1: ``spawn_plan(settings, project, mode, session_id=None)`` — no ccr
+    test-injection on the protocol signature; it is a Claude-internal ctor param.
+    """
+
+    def test_spawn_plan_signature_has_no_ccr_kwargs(self):
+        import inspect
+        import agents
+        params = list(inspect.signature(agents.ClaudeAdapter.spawn_plan).parameters)
+        assert params == ['self', 'settings', 'project', 'mode', 'session_id']
+
+    def test_ccr_injection_via_ctor_not_call(self, monkeypatch):
+        """A probe injected at construction reaches ccr.spawn_env; the call site
+        passes only the uniform args."""
+        import ccr
+        import agents
+        monkeypatch.setattr(ccr, 'available', lambda _s: True)
+        a = agents.ClaudeAdapter(ccr_kwargs={'probe': lambda _s: True})
+        plan = a.spawn_plan(_custom_model_settings(), _project('/projects/m'), 'continue')
+        assert plan.env is not None
+        assert plan.env['ANTHROPIC_MODEL'] == 'ollama,qwen'
+        assert plan.fallback_reason is None
+
+    def test_default_adapter_has_empty_ccr_kwargs(self):
+        """The registry's claude adapter uses the real socket probe (no inject)."""
+        import agents
+        assert agents.get_adapter('claude')._ccr_kwargs == {}
+
+
+class TestZellijSpawnEnvUnderAdapter:
+    """A3/M3: ``zellij_spawn_env`` moves the ccr env decision behind the adapter.
+
+    terminal.py must consult only this method (no _claude_env, no hardcoded
+    ANTHROPIC key list) — guarded by a source check below.
+    """
+
+    def test_native_model_returns_none_env(self, monkeypatch):
+        import ccr
+        import agents
+        monkeypatch.setattr(ccr, 'available', lambda _s: True)
+        a = agents.ClaudeAdapter(ccr_kwargs={'probe': lambda _s: True})
+        env, reason = a.zellij_spawn_env(_settings(), _project())
+        assert env is None
+        assert reason is None
+
+    def test_custom_model_ccr_up_returns_full_env(self, monkeypatch):
+        """ccr reachable → full env dict (inherited environ + ANTHROPIC vars)."""
+        import ccr
+        import agents
+        monkeypatch.setattr(ccr, 'available', lambda _s: True)
+        a = agents.ClaudeAdapter(ccr_kwargs={'probe': lambda _s: True})
+        env, reason = a.zellij_spawn_env(_custom_model_settings(), _project('/projects/m'))
+        assert reason is None
+        assert env is not None
+        assert env['ANTHROPIC_BASE_URL'] == 'http://127.0.0.1:3456'
+        assert env['ANTHROPIC_AUTH_TOKEN'] == 'secret'
+        assert env['ANTHROPIC_MODEL'] == 'ollama,qwen'
+        # Full env (inherits the parent environment) — PATH etc. preserved.
+        assert 'PATH' in env
+
+    def test_custom_model_ccr_missing_returns_reason(self, monkeypatch):
+        import ccr
+        import agents
+        monkeypatch.setattr(ccr, 'available', lambda _s: False)
+        a = agents.ClaudeAdapter()
+        env, reason = a.zellij_spawn_env(_custom_model_settings(), _project('/projects/m'))
+        assert env is None
+        assert isinstance(reason, str) and reason
+
+    def test_terminal_consults_adapter_not_ccr_for_zellij(self):
+        """terminal.py's zellij path goes through zellij_spawn_env, and no longer
+        names _claude_env or the ANTHROPIC_* key list (the seam is load-bearing)."""
+        tsrc = _source('terminal.py')
+        assert 'zellij_spawn_env' in tsrc
+        assert 'def _claude_env' not in tsrc
+        # The hardcoded zellij ANTHROPIC key list is gone from terminal.py.
+        assert 'ANTHROPIC_BASE_URL' not in tsrc
+        assert 'ANTHROPIC_AUTH_TOKEN' not in tsrc
+
+
+class TestResolveAdapterNamedMiss:
+    """A6/m3: ``resolve_adapter`` distinguishes default-resolution from
+    named-but-missing so window.py can warn on the named-miss path."""
+
+    def test_known_agent_no_miss(self):
+        import agents
+        adapter, miss = agents.resolve_adapter('claude')
+        assert adapter.id == 'claude'
+        assert miss is None
+
+    def test_empty_id_is_default_not_miss(self):
+        """A falsy id means 'use the default' — nothing was named, nothing
+        missing."""
+        import agents
+        for empty in ('', None):
+            adapter, miss = agents.resolve_adapter(empty)
+            assert adapter.id == 'claude'
+            assert miss is None
+
+    def test_unknown_named_agent_reports_miss(self):
+        import agents
+        adapter, miss = agents.resolve_adapter('codex')
+        assert adapter.id == 'claude'   # safe fallback, still usable
+        assert miss == 'codex'          # the name the caller asked for
+
+    def test_get_adapter_still_hides_the_miss(self):
+        """get_adapter keeps its safe-default contract (spawn path never breaks)."""
+        import agents
+        assert agents.get_adapter('codex').id == 'claude'
+
+
+# A fake low-caps adapter exercises the caps-gating WIRING (A5) without needing
+# a real second agent. It is the headless half of the gating contract; the GTK
+# sliver (menu items appearing/disappearing) is covered in test_sidebar_state.py.
+class _FakeLowCapsAdapter:
+    id = 'fake-low'
+    display_name = 'Fake (low caps)'
+
+    def __init__(self):
+        import agents
+        self.caps = agents.AgentCaps(
+            continue_=True, resume_by_id=False, sessions=False,
+            rich_status=False, model_select=False, headless_json=False,
+        )
+
+    def list_sessions(self, project):
+        return []
+
+
+class TestCapsGatingContract:
+    """A5/m2: the caps an adapter declares are what the UI gates on.
+
+    These pin the boolean contract the sidebar consumes; the visual assertions
+    live in test_sidebar_state.py against a registered fake adapter.
+    """
+
+    def test_claude_caps_enable_everything(self):
+        import agents
+        caps = agents.get_adapter('claude').caps
+        assert caps.model_select and caps.sessions and caps.resume_by_id
+
+    def test_low_caps_adapter_disables_gated_features(self):
+        a = _FakeLowCapsAdapter()
+        assert a.caps.model_select is False   # → Model submenu hidden
+        assert a.caps.sessions is False        # → expander hidden
+        assert a.caps.resume_by_id is False    # → no resume rows

@@ -6,11 +6,12 @@ spawn + sessions seam: an ``AgentAdapter`` declares its capabilities and turns a
 ``(settings, project, mode)`` request into a concrete ``SpawnPlan`` (argv + env)
 that ``terminal.py`` executes below the line, unchanged.
 
-P1 ships exactly one adapter — ``ClaudeAdapter`` — wrapping today's behavior
-bit-for-bit. It is the reference backend and the default. The module is pure
-(no GTK, like ``zellij.py``/``session.py``) so it is fully unit-testable
-headless; the golden tests in ``tests/test_agent_seam.py`` pin the Claude
-adapter to the pre-refactor spawn argv/env/zellij strings.
+P1 shipped exactly one adapter — ``ClaudeAdapter`` — wrapping today's behavior
+bit-for-bit. P2 makes the seam load-bearing (every consumer goes THROUGH it, not
+around it) and adds ``OpencodeAdapter`` as the second, first-class backend. The
+module is pure (no GTK, like ``zellij.py``/``session.py``) so it is fully
+unit-testable headless; the golden tests in ``tests/test_agent_seam.py`` pin the
+Claude adapter to the pre-refactor spawn argv/env/zellij strings.
 
 Design source: docs/superpowers/specs/2026-06-09-llm-agnostic-agents-design.md
 (Part I, "Architecture: four contracts" + "AgentAdapter protocol").
@@ -155,11 +156,18 @@ class ClaudeAdapter:
         headless_json=True,
     )
 
-    def __init__(self):
+    def __init__(self, *, ccr_kwargs=None):
         # HistoryReader lives in model.py this phase (it imports no GTK at the
         # class level, but model.py does import gi at module scope, so we defer
         # the import to list_sessions to keep agents.py headless-importable).
         self._history = None
+        # ccr probe/sleep_fn/start_wait injection is a CLAUDE-INTERNAL detail,
+        # not part of the spawn protocol (m1/A4): the uniform ``spawn_plan``
+        # signature is ``(settings, project, mode, session_id=None)`` across all
+        # adapters. Tests that need an instant ccr probe construct a
+        # ClaudeAdapter with ``ccr_kwargs={'probe': ...}`` instead of passing it
+        # through the protocol call.
+        self._ccr_kwargs = dict(ccr_kwargs) if ccr_kwargs else {}
 
     # --- spawn contract ---------------------------------------------------
 
@@ -175,13 +183,12 @@ class ClaudeAdapter:
     def resume_argv(self, settings, session_id):
         return [self._binary(settings), '--resume', session_id]
 
-    def spawn_plan(self, settings, project, mode, session_id=None, **ccr_kwargs):
+    def spawn_plan(self, settings, project, mode, session_id=None):
         """Build the ``SpawnPlan`` for a spawn request.
 
-        ``mode`` is ``fresh`` | ``continue`` | ``resume``. ``ccr_kwargs`` are
-        forwarded to ``ccr.spawn_env`` (``probe``/``sleep_fn``/``start_wait``)
-        so tests can inject a probe and stay instant — production callers pass
-        none and get the real socket-probe path.
+        ``mode`` is ``fresh`` | ``continue`` | ``resume``. The signature is
+        uniform across adapters (m1/A4); ccr probe injection for tests is a
+        Claude-internal ctor param (``ccr_kwargs``), not a protocol argument.
         """
         if mode == 'resume':
             if not session_id:
@@ -197,7 +204,7 @@ class ClaudeAdapter:
             raise ValueError(f"unknown spawn mode: {mode!r}")
 
         import ccr as _ccr
-        env, reason = _ccr.spawn_env(settings, project.path, **ccr_kwargs)
+        env, reason = _ccr.spawn_env(settings, project.path, **self._ccr_kwargs)
         return SpawnPlan(argv=argv, env=env, fallback_reason=reason)
 
     # --- zellij path ------------------------------------------------------
@@ -208,14 +215,32 @@ class ClaudeAdapter:
             self.continue_argv(settings), self.fresh_argv(settings)
         )
 
+    def zellij_spawn_env(self, settings, project):
+        """Env override for a NEW zellij session's server, or ``None`` (A3/M3).
+
+        The ccr custom-model env can only be applied when the zellij server is
+        first created (an attach inherits the server's existing env). This moves
+        the old ``terminal.py:_claude_env`` logic — and the hardcoded
+        ``ANTHROPIC_*`` key list — behind the adapter: ``spawn_zellij`` consults
+        only this method, never ccr directly. Returns the full ccr env dict
+        (inherited environ + the four ANTHROPIC vars) when ccr is in play, or
+        ``None`` for the native path. The second tuple element is the
+        fallback_reason (so ``spawn_zellij`` can surface a ccr toast on the
+        create path exactly as the direct path does).
+        """
+        import ccr as _ccr
+        return _ccr.spawn_env(settings, project.path, **self._ccr_kwargs)
+
     # --- sessions contract ------------------------------------------------
 
     def list_sessions(self, project):
         """Return the project's recent sessions as ``SessionRef``s.
 
         Delegates to the existing ``HistoryReader`` (``~/.claude/history.jsonl``,
-        newest-first, capped at 7 as today). Imported lazily so this pure module
-        stays headless-importable even though ``model.py`` pulls in gi.
+        newest-first, capped at 7 as today). ``HistoryReader`` is Claude-internal
+        plumbing now (A1): no consumer reads it directly — the sidebar expander
+        goes through ``list_sessions``. Imported lazily so this pure module stays
+        headless-importable even though ``model.py`` pulls in gi.
         """
         from model import HistoryReader
         if self._history is None:
@@ -235,12 +260,39 @@ ADAPTERS = {
     'claude': ClaudeAdapter(),
 }
 
+DEFAULT_AGENT = 'claude'
+
 
 def get_adapter(agent_id):
     """Return the adapter for ``agent_id``, defaulting to claude.
 
     An unknown id resolves to the Claude adapter — the safe default keeps a
     stale session.json/settings override (e.g. pointing at an agent removed
-    later) from breaking restore.
+    later) from breaking restore. Callers that need to TELL the difference
+    between "claude was asked for" and "X was asked for but is missing" use
+    ``resolve_adapter`` instead (A6/m3): this function deliberately hides it so
+    the spawn path never breaks on a bad id.
     """
-    return ADAPTERS.get(agent_id) or ADAPTERS['claude']
+    return ADAPTERS.get(agent_id) or ADAPTERS[DEFAULT_AGENT]
+
+
+def resolve_adapter(agent_id):
+    """Resolve ``agent_id`` to ``(adapter, missing_name)`` (A6/m3).
+
+    Distinguishes default-resolution from named-but-missing so the UI can warn:
+
+      * known id (incl. an explicit ``'claude'``) → ``(adapter, None)``
+      * a falsy id (``''``/``None`` — "use the default") → ``(claude, None)``;
+        no name was requested, so nothing is missing.
+      * a non-empty id with no registered adapter → ``(claude, <that id>)``;
+        ``missing_name`` is the unknown id the caller asked for, so window.py
+        can show a one-shot "agent 'X' not available — using Claude Code" toast.
+
+    The returned adapter is always usable — the fallback to claude is identical
+    to ``get_adapter``; only the diagnostic differs.
+    """
+    if agent_id and agent_id in ADAPTERS:
+        return ADAPTERS[agent_id], None
+    if not agent_id:
+        return ADAPTERS[DEFAULT_AGENT], None
+    return ADAPTERS[DEFAULT_AGENT], agent_id
