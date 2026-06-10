@@ -13,7 +13,7 @@ from window import AppWindow
 from settings import Settings
 
 
-VERSION = '1.0.2'
+VERSION = '1.0.3'
 
 
 class ProjectManApp(Adw.Application):

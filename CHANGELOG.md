@@ -2,7 +2,7 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
-## [Unreleased]
+## [1.0.3] - 2026-06-09
 
 ### Fixed
 - **`ccr_managed=False` now fully honoured**: the "Manage ccr" toggle previously
