@@ -520,6 +520,23 @@ class ProjectRow(Gtk.ListBoxRow):
     def _caps(self):
         return self._adapter().caps
 
+    def _remap_idle_to_done(self):
+        """Whether an attached row's watcher-'idle' should render as 'done'.
+
+        Gated on the effective adapter's ``caps.rich_status`` (its first
+        consumer): a rich-status agent (claude, opencode — both bridged) with
+        no status file yet is a genuinely just-started/finished state, so the
+        historic green remap stands. A ``rich_status=False`` agent has no
+        bridge at all — remapping would pin a fake green "work finished" dot
+        for the entire run; it keeps the honest dim 'idle' instead. If adapter
+        resolution fails for any reason, preserve the historic remap — the dot
+        path must never throw.
+        """
+        try:
+            return self._adapter().caps.rich_status
+        except Exception:
+            return True
+
     def set_settings(self, settings):
         """Re-bind settings and re-apply caps gating (effective agent changed)."""
         self._settings = settings
@@ -844,9 +861,11 @@ class ProjectRow(Gtk.ListBoxRow):
         if self._process_state == 'detached':
             self._status_dot.add_css_class('status-idle')
             return
-        # attached: apply live status; default to done if no file exists yet
+        # attached: apply live status; default to done if no file exists yet —
+        # but only for agents whose caps declare rich_status (a bridgeless
+        # agent must not fake a green "finished" dot; see _remap_idle_to_done).
         status = self._watcher.get_project_status(self._project)
-        if status == 'idle':
+        if status == 'idle' and self._remap_idle_to_done():
             status = 'done'
         self._status_dot.add_css_class(f'status-{status}')
 

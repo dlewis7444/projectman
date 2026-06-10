@@ -42,6 +42,23 @@ All notable changes to ProjectMan will be documented in this file.
   and the spawn API neutralized to `spawn_continue`/`spawn_fresh`/
   `spawn_resume` (the `spawn_claude` alias is retained, deprecated).
 
+### Fixed
+- **Session save records the RUNNING agent, not the settings-effective one.**
+  A project restored under saved-agent-wins (e.g. saved as opencode while
+  settings resolve claude) was re-saved with the settings agent, so the next
+  restore silently dropped the running session. `_save_session` now derives
+  each project's agent from the live terminal's spawn-time signature
+  (`spawned_agent_signature()`, the same truth the restart prompt reads) via
+  the new pure `session.collect_agents_map()`, falling back to
+  `settings.effective_agent` only for a path with no terminal.
+- **The sidebar dot no longer fakes green for a bridgeless agent.** The
+  attached-row `idle → done` remap (no status file yet → green) is now gated
+  on the effective adapter's `caps.rich_status` — its first consumer. Rich-
+  status agents (claude, opencode) keep today's behavior byte-identical; a
+  future `rich_status=False` agent shows the honest dim idle dot instead of a
+  permanent false "work finished". If adapter resolution fails, the historic
+  remap is preserved (the dot path never throws).
+
 ### Internal
 - **The agent seam is now load-bearing (P1-review mandates M1-M3, m1-m3).**
   Every consumer that previously reached around the P1 seam now goes through
