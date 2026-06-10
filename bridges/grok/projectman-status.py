@@ -30,7 +30,7 @@ import sys
 
 STATUS_DIR = os.path.join(os.path.expanduser("~"), ".ProjectMan", "status")
 
-# Event → state, snake_case wire names (probe Q7 observed values).
+# Event → state, snake_case wire names (probe Q7 + mini-probe observed values).
 # Ports hook.js's STATE map: SessionStart/Stop→done, UserPromptSubmit and the
 # tool events→working. The happy path (session_start → user_prompt_submit →
 # stop) drives done → working → done; a real turn shows `working` while it runs
@@ -42,19 +42,35 @@ STATE = {
     "pre_tool_use": "working",
     "post_tool_use": "working",
     "post_tool_use_failure": "working",
-    # NO `waiting` mapping yet. `notification` is NOT it — the probe (Q7,
-    # surprise #4) found grok's `notification` event is an INTERNAL hook-receipt
-    # (notificationType="xai_session", a HookExecution report fired AFTER every
-    # other hook), NOT Claude's user-facing permission prompt. Mapping it to
-    # `waiting` would flip the dot blue after every single event. So
-    # `notification` is deliberately absent from this map and ignored below.
-    #
-    # TODO (waiting slot, F3): the real `waiting` trigger needs the tool-turn
-    # mini-probe's permission-event capture (a TUI turn requesting a tool
-    # permission — see probe.md "Auth-blocked items" #1). Once that event name
-    # is observed, add it here mapping to "waiting". Until then `waiting` ships
-    # disabled; the happy-path dots (working/done) are correct and sufficient.
+    # `permission_denied` is an OUTCOME event — it fires on the deny ACTION
+    # (mini-probe leg 2c), not while waiting; `stop(cancelled)` follows ~30ms
+    # later and lands `done`. Mapping it to working clears the pre-tool phase
+    # stamp (every non-pre_tool_use write rewrites the file phase-less).
+    "permission_denied": "working",
+    # NO direct `waiting` mapping exists — and none CAN (F11): the mini-probe
+    # found grok's hook wire goes SILENT while the permission prompt is on
+    # screen (54s/21s observed gaps; v0.2.39 has no fires-at-prompt event).
+    # `notification` is NOT it either — it is an INTERNAL hook-receipt
+    # (notificationType="xai_session", fired after every other hook; probe Q7,
+    # surprise #4); mapping it to waiting would flip the dot blue after every
+    # event, so it stays deliberately absent from this map and is ignored
+    # below. Instead, `waiting` is INFERRED laptop-side: this script
+    # phase-stamps pre_tool_use (below) and ProjectMan's StatusWatcher
+    # promotes working→waiting once the phase ages past 5s of wire silence.
 }
+
+# F11 phase-stamping: `pre_tool_use` fires BEFORE the permission prompt
+# (mini-probe), so it maps to working AND stamps `phase`/`phase_ts` into the
+# status payload — the silence-age signal StatusWatcher promotes to waiting
+# after 5s. Every OTHER state-writing event (post_tool_use,
+# post_tool_use_failure, permission_denied, stop, ...) rewrites the file
+# WITHOUT phase fields, which clears the stamp.
+# ACCEPTED LIMITATION (F11, also in the README): a long-running APPROVED tool
+# ages past 5s too and shows a transient false 'waiting', self-correcting the
+# moment post_tool_use lands — for PM's purpose a false "needs you" beats a
+# silently stalled session, and grok offers no fires-at-prompt event to do
+# better.
+PHASE_STAMP_EVENT = "pre_tool_use"
 
 # `session_end` → remove the status file (cleanup). Mirrors hook.js. NOTE the
 # probe found session_end does NOT fire in headless mode (Q7), so for headless
@@ -138,13 +154,19 @@ def main():
         return
 
     import time
+    now = int(time.time())
     status = {
         "state": state,
         "event": event_name,
         "cwd": cwd,
-        "ts": int(time.time()),
+        "ts": now,
         "session": session,
     }
+    if event_name == PHASE_STAMP_EVENT:
+        # F11: arm the watcher-side waiting timer. Only pre_tool_use stamps;
+        # every other event's write omits these keys (the clear).
+        status["phase"] = "pre_tool_use"
+        status["phase_ts"] = now
     tool = payload.get("toolName") or payload.get("tool_name")
     if tool:
         status["tool"] = tool

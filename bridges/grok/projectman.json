@@ -1,5 +1,5 @@
 {
-  "_comment": "ProjectMan status bridge for Grok Build (xAI 'grok'). Drop into ~/.grok/hooks/ (install.sh does this idempotently, and also flips [compat.claude] hooks=false so claude's hook.js does NOT double-fire on grok events). The command path below is rewritten by install.sh to the absolute installed script path. JSON hook KEYS are PascalCase (probe finding: the hook DEFINITION uses PascalCase; the env var GROK_HOOK_EVENT and the stdin payload's hookEventName are snake_case). The status script keys its state machine off the snake_case wire names. SessionStart/UserPromptSubmit/Stop drive the dots; the others are wired as future slots / no-ops the script ignores until the tool-turn mini-probe lands (see projectman-status.py).",
+  "_comment": "ProjectMan status bridge for Grok Build (xAI 'grok'). Installed into ~/.grok/hooks/ by install.sh or the Settings -> Agents button (both share the same install machinery, which also flips [compat.claude] hooks=false so claude's hook.js does NOT double-fire on grok events). The command paths below are rewritten AT INSTALL TIME to the absolute installed script path (F12b) — this repo copy keeps the portable ~ form; the installed copy never relies on grok shell-expanding '~'. JSON hook KEYS are PascalCase (probe finding: the hook DEFINITION uses PascalCase; the env var GROK_HOOK_EVENT and the stdin payload's hookEventName are snake_case). The status script keys its state machine off the snake_case wire names. SessionStart/UserPromptSubmit/Stop drive the dots; PreToolUse phase-stamps for the watcher-side waiting inference (F11); PostToolUse/PostToolUseFailure/PermissionDenied clear the phase; Notification is registered but ignored by the script (internal hook receipt).",
   "hooks": {
     "SessionStart": [
       { "hooks": [ { "type": "command", "command": "python3 ~/.grok/hooks/projectman-status.py", "timeout": 10 } ] }
@@ -14,6 +14,12 @@
       { "hooks": [ { "type": "command", "command": "python3 ~/.grok/hooks/projectman-status.py", "timeout": 10 } ] }
     ],
     "PostToolUse": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.grok/hooks/projectman-status.py", "timeout": 10 } ] }
+    ],
+    "PostToolUseFailure": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.grok/hooks/projectman-status.py", "timeout": 10 } ] }
+    ],
+    "PermissionDenied": [
       { "hooks": [ { "type": "command", "command": "python3 ~/.grok/hooks/projectman-status.py", "timeout": 10 } ] }
     ],
     "Notification": [

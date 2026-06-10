@@ -987,62 +987,140 @@ def get_adapter(agent_id, settings=None):
 # reused by both install.sh's intent and the GUI button.
 # ---------------------------------------------------------------------------
 
-# Where each agent's status bridge gets dropped, relative to $HOME. The grok
-# bridge is a JSON hook definition + an executable python3 script; the GUI
-# "Install bridge" button + install_agent_bridge copy the JSON definition into
-# ~/.grok/hooks/ (install.sh additionally drops the script and flips
-# [compat.claude] hooks=false — see install.sh's grok step).
-_BRIDGE_DEST = {
-    'opencode': '.config/opencode/plugins/projectman.js',
-    'grok': '.grok/hooks/projectman.json',
-}
-# The bridge source file within the app tree (bridges/<agent>/<file>).
-_BRIDGE_SRC = {
-    'opencode': ('opencode', 'projectman.js'),
-    'grok': ('grok', 'projectman.json'),
+def _grok_hook_json_transform(text, home):
+    """F12b: rewrite the hook commands to the absolute installed script path.
+
+    The repo copy of ``bridges/grok/projectman.json`` keeps the portable
+    ``python3 ~/.grok/hooks/projectman-status.py`` form; the INSTALLED copy
+    must not rely on grok shell-expanding ``~``, so install time rewrites every
+    command to ``python3 /abs/home/.grok/hooks/projectman-status.py``. JSON-
+    aware (parse → rewrite command fields → re-dump) so an exotic ``home`` path
+    can never break the JSON encoding; unparseable content is returned
+    untouched (copied verbatim — the selftest/bench would catch it).
+    """
+    import json as _json
+    import os as _os
+    script_abs = _os.path.join(home, '.grok', 'hooks', 'projectman-status.py')
+    try:
+        data = _json.loads(text)
+    except (ValueError, TypeError):
+        return text
+    hooks = data.get('hooks') if isinstance(data, dict) else None
+    if isinstance(hooks, dict):
+        for matchers in hooks.values():
+            if not isinstance(matchers, list):
+                continue
+            for matcher in matchers:
+                cmds = matcher.get('hooks') if isinstance(matcher, dict) else None
+                if not isinstance(cmds, list):
+                    continue
+                for cmd in cmds:
+                    if isinstance(cmd, dict) and isinstance(cmd.get('command'), str):
+                        cmd['command'] = cmd['command'].replace(
+                            '~/.grok/hooks/projectman-status.py', script_abs)
+    return _json.dumps(data, indent=2) + '\n'
+
+
+# Per-agent bridge manifest (F12a): the ONE definition of what files constitute
+# each agent's status bridge, shared by the GUI "Install bridge" button AND
+# install.sh (which delegates here via ``python3 -c``). Each entry:
+#   src        — source file within the app tree, (subdir, filename) under
+#                ``bridges/``
+#   dest       — destination path relative to $HOME
+#   executable — ensure the exec bit on the installed file (grok runs the
+#                status script directly)
+#   transform  — optional ``f(text, home) -> text`` applied to the content at
+#                install time (F12b: the grok JSON's absolute-path rewrite);
+#                idempotency compares the TRANSFORMED content to the dest.
+_BRIDGE_MANIFEST = {
+    'opencode': [
+        {'src': ('opencode', 'projectman.js'),
+         'dest': '.config/opencode/plugins/projectman.js',
+         'executable': False, 'transform': None},
+    ],
+    'grok': [
+        {'src': ('grok', 'projectman.json'),
+         'dest': '.grok/hooks/projectman.json',
+         'executable': False, 'transform': _grok_hook_json_transform},
+        {'src': ('grok', 'projectman-status.py'),
+         'dest': '.grok/hooks/projectman-status.py',
+         'executable': True, 'transform': None},
+    ],
 }
 
 
 def agent_bridge_source(app_dir, agent_id):
-    """Absolute path to ``agent_id``'s status-bridge source, or None.
+    """Absolute path to ``agent_id``'s PRIMARY status-bridge source, or None.
 
     ``app_dir`` is the installed/app directory (``bridges/`` lives under it).
-    Returns None when the agent has no bridge or the file is absent.
+    The primary source is the manifest's first entry (the hook/plugin
+    definition); the Settings page uses this for "does this agent have an
+    installable bridge". Returns None when the agent has no bridge or the
+    primary file is absent.
     """
     import os as _os
-    spec = _BRIDGE_SRC.get(agent_id)
-    if not spec:
+    manifest = _BRIDGE_MANIFEST.get(agent_id)
+    if not manifest:
         return None
-    path = _os.path.join(app_dir, 'bridges', *spec)
+    path = _os.path.join(app_dir, 'bridges', *manifest[0]['src'])
     return path if _os.path.exists(path) else None
 
 
 def install_agent_bridge(app_dir, agent_id, *, home=None):
-    """Copy ``agent_id``'s status bridge into its plugin dir (idempotent).
+    """Install ``agent_id``'s status bridge — ALL its files — idempotently.
 
-    Mirrors install.sh's drop-file step for the GUI button. Returns one of
-    ``'installed'`` | ``'already'`` | ``'no-bridge'`` | ``'missing-source'`` |
+    F12a: the install is manifest-driven and multi-file (grok = hook JSON +
+    executable status script; opencode = one plugin file), and this one
+    function is the shared machinery behind BOTH the GUI button and
+    install.sh's bridge steps — no second copy of the file list exists.
+    Per-file: content is transformed when the manifest says so (F12b — the
+    grok JSON gets its commands rewritten to the absolute installed script
+    path), compared against the existing dest (transformed-source vs dest, so
+    the rewrite stays idempotent), copied when missing/different, and given
+    the exec bit when required.
+
+    Returns ``'installed'`` (something was written/repaired) | ``'already'``
+    (every file present, current, and correctly executable) | ``'no-bridge'``
+    | ``'missing-source'`` (ANY manifest source absent → nothing installed) |
     ``'error'``. ``home`` overrides ``~`` for tests.
     """
     import os as _os
-    import shutil as _shutil
     if home is None:
         home = _os.path.expanduser('~')
-    dest_rel = _BRIDGE_DEST.get(agent_id)
-    if not dest_rel:
+    manifest = _BRIDGE_MANIFEST.get(agent_id)
+    if not manifest:
         return 'no-bridge'
-    src = agent_bridge_source(app_dir, agent_id)
-    if not src:
-        return 'missing-source'
-    dest = _os.path.join(home, dest_rel)
+    # Resolve and read every source first: a partial bridge must never land.
+    plans = []
+    for spec in manifest:
+        src = _os.path.join(app_dir, 'bridges', *spec['src'])
+        if not _os.path.exists(src):
+            return 'missing-source'
+        plans.append((src, spec))
+    changed = False
     try:
-        _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-        if _os.path.exists(dest):
-            with open(src, 'rb') as a, open(dest, 'rb') as b:
-                if a.read() == b.read():
-                    return 'already'
-        _shutil.copyfile(src, dest)
-        return 'installed'
+        for src, spec in plans:
+            with open(src, 'rb') as f:
+                content = f.read()
+            transform = spec.get('transform')
+            if transform is not None:
+                content = transform(content.decode('utf-8'), home).encode('utf-8')
+            dest = _os.path.join(home, spec['dest'])
+            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+            same = False
+            if _os.path.exists(dest):
+                with open(dest, 'rb') as f:
+                    same = f.read() == content
+            if not same:
+                with open(dest, 'wb') as f:
+                    f.write(content)
+                changed = True
+            if spec.get('executable'):
+                mode = _os.stat(dest).st_mode
+                if not (mode & 0o111):
+                    _os.chmod(dest, mode | 0o111)
+                    changed = True  # repairing a lost exec bit is a change
+        return 'installed' if changed else 'already'
     except OSError:
         return 'error'
 

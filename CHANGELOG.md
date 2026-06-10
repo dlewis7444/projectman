@@ -18,6 +18,17 @@ All notable changes to ProjectMan will be documented in this file.
 - The Grok ollama-pool recipe requires a per-model `api_key` in
   `~/.grok/config.toml` (any non-empty value) — without it grok forces a browser
   sign-in even for custom endpoints. Documented in the README.
+- **Grok `waiting` dot via phase aging.** Grok fires no hook event while its
+  permission prompt is on screen (the wire goes silent — bench mini-probe), so
+  the blue dot is now *inferred*: the bridge stamps a `phase`/`phase_ts` on
+  `pre_tool_use`, and ProjectMan promotes working → waiting when that phase
+  goes unanswered for 5 seconds (the watcher re-checks on a one-shot timer; no
+  extra processes). `post_tool_use`, `post_tool_use_failure`,
+  `permission_denied` (newly registered — a deny outcome, not a waiting
+  signal), `stop`, and a new prompt all clear the stamp. Known quirk
+  (documented): a long-running *approved* tool briefly shows a false `waiting`
+  that self-corrects when the tool completes. Claude/opencode status files
+  carry no phase fields and behave exactly as before.
 
 ### Changed
 - **install.sh disables grok's Claude-compat hooks (load-bearing).** grok reads
@@ -26,6 +37,17 @@ All notable changes to ProjectMan will be documented in this file.
   `[compat.claude] hooks = false` in `~/.grok/config.toml` — an idempotent,
   create-if-missing TOML edit that preserves every existing user key — making
   the grok bridge the sole status writer for grok sessions.
+
+### Fixed
+- **The Settings → Agents "Install bridge" button now installs the WHOLE grok
+  bridge.** The GUI path previously copied only the hook JSON — the status
+  script it points at never landed. Bridge installs are now manifest-driven and
+  multi-file (grok: JSON + executable script; opencode: one plugin file), with
+  `install.sh` and the GUI button sharing the same installer, so the two paths
+  can never drift.
+- **The installed grok hook JSON now carries the absolute script path.** The
+  command is rewritten at install time (both install paths) instead of relying
+  on grok shell-expanding `~`; the repo copy stays portable.
 
 ### Internal
 - **Unknown-agent fallback no longer hardcodes Claude (M-P3.2).** When a named

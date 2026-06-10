@@ -147,6 +147,99 @@ def test_bridge_uses_same_slug_rule_as_hookjs():
     assert _slug(cwd) == js_equiv
 
 
+# ── F11: phase stamping (the waiting-inference write contract) ────────────────
+# The bridge writes `phase=pre_tool_use, phase_ts=<epoch>` on pre_tool_use and
+# clears them on every other state-writing event; StatusWatcher promotes the
+# aged phase to 'waiting' (tested in test_model_settings.py). These pin the
+# WRITE half of the contract by driving the real script.
+
+def _seed_phase_file(home, cwd, *, event='__SENTINEL__'):
+    """A working file CARRYING phase fields, with a sentinel event marker so a
+    clearing rewrite is provable (event changes, phase keys vanish)."""
+    status_dir = os.path.join(str(home), '.ProjectMan', 'status')
+    os.makedirs(status_dir, exist_ok=True)
+    p = _status_path(home, cwd)
+    with open(p, 'w') as f:
+        json.dump({'state': 'working', 'event': event, 'cwd': cwd,
+                   'ts': 1, 'session': 'seed',
+                   'phase': 'pre_tool_use', 'phase_ts': 1}, f)
+    return p
+
+
+def test_pre_tool_use_stamps_phase(tmp_path):
+    """F11: pre_tool_use writes working PLUS phase/phase_ts (the watcher's
+    aging signal)."""
+    cwd = '/home/u/proj-grok'
+    _emit(tmp_path, 'pre_tool_use', cwd, payload={'toolName': 'run_terminal_command'})
+    s = _read(tmp_path, cwd)
+    assert s['state'] == 'working'
+    assert s['phase'] == 'pre_tool_use'
+    assert isinstance(s['phase_ts'], int) and s['phase_ts'] > 0
+    assert s['phase_ts'] == s['ts']
+
+
+def test_only_pre_tool_use_stamps(tmp_path):
+    """No other working-mapped event stamps a phase."""
+    cwd = '/home/u/proj-grok'
+    for ev in ('user_prompt_submit', 'post_tool_use', 'post_tool_use_failure',
+               'permission_denied', 'session_start', 'stop'):
+        _emit(tmp_path, ev, cwd, payload={})
+        s = _read(tmp_path, cwd)
+        assert 'phase' not in s and 'phase_ts' not in s, ev
+
+
+def test_post_tool_use_clears_phase(tmp_path):
+    """The clear: a phase-bearing file is REWRITTEN phase-less on
+    post_tool_use (tool completed → the prompt is gone)."""
+    cwd = '/home/u/proj-grok'
+    _seed_phase_file(tmp_path, cwd)
+    _emit(tmp_path, 'post_tool_use', cwd, payload={'toolName': 'Bash'})
+    s = _read(tmp_path, cwd)
+    assert s['event'] == 'post_tool_use'      # rewrite proven (sentinel gone)
+    assert s['state'] == 'working'
+    assert 'phase' not in s and 'phase_ts' not in s
+
+
+def test_permission_denied_maps_working_and_clears_phase(tmp_path):
+    """permission_denied is a deny OUTCOME (mini-probe leg 2c): working +
+    phase cleared; the stop(cancelled) that follows lands done."""
+    cwd = '/home/u/proj-grok'
+    _seed_phase_file(tmp_path, cwd)
+    _emit(tmp_path, 'permission_denied', cwd,
+          payload={'toolName': 'run_terminal_command'})
+    s = _read(tmp_path, cwd)
+    assert s['state'] == 'working'
+    assert 'phase' not in s and 'phase_ts' not in s
+    _emit(tmp_path, 'stop', cwd, payload={'reason': 'cancelled'})
+    s = _read(tmp_path, cwd)
+    assert s['state'] == 'done'
+    assert 'phase' not in s
+
+
+def test_stop_clears_phase(tmp_path):
+    cwd = '/home/u/proj-grok'
+    _seed_phase_file(tmp_path, cwd)
+    _emit(tmp_path, 'stop', cwd, payload={'reason': 'end_turn'})
+    s = _read(tmp_path, cwd)
+    assert s['state'] == 'done'
+    assert 'phase' not in s and 'phase_ts' not in s
+
+
+def test_notification_does_not_clear_phase(tmp_path):
+    """F11 sentinel no-write proof for the SILENT window: the notification
+    receipts that may land while the permission prompt is up must leave the
+    phase-bearing file entirely untouched (the aging phase IS the waiting
+    signal — clearing it would defeat the promotion)."""
+    cwd = '/home/u/proj-grok'
+    _seed_phase_file(tmp_path, cwd)
+    _emit(tmp_path, 'notification',
+          cwd, payload={'notificationType': 'xai_session'})
+    s = _read(tmp_path, cwd)
+    assert s['event'] == '__SENTINEL__'       # no rewrite
+    assert s['phase'] == 'pre_tool_use'       # phase intact
+    assert s['phase_ts'] == 1
+
+
 # ── T-B5: install.sh's [compat.claude] TOML merger (pure function) ────────────
 
 @pytest.fixture

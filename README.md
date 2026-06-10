@@ -221,11 +221,16 @@ the default in **Settings → Agents**.
   claude-code-router is involved.
 - **Status dots** require the grok status bridge. `install.sh` installs it into
   `~/.grok/hooks/` for you (idempotent — a JSON hook definition plus an
-  executable python3 status script), or install it from
-  **Settings → Agents → Install bridge**. See
-  [`bridges/grok/README.md`](bridges/grok/README.md). The `waiting` (blue) dot
-  is not wired yet — grok's permission-prompt hook event still needs to be
-  captured; `working` and `done` are correct today.
+  executable python3 status script; the JSON's command paths are rewritten to
+  the absolute script path at install time), or install it from
+  **Settings → Agents → Install bridge** (both share the same installer). See
+  [`bridges/grok/README.md`](bridges/grok/README.md).
+- **The `waiting` (blue) dot is inferred, with a known quirk.** Grok fires no
+  hook event while its permission prompt is on screen (the wire goes silent),
+  so ProjectMan infers `waiting` when a tool start goes unanswered for 5
+  seconds. Accepted limitation: a long-running *approved* tool also crosses
+  the 5s mark and briefly shows a false `waiting`, self-correcting the moment
+  the tool completes — a false "needs you" beats a silently stalled session.
 
 ### Grok + the ollama pool
 

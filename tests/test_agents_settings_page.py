@@ -56,18 +56,119 @@ def test_three_agents_registered_with_display_names():
     assert names['grok'] == 'Grok Build'
 
 
-def test_install_grok_bridge_copies_json_definition(tmp_path):
-    """install_agent_bridge drops the grok hook JSON into ~/.grok/hooks/."""
+# ── F12a/F12b: multi-file grok install + absolute-path rewrite ────────────────
+
+_GROK_JSON_FIXTURE = (
+    '{"hooks": {"Stop": [{"hooks": [{"type": "command", '
+    '"command": "python3 ~/.grok/hooks/projectman-status.py", '
+    '"timeout": 10}]}]}}'
+)
+
+
+def _app_with_grok_bridge(tmp_path, json_text=_GROK_JSON_FIXTURE,
+                          script_text='#!/usr/bin/env python3\n'):
     app = tmp_path / 'app'
     (app / 'bridges' / 'grok').mkdir(parents=True)
-    (app / 'bridges' / 'grok' / 'projectman.json').write_text('{"hooks":{}}')
+    (app / 'bridges' / 'grok' / 'projectman.json').write_text(json_text)
+    (app / 'bridges' / 'grok' / 'projectman-status.py').write_text(script_text)
+    return app
+
+
+def test_install_grok_bridge_lands_both_files(tmp_path):
+    """F12a BINDING: the GUI install path lands BOTH grok files — the hook JSON
+    AND the status script, script executable. (The pre-fix machinery copied
+    only the JSON; the referenced script never landed via the GUI button.)"""
+    app = _app_with_grok_bridge(tmp_path)
     home = tmp_path / 'home'
     home.mkdir()
     result = agents.install_agent_bridge(str(app), 'grok', home=str(home))
     assert result == 'installed'
-    dest = home / '.grok' / 'hooks' / 'projectman.json'
-    assert dest.exists()
-    assert dest.read_text() == '{"hooks":{}}'
+    json_dest = home / '.grok' / 'hooks' / 'projectman.json'
+    script_dest = home / '.grok' / 'hooks' / 'projectman-status.py'
+    assert json_dest.exists()
+    assert script_dest.exists()
+    assert os.access(str(script_dest), os.X_OK)   # exec bit set
+
+
+def test_install_grok_bridge_rewrites_command_to_absolute(tmp_path):
+    """F12b BINDING: the INSTALLED JSON carries the absolute script path —
+    nothing relies on grok shell-expanding `~`."""
+    import json as _json
+    app = _app_with_grok_bridge(tmp_path)
+    home = tmp_path / 'home'
+    home.mkdir()
+    agents.install_agent_bridge(str(app), 'grok', home=str(home))
+    installed = (home / '.grok' / 'hooks' / 'projectman.json').read_text()
+    expected_abs = str(home / '.grok' / 'hooks' / 'projectman-status.py')
+    data = _json.loads(installed)
+    cmds = [c['command']
+            for matchers in data['hooks'].values()
+            for m in matchers for c in m['hooks']]
+    assert cmds, 'no commands in installed JSON'
+    for cmd in cmds:
+        assert expected_abs in cmd
+        assert '~' not in cmd
+    # The SOURCE JSON in the app tree is untouched (stays portable).
+    src = (app / 'bridges' / 'grok' / 'projectman.json').read_text()
+    assert '~/.grok/hooks/projectman-status.py' in src
+
+
+def test_repo_grok_json_stays_portable():
+    """F12b: the repo copy keeps the portable `~` form (the rewrite is
+    install-time only)."""
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(repo, 'bridges', 'grok', 'projectman.json')).read()
+    assert 'python3 ~/.grok/hooks/projectman-status.py' in src
+
+
+def test_install_grok_bridge_idempotent_with_rewrite(tmp_path):
+    """The transform keeps idempotency: second run is 'already' (transformed
+    source compared against dest, not raw source)."""
+    app = _app_with_grok_bridge(tmp_path)
+    home = tmp_path / 'home'
+    home.mkdir()
+    assert agents.install_agent_bridge(str(app), 'grok', home=str(home)) == 'installed'
+    assert agents.install_agent_bridge(str(app), 'grok', home=str(home)) == 'already'
+
+
+def test_install_grok_bridge_repairs_lost_exec_bit(tmp_path):
+    """A dest script that lost its exec bit gets repaired (counts as a change)."""
+    app = _app_with_grok_bridge(tmp_path)
+    home = tmp_path / 'home'
+    home.mkdir()
+    agents.install_agent_bridge(str(app), 'grok', home=str(home))
+    script_dest = home / '.grok' / 'hooks' / 'projectman-status.py'
+    os.chmod(str(script_dest), 0o644)   # strip the bit
+    assert agents.install_agent_bridge(str(app), 'grok', home=str(home)) == 'installed'
+    assert os.access(str(script_dest), os.X_OK)
+    # And back to steady state.
+    assert agents.install_agent_bridge(str(app), 'grok', home=str(home)) == 'already'
+
+
+def test_install_grok_bridge_missing_script_is_missing_source(tmp_path):
+    """All-or-nothing: a JSON-only app tree (the script absent) installs
+    NOTHING — a partial bridge must never land."""
+    app = tmp_path / 'app'
+    (app / 'bridges' / 'grok').mkdir(parents=True)
+    (app / 'bridges' / 'grok' / 'projectman.json').write_text(_GROK_JSON_FIXTURE)
+    home = tmp_path / 'home'
+    home.mkdir()
+    assert agents.install_agent_bridge(str(app), 'grok', home=str(home)) == 'missing-source'
+    assert not (home / '.grok' / 'hooks' / 'projectman.json').exists()
+
+
+def test_install_real_repo_grok_bridge_end_to_end(tmp_path):
+    """Install the REAL repo bridge into a temp home: both files land, the
+    script is executable, the JSON commands are absolute."""
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    home = tmp_path / 'home'
+    home.mkdir()
+    assert agents.install_agent_bridge(repo, 'grok', home=str(home)) == 'installed'
+    script_dest = home / '.grok' / 'hooks' / 'projectman-status.py'
+    json_dest = home / '.grok' / 'hooks' / 'projectman.json'
+    assert script_dest.exists() and os.access(str(script_dest), os.X_OK)
+    assert str(script_dest) in json_dest.read_text()
+    assert agents.install_agent_bridge(repo, 'grok', home=str(home)) == 'already'
 
 
 # ── install_agent_bridge ──────────────────────────────────────────────────────

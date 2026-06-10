@@ -108,6 +108,36 @@ def sentinel_intact(cwd=PROJECT_CWD):
     return bool(s) and s.get("event") == SENTINEL_EVENT and s.get("state") == "done"
 
 
+def seed_sentinel_phase(cwd=PROJECT_CWD):
+    """Seed a working file CARRYING phase fields with a sentinel event marker.
+
+    The F11 clear-proof (sentinel technique): a clearing event must REWRITE the
+    file — provable because `event` changes off the sentinel — and the new
+    content must have NO phase keys. An event that must not touch the file
+    (notification) leaves the sentinel AND its phase fields intact.
+    """
+    os.makedirs(STATUS_DIR, exist_ok=True)
+    with open(status_path_for(cwd), "w") as f:
+        json.dump({"state": "working", "event": SENTINEL_EVENT, "cwd": cwd,
+                   "ts": 1, "session": "seed",
+                   "phase": "pre_tool_use", "phase_ts": 1}, f)
+
+
+def phase_sentinel_intact(cwd=PROJECT_CWD):
+    s = read_state(cwd)
+    return (bool(s) and s.get("event") == SENTINEL_EVENT
+            and s.get("phase") == "pre_tool_use" and s.get("phase_ts") == 1)
+
+
+def phase_cleared_by(event_name, expect_state, cwd=PROJECT_CWD):
+    """True iff the file was rewritten by ``event_name`` (sentinel gone), holds
+    ``expect_state``, and carries no phase keys."""
+    s = read_state(cwd)
+    return (bool(s) and s.get("event") == event_name
+            and s.get("state") == expect_state
+            and "phase" not in s and "phase_ts" not in s)
+
+
 # ── tally ──────────────────────────────────────────────────────────────────
 passed = 0
 failed = 0
@@ -192,6 +222,64 @@ def run():
     clear_status_file()
     emit("post_tool_use_failure", payload={})
     check("MAP post_tool_use_failure -> working", read_state()["state"] == "working")
+
+    clear_status_file()
+    emit("permission_denied", payload={"toolName": "run_terminal_command"})
+    check("MAP permission_denied -> working", read_state()["state"] == "working")
+
+    # =====================================================================
+    # PHASE (F11): pre_tool_use stamps phase/phase_ts; every other
+    # state-writing event clears them (sentinel rewrite-proof); notification
+    # leaves them — and the whole file — untouched.
+    # =====================================================================
+    clear_status_file()
+    emit("pre_tool_use", payload={"toolName": "Bash"})
+    s = read_state()
+    check("PHASE pre_tool_use stamps phase", s.get("phase") == "pre_tool_use")
+    check("PHASE pre_tool_use stamps phase_ts (epoch int)",
+          isinstance(s.get("phase_ts"), int) and s["phase_ts"] > 0)
+    check("PHASE phase_ts matches ts at stamp time", s.get("phase_ts") == s.get("ts"))
+
+    # Non-phase events must NOT stamp.
+    clear_status_file()
+    emit("user_prompt_submit", payload={})
+    s = read_state()
+    check("PHASE user_prompt_submit does NOT stamp",
+          "phase" not in s and "phase_ts" not in s)
+
+    # Clears: each terminal/resume event rewrites the file phase-less.
+    seed_sentinel_phase()
+    emit("post_tool_use", payload={"toolName": "Bash"})
+    check("PHASE post_tool_use clears phase (rewrite, no phase keys)",
+          phase_cleared_by("post_tool_use", "working"))
+
+    seed_sentinel_phase()
+    emit("post_tool_use_failure", payload={})
+    check("PHASE post_tool_use_failure clears phase",
+          phase_cleared_by("post_tool_use_failure", "working"))
+
+    seed_sentinel_phase()
+    emit("permission_denied", payload={"toolName": "run_terminal_command"})
+    check("PHASE permission_denied clears phase (deny outcome -> working)",
+          phase_cleared_by("permission_denied", "working"))
+
+    seed_sentinel_phase()
+    emit("stop", payload={"reason": "cancelled"})
+    check("PHASE stop(cancelled) clears phase -> done",
+          phase_cleared_by("stop", "done"))
+
+    seed_sentinel_phase()
+    emit("user_prompt_submit", payload={})
+    check("PHASE user_prompt_submit (new turn) clears phase",
+          phase_cleared_by("user_prompt_submit", "working"))
+
+    # notification must not clear the phase either — the file stays untouched
+    # ENTIRELY while the wire is silent under a permission prompt (that silence
+    # plus the aging phase IS the waiting signal; mini-probe).
+    seed_sentinel_phase()
+    emit("notification", payload={"notificationType": "xai_session"})
+    check("PHASE notification leaves phase-bearing file untouched",
+          phase_sentinel_intact())
 
     # =====================================================================
     # SESSION_END -> file removed (cleanup; TUI /quit path).

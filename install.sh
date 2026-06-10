@@ -219,55 +219,53 @@ register_claude_hooks() {
 info "Checking Claude Code hook registration ..."
 register_claude_hooks
 
-# ── opencode status bridge ──────────────────────────────────────────────────────
-# Drop the opencode status-bridge plugin into ~/.config/opencode/plugins/ so
-# opencode sessions light up the sidebar dots (the opencode half of the status
-# contract). Idempotent: only copies when missing or changed, mirroring the
-# hook-install pattern. opencode need not be installed for this to be harmless.
+# ── agent status bridges (shared manifest, F12a) ────────────────────────────────
+# Both bridge installs delegate to agents.install_agent_bridge — the SAME
+# manifest-driven machinery the Settings → Agents "Install bridge" button uses,
+# so install.sh and the GUI can never drift on what files constitute a bridge.
+# For grok that is the hook JSON (with its commands rewritten at install time
+# to the absolute script path, F12b — no reliance on grok expanding `~`) PLUS
+# the executable python3 status script; for opencode the single plugin file.
+# Idempotent; the agent need not be installed for this to be harmless.
+install_bridge_via_manifest() {
+    # $1 = agent id. Prints installed|already|<other> from the shared machinery.
+    PM_SRC="$SCRIPT_DIR" PM_AGENT="$1" python3 -c '
+import os, sys
+sys.path.insert(0, os.environ["PM_SRC"])
+import agents
+print(agents.install_agent_bridge(os.environ["PM_SRC"], os.environ["PM_AGENT"]))
+' 2>/dev/null
+}
+
 OPENCODE_BRIDGE_STATUS="skipped"  # one of: installed, already, skipped
 install_opencode_bridge() {
-    local src="$SCRIPT_DIR/bridges/opencode/projectman.js"
-    if [[ ! -f "$src" ]]; then
-        return 0  # nothing to install (shouldn't happen in a full checkout)
-    fi
-    mkdir -p "$OPENCODE_PLUGIN_DIR"
-    if [[ -f "$OPENCODE_PLUGIN_DEST" ]] && cmp -s "$src" "$OPENCODE_PLUGIN_DEST"; then
-        OPENCODE_BRIDGE_STATUS="already"
-        return 0
-    fi
-    cp "$src" "$OPENCODE_PLUGIN_DEST"
-    OPENCODE_BRIDGE_STATUS="installed"
+    local result
+    result=$(install_bridge_via_manifest opencode) || result=""
+    case "$result" in
+        installed) OPENCODE_BRIDGE_STATUS="installed" ;;
+        already)   OPENCODE_BRIDGE_STATUS="already" ;;
+        *)         OPENCODE_BRIDGE_STATUS="skipped" ;;
+    esac
 }
 
 info "Installing opencode status bridge ..."
 install_opencode_bridge
 
 # ── grok status bridge ──────────────────────────────────────────────────────────
-# Install the Grok Build status bridge into ~/.grok/hooks/ (a JSON hook
-# definition + an executable python3 status script), and disable grok's
-# claude-compat hooks so Claude's hook.js does NOT double-fire on grok events
-# (F4 — our grok bridge becomes the sole status writer for grok sessions).
-# Idempotent, mirroring the opencode step. grok need not be installed for this
-# to be harmless.
+# The bridge files land via the shared manifest above; additionally disable
+# grok's claude-compat hooks so Claude's hook.js does NOT double-fire on grok
+# events (F4 — our grok bridge becomes the sole status writer for grok
+# sessions).
 GROK_BRIDGE_STATUS="skipped"   # one of: installed, already, skipped
 GROK_COMPAT_STATUS="skipped"   # one of: installed, already, skipped
 install_grok_bridge() {
-    local json_src="$SCRIPT_DIR/bridges/grok/projectman.json"
-    local script_src="$SCRIPT_DIR/bridges/grok/projectman-status.py"
-    if [[ ! -f "$json_src" || ! -f "$script_src" ]]; then
-        return 0  # nothing to install (shouldn't happen in a full checkout)
-    fi
-    mkdir -p "$GROK_HOOKS_DIR"
-    local changed=false
-    if [[ -f "$GROK_HOOK_JSON_DEST" ]] && cmp -s "$json_src" "$GROK_HOOK_JSON_DEST" \
-       && [[ -f "$GROK_HOOK_SCRIPT_DEST" ]] && cmp -s "$script_src" "$GROK_HOOK_SCRIPT_DEST"; then
-        GROK_BRIDGE_STATUS="already"
-    else
-        cp "$json_src" "$GROK_HOOK_JSON_DEST"
-        cp "$script_src" "$GROK_HOOK_SCRIPT_DEST"
-        chmod +x "$GROK_HOOK_SCRIPT_DEST"
-        GROK_BRIDGE_STATUS="installed"
-    fi
+    local result
+    result=$(install_bridge_via_manifest grok) || result=""
+    case "$result" in
+        installed) GROK_BRIDGE_STATUS="installed" ;;
+        already)   GROK_BRIDGE_STATUS="already" ;;
+        *)         GROK_BRIDGE_STATUS="skipped" ;;
+    esac
 
     # Idempotent TOML edit: [compat.claude] hooks = false, create-if-missing,
     # preserving every existing user key/section (delegated to the pure,

@@ -351,3 +351,183 @@ def test_status_watcher_start_monitors_both_dirs(tmp_path, monkeypatch):
     assert new_dir.is_dir() and legacy_dir.is_dir()   # created if missing
     for m in w._monitors:
         m.cancel()
+
+
+# ── StatusWatcher phase aging — F11 working→waiting promotion ─────────────────
+# The grok bridge phase-stamps `pre_tool_use` (grok's wire goes silent under a
+# permission prompt — mini-probe); the watcher promotes working→waiting once
+# the phase ages past model.PHASE_WAITING_THRESHOLD. Injected clock + scheduler
+# make the aging deterministic. Snapshots WITHOUT phase fields must behave
+# byte-identically to the pre-F11 watcher (claude/opencode regression pins).
+
+def _write_phase_status(dirpath, fname, cwd, state, ts, *, phase=None,
+                        phase_ts=None, session='s'):
+    data = {'state': state, 'event': 'pre_tool_use', 'cwd': cwd, 'ts': ts,
+            'session': session}
+    if phase is not None:
+        data['phase'] = phase
+    if phase_ts is not None:
+        data['phase_ts'] = phase_ts
+    (dirpath / fname).write_text(json.dumps(data))
+
+
+class _FakeScheduler:
+    """Captures (seconds, callback) pairs; tests fire callbacks manually."""
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, seconds, callback):
+        self.calls.append((seconds, callback))
+
+
+def _aging_watcher(tmp_path, monkeypatch, *, now):
+    import model
+    monkeypatch.setattr(model, 'STATUS_DIR', str(tmp_path))
+    clock = {'now': now}
+    sched = _FakeScheduler()
+    w = StatusWatcher(now_fn=lambda: clock['now'], schedule_fn=sched)
+    return w, clock, sched
+
+
+def test_phase_aged_past_threshold_promotes_to_waiting(tmp_path, monkeypatch):
+    """T-F11: working + phase=pre_tool_use older than the threshold reads as
+    'waiting' (the silent permission prompt inference)."""
+    proj_dir = tmp_path / 'p'
+    proj_dir.mkdir()
+    proj = Project(name='p', path=os.path.realpath(str(proj_dir)))
+    _write_phase_status(tmp_path, 'p.json', proj.path, 'working', 1000,
+                        phase='pre_tool_use', phase_ts=1000)
+    w, clock, sched = _aging_watcher(tmp_path, monkeypatch, now=1010.0)  # age 10s
+    w._reload()
+    assert w.get_project_status(proj) == 'waiting'
+    # Already past the threshold → nothing to arm.
+    assert sched.calls == []
+
+
+def test_phase_at_exact_threshold_promotes(tmp_path, monkeypatch):
+    """Promotion semantics are age >= threshold ('ages past 5s')."""
+    import model
+    proj_dir = tmp_path / 'p'
+    proj_dir.mkdir()
+    proj = Project(name='p', path=os.path.realpath(str(proj_dir)))
+    _write_phase_status(tmp_path, 'p.json', proj.path, 'working', 1000,
+                        phase='pre_tool_use', phase_ts=1000)
+    w, clock, sched = _aging_watcher(
+        tmp_path, monkeypatch, now=1000.0 + model.PHASE_WAITING_THRESHOLD)
+    w._reload()
+    assert w.get_project_status(proj) == 'waiting'
+
+
+def test_phase_fresh_stays_working_and_arms_timer(tmp_path, monkeypatch):
+    """An un-aged phase reads 'working' AND arms a one-shot re-emit for the
+    threshold crossing; firing it after the clock passes the threshold
+    re-publishes and the status reads 'waiting'."""
+    import model
+    proj_dir = tmp_path / 'p'
+    proj_dir.mkdir()
+    proj = Project(name='p', path=os.path.realpath(str(proj_dir)))
+    _write_phase_status(tmp_path, 'p.json', proj.path, 'working', 1000,
+                        phase='pre_tool_use', phase_ts=1000)
+    w, clock, sched = _aging_watcher(tmp_path, monkeypatch, now=1002.0)  # age 2s
+    emits = []
+    w.connect('status-changed', lambda *_: emits.append(1))
+    w._reload()
+    assert w.get_project_status(proj) == 'working'   # not aged yet
+    assert len(sched.calls) == 1
+    delay, callback = sched.calls[0]
+    # remaining = threshold - age = 3s, plus the small cushion.
+    assert 3.0 <= delay <= 3.2
+    emits_before = len(emits)
+    # The clock crosses the threshold; the timer fires.
+    clock['now'] = 1000.0 + model.PHASE_WAITING_THRESHOLD + 0.1
+    assert callback() is False                       # one-shot
+    assert len(emits) == emits_before + 1            # re-emitted
+    assert w.get_project_status(proj) == 'waiting'   # now promoted
+    # The re-publish armed nothing further (already past threshold).
+    assert len(sched.calls) == 1
+
+
+def test_phase_cleared_file_reads_working_no_timer(tmp_path, monkeypatch):
+    """A phase-less rewrite (post_tool_use's clear) reads working; no timer."""
+    proj_dir = tmp_path / 'p'
+    proj_dir.mkdir()
+    proj = Project(name='p', path=os.path.realpath(str(proj_dir)))
+    _write_phase_status(tmp_path, 'p.json', proj.path, 'working', 1000,
+                        phase='pre_tool_use', phase_ts=1000)
+    w, clock, sched = _aging_watcher(tmp_path, monkeypatch, now=1002.0)
+    w._reload()
+    assert len(sched.calls) == 1
+    # The bridge clears the phase (tool completed) before the threshold.
+    _write_phase_status(tmp_path, 'p.json', proj.path, 'working', 1003)
+    w._reload()
+    clock['now'] = 1020.0   # way past what WOULD have been the threshold
+    assert w.get_project_status(proj) == 'working'   # no phase → no promotion
+    assert len(sched.calls) == 1                     # no new timer armed
+
+
+def test_phase_stale_timer_dies_silently_on_newer_publish(tmp_path, monkeypatch):
+    """Generation guard: a timer armed before a newer publish must not emit."""
+    proj_dir = tmp_path / 'p'
+    proj_dir.mkdir()
+    proj = Project(name='p', path=os.path.realpath(str(proj_dir)))
+    _write_phase_status(tmp_path, 'p.json', proj.path, 'working', 1000,
+                        phase='pre_tool_use', phase_ts=1000)
+    w, clock, sched = _aging_watcher(tmp_path, monkeypatch, now=1002.0)
+    w._reload()
+    stale_delay, stale_cb = sched.calls[0]
+    # A newer publish supersedes (file cleared, fresh _reload bumps the gen).
+    _write_phase_status(tmp_path, 'p.json', proj.path, 'working', 1003)
+    w._reload()
+    emits = []
+    w.connect('status-changed', lambda *_: emits.append(1))
+    clock['now'] = 1010.0
+    assert stale_cb() is False
+    assert emits == []   # stale generation: died without emitting
+
+
+def test_phase_promotion_only_for_working_state(tmp_path, monkeypatch):
+    """A stray phase on a non-working snapshot never promotes (done stays
+    done) and arms nothing."""
+    proj_dir = tmp_path / 'p'
+    proj_dir.mkdir()
+    proj = Project(name='p', path=os.path.realpath(str(proj_dir)))
+    _write_phase_status(tmp_path, 'p.json', proj.path, 'done', 1000,
+                        phase='pre_tool_use', phase_ts=1000)
+    w, clock, sched = _aging_watcher(tmp_path, monkeypatch, now=1020.0)
+    w._reload()
+    assert w.get_project_status(proj) == 'done'
+    assert sched.calls == []
+
+
+def test_no_phase_snapshot_byte_identical_behavior(tmp_path, monkeypatch):
+    """REGRESSION PIN (claude/opencode): snapshots without phase fields keep
+    the dataclass defaults, never promote, and never arm a timer — for every
+    state the other bridges write."""
+    proj_dir = tmp_path / 'p'
+    proj_dir.mkdir()
+    proj = Project(name='p', path=os.path.realpath(str(proj_dir)))
+    w, clock, sched = _aging_watcher(tmp_path, monkeypatch, now=99999.0)
+    for state in ('working', 'waiting', 'done'):
+        _write_phase_status(tmp_path, 'p.json', proj.path, state, 1000)
+        w._reload()
+        snap = w._status[proj.path]
+        assert snap.phase is None and snap.phase_ts == 0   # defaults
+        assert w.get_project_status(proj) == state          # passthrough
+    assert sched.calls == []                                # never armed
+
+
+def test_phase_garbage_phase_ts_tolerated(tmp_path, monkeypatch):
+    """A non-numeric phase_ts (a corrupt writer) parses to 0 → no promotion,
+    no timer, no crash."""
+    proj_dir = tmp_path / 'p'
+    proj_dir.mkdir()
+    proj = Project(name='p', path=os.path.realpath(str(proj_dir)))
+    (tmp_path / 'p.json').write_text(json.dumps({
+        'state': 'working', 'event': 'pre_tool_use', 'cwd': proj.path,
+        'ts': 1000, 'session': 's', 'phase': 'pre_tool_use',
+        'phase_ts': 'not-a-number',
+    }))
+    w, clock, sched = _aging_watcher(tmp_path, monkeypatch, now=2000.0)
+    w._reload()
+    assert w.get_project_status(proj) == 'working'
+    assert sched.calls == []
