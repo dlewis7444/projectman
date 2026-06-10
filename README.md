@@ -141,6 +141,65 @@ You can also edit this file from within ProjectMan via **Settings → Claude JSO
 
 Status dots work without this step — they just won't update in real time until hooks are configured.
 
+## Using opencode
+
+ProjectMan can drive [opencode](https://opencode.ai) as a first-class agent
+alongside Claude Code. Pick it per project from the sidebar right-click
+**Agent** submenu, or set it as the default in **Settings → Agents**.
+
+- **Spawn / continue / resume** map to `opencode`, `opencode -c`, and
+  `opencode -s <id>`; the session-history expander lists a project's recent
+  opencode sessions via `opencode session list`, run **from the project
+  directory** (the command is cwd-scoped). A storage-scan fallback exists for
+  old opencode builds that kept per-session JSON files on disk; current builds
+  store sessions in SQLite (`opencode.db`), which the fallback does not read —
+  on those versions the CLI is the only session source (SQLite support is
+  planned P3 hardening).
+- **Per-project model** is passed verbatim as `-m <provider>/<model>` — e.g.
+  `ollama/qwen3.5:cloud`. opencode is natively multi-provider, so no
+  claude-code-router is involved.
+- **Status dots** require the opencode status bridge plugin. `install.sh`
+  drops it into `~/.config/opencode/plugins/projectman.js` for you (idempotent),
+  or install it from **Settings → Agents → Install bridge**. See
+  [`bridges/opencode/README.md`](bridges/opencode/README.md).
+
+### opencode + the ollama pool: the `opencode run` empty-render note
+
+On some opencode builds, scripting it **headlessly** with
+`opencode run -m ollama/...` against an Ollama/OpenAI-compatible endpoint
+prints **empty output** with exit code 0 even though the endpoint returned a
+valid answer. Verified so far: opencode **1.16.2** exhibits it while
+**1.2.15** renders the same command correctly against the same endpoint and an
+equivalent provider config — so it is opencode-version-dependent, not an
+endpoint or config-shape problem. The endpoint was independently exonerated
+(it returns the answer, plus a nonstandard `reasoning` field from the
+OpenAI-compat layer). The leading hypothesis — unconfirmed — is that the
+affected renderer mishandles responses carrying that `reasoning` field,
+folding the answer into the thinking channel that `--thinking`
+(off by default) controls.
+
+ProjectMan itself spawns the **interactive TUI** (`opencode` / `opencode -c`),
+not the headless `run` path, so PM sessions may be unaffected — that is the
+first thing to determine on an affected build. If you hit the empty render in
+your own `opencode run` scripting: try `--thinking`, and try a different
+opencode version. A known-good ollama provider shape for
+`~/.config/opencode/opencode.json` (verified working on 1.2.15 — note the
+models need **no** special flags):
+
+```jsonc
+{
+  "model": "ollama/qwen3.5:cloud",
+  "provider": {
+    "ollama": {
+      "name": "Ollama",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://<host>:11434/v1" },
+      "models": { "qwen3.5:cloud": { "name": "qwen3.5:cloud" } }
+    }
+  }
+}
+```
+
 ## Updating
 
 ```bash
@@ -178,10 +237,12 @@ python -m pytest
 |------|---------|
 | `~/.ProjectMan/settings.json` | App settings |
 | `~/.ProjectMan/session.json` | Session restore data |
+| `~/.ProjectMan/status/` | Per-project agent status files (agent-neutral location) |
 | `~/.ProjectMan/projects/` | Default projects directory |
 | `~/.ProjectMan/paa-ledger.json` | PAA findings ledger |
 | `~/.claude/projectman/hook.js` | Claude Code hook script for status updates |
 | `~/.claude/settings.json` | Claude Code settings (hook registration) |
+| `~/.config/opencode/plugins/projectman.js` | opencode status bridge plugin |
 
 ## License
 

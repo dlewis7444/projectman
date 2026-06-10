@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 // hook.js — Claude Code hook handler (per-project status files)
-// Reads hook event JSON from stdin, writes/deletes ~/.claude/projectman/status/<slug>.json
+// Reads hook event JSON from stdin, writes/deletes ~/.ProjectMan/status/<slug>.json
+// (the agent-neutral status dir, Decision 2). ProjectMan's StatusWatcher also
+// reads the legacy ~/.claude/projectman/status/ dir during the deprecation
+// window, so an un-updated install keeps working.
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
 
-const STATUS_DIR = path.join(os.homedir(), '.claude', 'projectman', 'status')
+const STATUS_DIR = path.join(os.homedir(), '.ProjectMan', 'status')
 
 const STATE = {
   SessionStart: 'done',      Stop: 'done',

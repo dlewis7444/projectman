@@ -24,6 +24,21 @@ def _isolate_projectman_paths(tmp_path_factory, monkeypatch):
         str(fake_home / 'settings.json'),
         raising=False,
     )
+    # StatusWatcher now DUAL-watches the new (~/.ProjectMan/status) and legacy
+    # (~/.claude/projectman/status) dirs. Point the legacy dir at a fresh,
+    # non-existent temp path so a developer's real status files never bleed into
+    # a test that asserts on _reload() output. Tests that exercise the new dir
+    # monkeypatch model.STATUS_DIR themselves; this just neutralizes the legacy
+    # half by default. Tests covering the dual-watch merge override both.
+    try:
+        import model
+        monkeypatch.setattr(
+            model, 'LEGACY_STATUS_DIR',
+            str(fake_home / '_legacy_status_absent'),
+            raising=False,
+        )
+    except ImportError:
+        pass
     try:
         import paa_monitor
         monkeypatch.setattr(

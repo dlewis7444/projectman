@@ -9,7 +9,13 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import GObject, Gio, GLib
 
 
-STATUS_DIR = os.path.expanduser('~/.claude/projectman/status')
+# Canonical, agent-neutral status dir (PM-owned, Decision 2). The opencode
+# bridge and (now) hook.js both write here.
+STATUS_DIR = os.path.expanduser('~/.ProjectMan/status')
+# Legacy Claude-scoped dir. StatusWatcher dual-watches it through the
+# deprecation window (dropped at the P4 release) so an unmigrated hook.js or a
+# stale status file keeps lighting dots.
+LEGACY_STATUS_DIR = os.path.expanduser('~/.claude/projectman/status')
 HISTORY_FILE = os.path.expanduser('~/.claude/history.jsonl')
 
 
@@ -173,13 +179,23 @@ class StatusWatcher(GObject.GObject):
     def __init__(self):
         super().__init__()
         self._status: dict = {}
-        self._monitor = None
+        self._monitors = []
+
+    @staticmethod
+    def _status_dirs():
+        """Dual-watch dirs (Decision 2), read dynamically so tests that
+        monkeypatch ``model.STATUS_DIR``/``LEGACY_STATUS_DIR`` are honored.
+        Order: legacy first, new last (new supersedes on a same-cwd tie)."""
+        return (LEGACY_STATUS_DIR, STATUS_DIR)
 
     def start(self):
-        os.makedirs(STATUS_DIR, exist_ok=True)
-        f = Gio.File.new_for_path(STATUS_DIR)
-        self._monitor = f.monitor_directory(Gio.FileMonitorFlags.NONE, None)
-        self._monitor.connect('changed', self._on_changed)
+        self._monitors = []
+        for d in self._status_dirs():
+            os.makedirs(d, exist_ok=True)
+            f = Gio.File.new_for_path(d)
+            mon = f.monitor_directory(Gio.FileMonitorFlags.NONE, None)
+            mon.connect('changed', self._on_changed)
+            self._monitors.append(mon)
         self._reload()
 
     def force_poll(self):
@@ -198,8 +214,20 @@ class StatusWatcher(GObject.GObject):
 
     def _reload(self):
         new_status = {}
-        try:
-            for entry in os.scandir(STATUS_DIR):
+        scanned_any = False
+        # Scan both dirs, newest-ts-wins per cwd. The new dir is scanned LAST so
+        # that on a tie it supersedes a legacy file for the same cwd (the
+        # migration direction). A missing dir is skipped, not fatal — as long as
+        # ONE dir scanned we publish; if both are gone we keep prior status.
+        for d in self._status_dirs():
+            try:
+                entries = list(os.scandir(d))
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except Exception:
+                continue  # PermissionError etc. — skip this dir, try the other
+            scanned_any = True
+            for entry in entries:
                 if not entry.name.endswith('.json'):
                     continue
                 try:
@@ -212,24 +240,30 @@ class StatusWatcher(GObject.GObject):
                         key = os.path.realpath(cwd)
                     except OSError:
                         continue
+                    ts = data.get('ts', 0)
                     # Each status file represents a single cwd. Worktree
                     # status files are NOT rolled up to the parent project —
-                    # they're independent Claude sessions in independent
+                    # they're independent agent sessions in independent
                     # cwds, and conflating them lets stale worktree state
                     # leak into the parent's dot when a worktree session
-                    # exits non-gracefully.
+                    # exits non-gracefully. When the same cwd appears in both
+                    # dirs, the newer ts wins (>= so the later-scanned new dir
+                    # supersedes a same-ts legacy file).
+                    existing = new_status.get(key)
+                    if existing is not None and existing.ts > ts:
+                        continue
                     new_status[key] = StatusSnapshot(
                         event=data.get('event', ''),
                         cwd=cwd,
-                        ts=data.get('ts', 0),
+                        ts=ts,
                         session=data.get('session', ''),
                         tool=data.get('tool'),
                         state=data.get('state', 'done'),
                     )
                 except (OSError, json.JSONDecodeError):
                     continue
-        except Exception:
-            return  # PermissionError or missing dir — keep previous status
+        if not scanned_any:
+            return  # both dirs gone/unreadable — keep previous status
         self._status = new_status
         self.emit('status-changed')
 

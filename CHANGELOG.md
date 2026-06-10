@@ -2,6 +2,65 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **opencode is a first-class second agent.** Pick it per project from the
+  sidebar right-click **Agent** submenu, or as the default in **Settings →
+  Agents**. Spawn/continue/resume map to `opencode` / `opencode -c` /
+  `opencode -s <id>`; the session-history expander lists a project's recent
+  opencode sessions via `opencode session list --format json` run **from the
+  project directory** (the command is cwd-scoped) and filtered by each entry's
+  directory. A storage-scan fallback covers old opencode builds with the
+  per-session file layout; current builds store sessions in SQLite, where the
+  CLI is the only session source (SQLite read support is P3 hardening).
+  Per-project model is passed natively as `-m <provider>/<model>` (e.g.
+  `ollama/qwen3.5:cloud`) — no claude-code-router involved. Full core
+  experience with zero Claude Code installed.
+- **Agent submenu** on each project row (stateful-radio, mirroring the Model
+  submenu): Claude Code / opencode / Follow default, writing `agent_overrides`.
+  A live session whose agent or model no longer matches offers a restart
+  prompt. The row shows an effective-agent subtitle (+ model when set).
+- **opencode status bridge** (`bridges/opencode/projectman.js`): a small
+  opencode plugin that lights up the sidebar status dots for opencode sessions,
+  mapping its lifecycle events onto ProjectMan's status schema. `install.sh`
+  installs it idempotently into `~/.config/opencode/plugins/`; there is also an
+  **Install bridge** button (and a doctor-lite binary check) in **Settings →
+  Agents**.
+- **Agent-neutral status directory** `~/.ProjectMan/status/` (Decision 2). The
+  opencode bridge and `hook.js` both write here; `StatusWatcher` dual-watches
+  the new and the legacy `~/.claude/projectman/status/` dirs through a
+  deprecation window so existing installs keep working.
+
+### Changed
+- **De-Clauded UI strings** now that agents are pluggable: the empty-state
+  placeholder ("start a session"), the close-while-working dialog ("Work is
+  currently in progress on…"), the deactivate-session tooltip, and the ntfy
+  payload ("<project> finished" instead of "Claude finished"). Claude naming
+  stays where the thing *is* Claude (PAA, ccr pages, the Claude JSON editor).
+- **Signal `project-new-claude` → `project-new-session`** (sidebar ↔ window),
+  and the spawn API neutralized to `spawn_continue`/`spawn_fresh`/
+  `spawn_resume` (the `spawn_claude` alias is retained, deprecated).
+
+### Internal
+- **The agent seam is now load-bearing (P1-review mandates M1-M3, m1-m3).**
+  Every consumer that previously reached around the P1 seam now goes through
+  it: the sidebar expander consumes `adapter.list_sessions(project)` returning
+  `SessionRef`s (`.id`, not `.session_id`; `HistoryReader` is Claude-internal
+  plumbing); restore threads `load_agents()` so a project recreates its saved
+  agent (**saved-agent-wins on restore; settings-wins on new activations**),
+  with `TerminalView` taking an explicit construction-time agent id; the zellij
+  env decision moved behind `adapter.zellij_spawn_env()` (no `_claude_env`, no
+  hardcoded `ANTHROPIC_*` list in `terminal.py`); `spawn_plan` is uniform across
+  adapters with ccr test-injection off the protocol signature; the Model/
+  expander/resume UI gate on `caps.model_select`/`caps.sessions`/
+  `caps.resume_by_id`; and `resolve_adapter()` distinguishes a named-but-missing
+  agent so `window.py` can show a one-shot "agent 'X' not available" toast.
+- opencode session-list parsing is fixture-tested (recorded shapes under
+  `tests/fixtures/opencode/`, marked to-be-verified on the VM gate); the parser
+  is layered and defensive (JSON CLI → storage scan) against opencode's
+  cross-version CLI/storage drift.
+
 ## [1.0.3] - 2026-06-09
 
 ### Fixed
