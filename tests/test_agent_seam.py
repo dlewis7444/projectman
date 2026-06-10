@@ -946,9 +946,13 @@ class TestRegisterAdapterCollisionGuard:
 
     def test_a3_builtin_ids_constant_matches_shipped(self):
         """The builtins frozenset matches the shipped adapters (the source of
-        'builtins win')."""
+        'builtins win'). P3 added grok as the third builtin — registered in
+        ADAPTERS at import, so BUILTIN_AGENT_IDS = frozenset(ADAPTERS) picks it
+        up automatically."""
         import agents
-        assert agents.BUILTIN_AGENT_IDS == frozenset({'claude', 'opencode'})
+        assert agents.BUILTIN_AGENT_IDS == frozenset({'claude', 'opencode', 'grok'})
+        # Grok is genuinely a builtin → it can't be replaced by a custom adapter.
+        assert 'grok' in agents.BUILTIN_AGENT_IDS
 
 
 # --- A4 / M-P3.1 verify-only: rich_status gates the sidebar dot remap --------

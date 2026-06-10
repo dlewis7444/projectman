@@ -219,6 +219,82 @@ def test_agent_submenu_lists_registered_adapters():
     assert 'opencode' in labels
 
 
+def test_agent_submenu_lists_three_agents_including_grok(monkeypatch):
+    """T-B4: the third agent (Grok Build) appears in the Agent submenu model by
+    construction — the submenu iterates agents.ADAPTERS, so grok shows up with
+    no sidebar code change."""
+    from settings import Settings
+    from gi.repository import GLib
+    row = _make_row_with_settings(Settings(agent_default='claude'))
+    labels = []
+    for i in range(row._agent_submenu.get_n_items()):
+        v = row._agent_submenu.get_item_attribute_value(i, 'label', GLib.VariantType('s'))
+        if v:
+            labels.append(v.get_string())
+    assert 'Claude Code' in labels
+    assert 'opencode' in labels
+    assert 'Grok Build' in labels
+
+
+def test_grok_override_selects_grok_adapter(monkeypatch):
+    """T-B4: a per-project grok override resolves the row to the GrokAdapter
+    (full caps → Model submenu + expander arrow visible)."""
+    from settings import Settings
+    s = Settings(agent_default='claude', agent_overrides={'/tmp/g': 'grok'})
+    row = _make_row_with_settings(s, path='/tmp/g')
+    assert row._adapter().id == 'grok'
+    assert 'Model' in _menu_labels(row)
+    assert row._arrow.get_visible() is True
+
+
+def test_f9_settings_threaded_into_get_adapter(monkeypatch):
+    """F9 / T-B4: the sidebar's get_adapter call now passes settings, so a
+    named-but-missing agent gates on the M-P3.2 fallback (agent_default →
+    first-available), NOT a hardcoded claude.
+
+    Modelled against a claude-LESS fleet so 'falls back to the configured
+    default' is provably the mechanism: agent_default=grok + a bogus override →
+    the row resolves to grok (the default), not claude. Without threading
+    settings, get_adapter('bogus') would return the legacy claude default and
+    this would fail."""
+    import agents
+    from settings import Settings
+    # Snapshot/restore ADAPTERS so the claude-less fleet doesn't leak.
+    saved = dict(agents.ADAPTERS)
+    try:
+        s = Settings(agent_default='grok', agent_overrides={'/tmp/p': 'bogus'})
+        row = _make_row_with_settings(s, path='/tmp/p')
+        # effective agent for the project is the bogus override...
+        assert s.effective_agent('/tmp/p') == 'bogus'
+        # ...but the row's adapter is the settings-aware fallback: grok (the
+        # configured default), never a hardcoded claude.
+        assert row._adapter().id == 'grok'
+    finally:
+        agents.ADAPTERS.clear()
+        agents.ADAPTERS.update(saved)
+
+
+def test_f9_settings_threaded_first_available_when_default_also_bogus(monkeypatch):
+    """F9: agent_default ALSO bogus → first-available registered adapter (still
+    settings-aware, proven against a fleet with claude removed)."""
+    import agents
+    from settings import Settings
+    saved = dict(agents.ADAPTERS)
+    try:
+        # Remove claude so 'first-available' is provably opencode, not claude.
+        opencode = saved['opencode']
+        agents.ADAPTERS.clear()
+        agents.ADAPTERS['opencode'] = opencode
+        agents.ADAPTERS.update({k: v for k, v in saved.items()
+                                if k not in ('opencode', 'claude')})
+        s = Settings(agent_default='alsobogus', agent_overrides={'/tmp/p': 'bogus'})
+        row = _make_row_with_settings(s, path='/tmp/p')
+        assert row._adapter().id == 'opencode'  # first-available, NOT claude
+    finally:
+        agents.ADAPTERS.clear()
+        agents.ADAPTERS.update(saved)
+
+
 def test_agent_submenu_present_in_menu():
     from settings import Settings
     row = _make_row_with_settings(Settings())

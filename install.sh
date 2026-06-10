@@ -9,6 +9,10 @@ DESKTOP_DIR="$HOME/.local/share/applications"
 HOOK_DEST="$HOME/.claude/projectman/hook.js"
 OPENCODE_PLUGIN_DIR="$HOME/.config/opencode/plugins"
 OPENCODE_PLUGIN_DEST="$OPENCODE_PLUGIN_DIR/projectman.js"
+GROK_HOOKS_DIR="$HOME/.grok/hooks"
+GROK_HOOK_JSON_DEST="$GROK_HOOKS_DIR/projectman.json"
+GROK_HOOK_SCRIPT_DEST="$GROK_HOOKS_DIR/projectman-status.py"
+GROK_CONFIG_TOML="$HOME/.grok/config.toml"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── colours ────────────────────────────────────────────────────────────────────
@@ -30,6 +34,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     echo "  Uninstalled."
     echo "  The hook script at $HOOK_DEST was left in place."
     echo "  The opencode status bridge at $OPENCODE_PLUGIN_DEST was left in place."
+    echo "  The grok status bridge in $GROK_HOOKS_DIR was left in place."
     echo "  The data directory ~/.ProjectMan/ was left in place."
     exit 0
 fi
@@ -237,6 +242,51 @@ install_opencode_bridge() {
 info "Installing opencode status bridge ..."
 install_opencode_bridge
 
+# ── grok status bridge ──────────────────────────────────────────────────────────
+# Install the Grok Build status bridge into ~/.grok/hooks/ (a JSON hook
+# definition + an executable python3 status script), and disable grok's
+# claude-compat hooks so Claude's hook.js does NOT double-fire on grok events
+# (F4 — our grok bridge becomes the sole status writer for grok sessions).
+# Idempotent, mirroring the opencode step. grok need not be installed for this
+# to be harmless.
+GROK_BRIDGE_STATUS="skipped"   # one of: installed, already, skipped
+GROK_COMPAT_STATUS="skipped"   # one of: installed, already, skipped
+install_grok_bridge() {
+    local json_src="$SCRIPT_DIR/bridges/grok/projectman.json"
+    local script_src="$SCRIPT_DIR/bridges/grok/projectman-status.py"
+    if [[ ! -f "$json_src" || ! -f "$script_src" ]]; then
+        return 0  # nothing to install (shouldn't happen in a full checkout)
+    fi
+    mkdir -p "$GROK_HOOKS_DIR"
+    local changed=false
+    if [[ -f "$GROK_HOOK_JSON_DEST" ]] && cmp -s "$json_src" "$GROK_HOOK_JSON_DEST" \
+       && [[ -f "$GROK_HOOK_SCRIPT_DEST" ]] && cmp -s "$script_src" "$GROK_HOOK_SCRIPT_DEST"; then
+        GROK_BRIDGE_STATUS="already"
+    else
+        cp "$json_src" "$GROK_HOOK_JSON_DEST"
+        cp "$script_src" "$GROK_HOOK_SCRIPT_DEST"
+        chmod +x "$GROK_HOOK_SCRIPT_DEST"
+        GROK_BRIDGE_STATUS="installed"
+    fi
+
+    # Idempotent TOML edit: [compat.claude] hooks = false, create-if-missing,
+    # preserving every existing user key/section (delegated to the pure,
+    # unit-tested merger so install.sh carries no TOML logic of its own).
+    local toml_result
+    if toml_result=$(python3 "$SCRIPT_DIR/bridges/grok/compat_toml.py" "$GROK_CONFIG_TOML" 2>/dev/null); then
+        case "$toml_result" in
+            installed) GROK_COMPAT_STATUS="installed" ;;
+            already)   GROK_COMPAT_STATUS="already" ;;
+            *)         GROK_COMPAT_STATUS="skipped" ;;
+        esac
+    else
+        GROK_COMPAT_STATUS="skipped"
+    fi
+}
+
+info "Installing grok status bridge ..."
+install_grok_bridge
+
 # ── done ───────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}ProjectMan installed.${NC}"
@@ -266,6 +316,24 @@ case "$OPENCODE_BRIDGE_STATUS" in
         ;;
     already)
         echo "  opencode status bridge already up to date at $OPENCODE_PLUGIN_DEST."
+        ;;
+esac
+case "$GROK_BRIDGE_STATUS" in
+    installed)
+        echo "  Grok Build status bridge installed to $GROK_HOOKS_DIR/."
+        echo "  Restart any running grok sessions for it to take effect."
+        ;;
+    already)
+        echo "  Grok Build status bridge already up to date in $GROK_HOOKS_DIR/."
+        ;;
+esac
+case "$GROK_COMPAT_STATUS" in
+    installed)
+        echo "  Set [compat.claude] hooks = false in $GROK_CONFIG_TOML"
+        echo "  (so Claude's hooks don't double-fire on grok events)."
+        ;;
+    already)
+        echo "  grok [compat.claude] hooks already disabled in $GROK_CONFIG_TOML."
         ;;
 esac
 echo ""

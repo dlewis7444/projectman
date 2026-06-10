@@ -1,0 +1,26 @@
+{
+  "_comment": "ProjectMan status bridge for Grok Build (xAI 'grok'). Drop into ~/.grok/hooks/ (install.sh does this idempotently, and also flips [compat.claude] hooks=false so claude's hook.js does NOT double-fire on grok events). The command path below is rewritten by install.sh to the absolute installed script path. JSON hook KEYS are PascalCase (probe finding: the hook DEFINITION uses PascalCase; the env var GROK_HOOK_EVENT and the stdin payload's hookEventName are snake_case). The status script keys its state machine off the snake_case wire names. SessionStart/UserPromptSubmit/Stop drive the dots; the others are wired as future slots / no-ops the script ignores until the tool-turn mini-probe lands (see projectman-status.py).",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.grok/hooks/projectman-status.py", "timeout": 10 } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.grok/hooks/projectman-status.py", "timeout": 10 } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.grok/hooks/projectman-status.py", "timeout": 10 } ] }
+    ],
+    "PreToolUse": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.grok/hooks/projectman-status.py", "timeout": 10 } ] }
+    ],
+    "PostToolUse": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.grok/hooks/projectman-status.py", "timeout": 10 } ] }
+    ],
+    "Notification": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.grok/hooks/projectman-status.py", "timeout": 10 } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.grok/hooks/projectman-status.py", "timeout": 10 } ] }
+    ]
+  }
+}

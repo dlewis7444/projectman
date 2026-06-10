@@ -4,6 +4,29 @@ All notable changes to ProjectMan will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Grok Build is now a first-class agent.** Drive xAI's
+  [Grok Build](https://x.ai/cli) CLI (`grok`) per project alongside Claude Code
+  and opencode — pick it from the sidebar **Agent** submenu or
+  **Settings → Agents**. Spawn / continue / resume map to `grok`, `grok -c`
+  (falls back to a fresh `grok` when there's nothing to continue), and
+  `grok -r <id>`; per-project model is passed as `-m <config-key>`; the
+  session-history expander lists recent sessions via `grok sessions list`.
+  Includes a python3 **status bridge** (`bridges/grok/`, installed to
+  `~/.grok/hooks/`) for the live status dots and a generalized **Agent submenu /
+  Settings page** that surface the third agent automatically.
+- The Grok ollama-pool recipe requires a per-model `api_key` in
+  `~/.grok/config.toml` (any non-empty value) — without it grok forces a browser
+  sign-in even for custom endpoints. Documented in the README.
+
+### Changed
+- **install.sh disables grok's Claude-compat hooks (load-bearing).** grok reads
+  `~/.claude/settings.json` hooks by default, so Claude's ProjectMan hook would
+  double-fire on grok events. The grok install step now sets
+  `[compat.claude] hooks = false` in `~/.grok/config.toml` — an idempotent,
+  create-if-missing TOML edit that preserves every existing user key — making
+  the grok bridge the sole status writer for grok sessions.
+
 ### Internal
 - **Unknown-agent fallback no longer hardcodes Claude (M-P3.2).** When a named
   agent isn't registered (a stale/typo'd override), the fallback now resolves

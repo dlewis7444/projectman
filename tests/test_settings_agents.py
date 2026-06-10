@@ -131,6 +131,21 @@ def test_agent_overrides_roundtrip(tmp_path):
     assert s2.agent_overrides == {'/p/a': 'opencode'}
 
 
+def test_agent_overrides_roundtrip_grok(tmp_path):
+    """T-B4: a per-project grok override + a grok binary entry survive a
+    save/load round-trip (the third agent is no different from the others)."""
+    path = str(tmp_path / 'settings.json')
+    s = Settings(agent_default='grok',
+                 agent_overrides={'/p/g': 'grok'},
+                 agents={'grok': {'binary': '/opt/grok/grok'}})
+    s.save(path)
+    s2 = Settings.load(path)
+    assert s2.agent_default == 'grok'
+    assert s2.agent_overrides == {'/p/g': 'grok'}
+    assert s2.agents.get('grok', {}).get('binary') == '/opt/grok/grok'
+    assert s2.effective_agent('/p/g') == 'grok'
+
+
 def test_existing_provider_and_ccr_fields_still_default(tmp_path):
     """Adding agent fields must not disturb the existing model/ccr defaults."""
     s = Settings()

@@ -658,12 +658,262 @@ class OpencodeAdapter:
 
 
 # ---------------------------------------------------------------------------
+# GrokAdapter — backend #2 (P3). xAI "Grok Build" (binary ``grok``).
+# ---------------------------------------------------------------------------
+
+# Session-list parser for ``grok sessions list`` (pure; fixture-tested in
+# tests/test_grok_sessions.py). Module-level so tests exercise it directly.
+
+def parse_grok_session_list(text, *, cap=_SESSIONS_CAP):
+    """Parse ``grok sessions list`` fixed-column text into SessionRefs.
+
+    The probe (scripts-local/evidence/p3-grok-probe/probe.md Q4, raw output)
+    found grok ships a real, auth-free, cwd-scoped ``grok sessions list``
+    subcommand — but NO ``--json`` flag (the F2 ruling: CLI-first, parse the
+    columns). The observed shape is a header row then one row per session::
+
+        SESSION ID                            CREATED     UPDATED     STATUS      SUMMARY
+        019eb297-fa74-7741-863e-d8aa822ac7bf  2026-06-10  2026-06-10  local  Reply with exactly: hook-test-ok
+
+    Columns are whitespace-separated and the SUMMARY is free text that may
+    itself contain spaces, so we split off the four fixed leading tokens
+    (id, created, updated, status) and keep the remainder as the title. The
+    SESSION ID is the UUIDv7 (``SessionRef.id`` = it, verbatim — resume uses it).
+
+    The CLI already emits rows newest-first by UPDATED (probe-observed: the
+    later-updated session leads). UPDATED is DATE-ONLY granularity, so within a
+    single day the date can't break ties — but a UUIDv7 id is millisecond
+    time-ordered, so we preserve the CLI's order and DO NOT re-sort by the
+    coarse date (a date-key sort would scramble same-day rows). ``last_active``
+    is the UPDATED date parsed to an epoch (00:00 UTC) for the expander's
+    display only; ordering rides the CLI's newest-first emission, capped at
+    ``cap`` (parity with the other expanders).
+
+    Defensive: the header is skipped (its first token is ``SESSION``, never a
+    UUID); blank lines and any row whose first token isn't a UUID-shaped
+    36-char hyphenated id are ignored; a row missing the trailing columns
+    yields an empty title rather than raising. Never raises.
+    """
+    import re as _re
+    import calendar as _calendar
+    import time as _time
+    _uuid_re = _re.compile(
+        r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
+        r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+
+    def _date_to_epoch(s):
+        try:
+            return _calendar.timegm(_time.strptime(s, '%Y-%m-%d'))
+        except (ValueError, TypeError):
+            return 0
+
+    refs = []
+    for raw in (text or '').splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        # Split into the four fixed leading tokens + free-text remainder.
+        parts = line.split(None, 4)
+        if not parts:
+            continue
+        sid = parts[0]
+        if not _uuid_re.match(sid):
+            # Header row ("SESSION ID …") and any non-session noise.
+            continue
+        updated = parts[2] if len(parts) > 2 else ''
+        title = parts[4].strip() if len(parts) > 4 else ''
+        refs.append(SessionRef(
+            id=sid,
+            title=title,
+            last_active=_date_to_epoch(updated),
+        ))
+        if len(refs) >= cap:
+            break
+    return refs
+
+
+class GrokAdapter:
+    """xAI "Grok Build" adapter — backend #2 (P3), full capabilities.
+
+    Spawn modes:
+      * ``fresh``    — ``grok``
+      * ``continue`` — ``grok -c`` with the trap/fallback wrapper. The probe
+        (probe.md Q1) observed ``grok -c`` exits 1 with "No session found for
+        current directory" when there's nothing to continue — clean, claude-like
+        — so ``caps.continue_falls_back_to_fresh=True`` and the standard
+        ``-c || fresh`` wrapper applies unchanged (F1).
+      * ``resume``   — ``grok -r <id>`` (F2: ids are UUIDv7 from
+        ``grok sessions list``; local-id resume is auth-free per the probe).
+
+    Model: per-project model string passed verbatim as ``-m <value>`` when set
+    + ``caps.model_select``. Grok reaches custom OpenAI-compatible endpoints
+    (the ollama pool) via its OWN ``~/.grok/config.toml`` ``[model.<key>]`` —
+    so the model id here is a grok config KEY (e.g. ``pool-qwen``), and PM
+    injects NO env and NO ccr. Empty/default → no ``-m``.
+
+    NO ``--no-auto-update`` injection (F5: user's tool, user's policy — the
+    bench pins versions bench-side via ``[cli] auto_update = false``). NO
+    ``--no-alt-screen`` injection (F7: alt-screen is fine in VTE, claude/opencode
+    precedent; reserved as a documented fallback only).
+
+    LEADER DAEMON (F6): grok runs a persistent client/leader architecture
+    (``~/.grok/leader.sock``). PM's pane child is a CLIENT; the leader is
+    grok-owned and survives a client SIGTERM (analogous to the zellij server).
+    PM does NO lifecycle management of the leader — group-kill
+    (emergency_shutdown / _kill_child) takes the client only, by design.
+    """
+    id = 'grok'
+    display_name = 'Grok Build'
+    caps = AgentCaps(
+        continue_=True,
+        resume_by_id=True,
+        sessions=True,
+        rich_status=True,
+        model_select=True,
+        headless_json=True,
+        # F1: `grok -c` exits 1 cleanly on nothing-to-continue (probe Q1), so
+        # the standard `-c || fresh` fallback applies — same as claude/opencode.
+        continue_falls_back_to_fresh=True,
+    )
+
+    def __init__(self, *, run_fn=None):
+        # ``run_fn(argv, cwd) -> (rc, stdout) | None`` runs the session-list CLI;
+        # injectable so tests never shell out. cwd is part of the contract:
+        # ``grok sessions list`` is cwd-scoped (probe Q4 — run it from the target
+        # project dir), exactly like opencode's.
+        self._run_fn = run_fn
+
+    # --- binary -----------------------------------------------------------
+
+    def _binary(self, settings):
+        """``agents['grok']['binary']`` if set, else ``grok``."""
+        cfg = settings.agents.get('grok') if isinstance(settings.agents, dict) else None
+        if isinstance(cfg, dict):
+            b = (cfg.get('binary') or '').strip()
+            if b:
+                return b
+        return 'grok'
+
+    def _model_args(self, settings, project):
+        """``['-m', value]`` for a set per-project model, else ``[]``."""
+        model = settings.effective_model(project.path)
+        if model and self.caps.model_select:
+            return ['-m', model]
+        return []
+
+    # --- spawn contract ---------------------------------------------------
+
+    def fresh_argv(self, settings, project):
+        return [self._binary(settings)] + self._model_args(settings, project)
+
+    def continue_argv(self, settings, project):
+        return ([self._binary(settings)] + self._model_args(settings, project)
+                + ['-c'])
+
+    def resume_argv(self, settings, project, session_id):
+        return ([self._binary(settings)] + self._model_args(settings, project)
+                + ['-r', session_id])
+
+    def spawn_plan(self, settings, project, mode, session_id=None):
+        """Uniform spawn contract (A4). grok reaches providers via its own
+        config.toml, so env is always None and there is no ccr fallback.
+
+        For ``continue`` the model flag folds INTO the fallback wrapper so BOTH
+        the ``grok -c`` attempt and the bare-``grok`` fallback carry
+        ``-m <model>`` (mirrors opencode's review-n3 fix): the flag-file content
+        is ``grok -m <model> -c || grok -m <model>``.
+        """
+        if mode == 'resume':
+            if not session_id:
+                raise ValueError("resume mode requires a session_id")
+            argv = self.resume_argv(settings, project, session_id)
+        elif mode == 'fresh':
+            argv = self.fresh_argv(settings, project)
+        elif mode == 'continue':
+            argv = build_continue_wrapper(
+                self.continue_argv(settings, project),
+                self.fresh_argv(settings, project),
+                fallback=self.caps.continue_falls_back_to_fresh,
+            )
+        else:
+            raise ValueError(f"unknown spawn mode: {mode!r}")
+        return SpawnPlan(argv=argv, env=None, fallback_reason=None)
+
+    # --- zellij path ------------------------------------------------------
+
+    def zellij_continue_command(self, settings, project=None):
+        """Flag-file content. The model folds into BOTH halves (like opencode)
+        so the create pane's continue-or-fresh both target the chosen grok
+        model key: ``grok -m <model> -c || grok -m <model>``. The fallback is
+        the adapter's declared policy (M-P3.3), not the builder's hardcode.
+        """
+        fallback = self.caps.continue_falls_back_to_fresh
+        if project is None:
+            return build_zellij_continue_command(
+                [self._binary(settings), '-c'], [self._binary(settings)],
+                fallback=fallback)
+        return build_zellij_continue_command(
+            self.continue_argv(settings, project),
+            self.fresh_argv(settings, project),
+            fallback=fallback,
+        )
+
+    def zellij_spawn_env(self, settings, project):
+        """No env override for grok (F5/B5) — grok reaches the pool through its
+        own ``~/.grok/config.toml``, no ccr, no PM env injection. Returns
+        ``(None, None)`` so terminal.py inherits os.environ unchanged.
+        """
+        return (None, None)
+
+    # --- sessions contract ------------------------------------------------
+
+    def _run(self, argv, cwd=None):
+        """Run ``grok sessions list`` in ``cwd`` → (rc, stdout) or None.
+
+        ``cwd`` is part of the run contract: ``grok sessions list`` is
+        CWD-SCOPED (probe Q4 — it lists the invoking directory's sessions), the
+        same constraint opencode's lister carries. Injectable ``run_fn`` takes
+        ``(argv, cwd)``. Never raises (any subprocess error → None → []).
+        """
+        if self._run_fn is not None:
+            return self._run_fn(argv, cwd)
+        import subprocess
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True,
+                               timeout=10, stdin=subprocess.DEVNULL, cwd=cwd)
+            return (r.returncode, r.stdout)
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    def list_sessions(self, project, settings=None):
+        """Recent grok sessions for ``project`` as SessionRefs (cap 7).
+
+        CLI-first (F2): ``grok sessions list -n N`` run **from the project
+        directory** (cwd-scoped), parsed by ``parse_grok_session_list``. The CLI
+        emits newest-first by UPDATED and is authoritative (no storage parsing —
+        the JSON/JSONL session dirs exist but the CLI wins, P2 doctrine).
+        Defensive: a missing/failed CLI returns []. ``settings`` resolves a
+        custom binary; the sidebar passes it via the adapter call.
+        """
+        binary = self._binary(settings) if settings is not None else 'grok'
+        # Ask for a few extra rows; the parser caps to _SESSIONS_CAP.
+        result = self._run([binary, 'sessions', 'list', '-n', '50'],
+                           cwd=project.path)
+        if result is not None:
+            rc, out = result
+            if rc == 0 and out and out.strip():
+                return parse_grok_session_list(out)
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Registry.
 # ---------------------------------------------------------------------------
 
 ADAPTERS = {
     'claude': ClaudeAdapter(),
     'opencode': OpencodeAdapter(),
+    'grok': GrokAdapter(),
 }
 
 DEFAULT_AGENT = 'claude'
@@ -737,13 +987,19 @@ def get_adapter(agent_id, settings=None):
 # reused by both install.sh's intent and the GUI button.
 # ---------------------------------------------------------------------------
 
-# Where each agent's status bridge gets dropped, relative to $HOME.
+# Where each agent's status bridge gets dropped, relative to $HOME. The grok
+# bridge is a JSON hook definition + an executable python3 script; the GUI
+# "Install bridge" button + install_agent_bridge copy the JSON definition into
+# ~/.grok/hooks/ (install.sh additionally drops the script and flips
+# [compat.claude] hooks=false — see install.sh's grok step).
 _BRIDGE_DEST = {
     'opencode': '.config/opencode/plugins/projectman.js',
+    'grok': '.grok/hooks/projectman.json',
 }
 # The bridge source file within the app tree (bridges/<agent>/<file>).
 _BRIDGE_SRC = {
     'opencode': ('opencode', 'projectman.js'),
+    'grok': ('grok', 'projectman.json'),
 }
 
 

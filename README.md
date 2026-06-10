@@ -13,6 +13,8 @@ running `claude` (or `zellij attach`) per project. Projects are directories unde
 ## Features
 
 - Per-project Claude Code sessions with automatic session restore
+- Pluggable coding agents — **Claude Code**, **opencode**, and **Grok Build**
+  side by side, pick per project (see "Using opencode" / "Using Grok Build")
 - Live status indicators: working / waiting / done / idle
 - Session history with expand/collapse per project
 - Zellij multiplexer integration (optional)
@@ -200,6 +202,72 @@ models need **no** special flags):
 }
 ```
 
+## Using Grok Build
+
+ProjectMan can drive [Grok Build](https://x.ai/cli) — xAI's terminal coding CLI
+(binary `grok`) — as a first-class agent alongside Claude Code and opencode.
+Pick it per project from the sidebar right-click **Agent** submenu, or set it as
+the default in **Settings → Agents**.
+
+- **Spawn / continue / resume** map to `grok`, `grok -c`, and `grok -r <id>`;
+  the session-history expander lists a project's recent grok sessions via
+  `grok sessions list`, run **from the project directory** (the command is
+  cwd-scoped). Session ids are UUIDv7. `grok -c` exits cleanly when there's
+  nothing to continue, so PM falls back to a fresh `grok` exactly as it does for
+  Claude.
+- **Per-project model** is passed verbatim as `-m <value>`. For grok the value
+  is a **config key** from your `~/.grok/config.toml`, not a `provider/model`
+  string — grok reaches custom endpoints through its own config, so no
+  claude-code-router is involved.
+- **Status dots** require the grok status bridge. `install.sh` installs it into
+  `~/.grok/hooks/` for you (idempotent — a JSON hook definition plus an
+  executable python3 status script), or install it from
+  **Settings → Agents → Install bridge**. See
+  [`bridges/grok/README.md`](bridges/grok/README.md). The `waiting` (blue) dot
+  is not wired yet — grok's permission-prompt hook event still needs to be
+  captured; `working` and `done` are correct today.
+
+### Grok + the ollama pool
+
+To run grok against a local Ollama / OpenAI-compatible pool with **no xAI
+account**, add a model entry to `~/.grok/config.toml` — and it **must include
+`api_key`**:
+
+```toml
+[model.pool-qwen]
+model = "qwen3.5:9b"
+base_url = "http://<host>:11434/v1"
+name = "Qwen3.5 9B (Ollama pool)"
+context_window = 32768
+api_key = "ollama"
+```
+
+The `api_key` value can be any non-empty string (Ollama ignores it) — but it
+**must be present**: without a per-model `api_key`, grok triggers its browser
+OAuth sign-in flow even for a custom endpoint. With it, turns complete fully
+offline of xAI and no `~/.grok/auth.json` is ever created. Then set the
+per-project model to `pool-qwen` (the config **key**) in ProjectMan.
+
+### Auto-update note
+
+grok auto-updates by default and ships frequent point releases. ProjectMan
+injects **nothing** to suppress this — it is your tool and your policy. To pin a
+version (e.g. for reproducible test benches), set it in `~/.grok/config.toml`:
+
+```toml
+[cli]
+auto_update = false
+```
+
+### Claude-compat hooks are disabled
+
+grok reads `~/.claude/settings.json` hooks by default, which would make Claude's
+ProjectMan hook **double-fire** on grok events and fight the grok bridge for the
+status dot. So `install.sh` sets `[compat.claude] hooks = false` in
+`~/.grok/config.toml` (idempotently, preserving every other key) — the grok
+bridge is then the sole status writer for grok sessions. If you manage that
+config by hand, keep that line in place.
+
 ## Updating
 
 ```bash
@@ -243,6 +311,8 @@ python -m pytest
 | `~/.claude/projectman/hook.js` | Claude Code hook script for status updates |
 | `~/.claude/settings.json` | Claude Code settings (hook registration) |
 | `~/.config/opencode/plugins/projectman.js` | opencode status bridge plugin |
+| `~/.grok/hooks/projectman.json` + `projectman-status.py` | Grok Build status bridge (hook definition + script) |
+| `~/.grok/config.toml` | Grok Build config (`[compat.claude] hooks = false`; pool model + `api_key`) |
 
 ## License
 

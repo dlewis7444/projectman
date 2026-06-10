@@ -515,7 +515,11 @@ class ProjectRow(Gtk.ListBoxRow):
         """
         agent_id = (self._settings.effective_agent(self._project.path)
                     if self._settings is not None else 'claude')
-        return agents.get_adapter(agent_id)
+        # F9: thread settings into get_adapter so a named-but-missing agent's
+        # caps-gating reflects the M-P3.2 fallback (agent_default → first
+        # available), not a hardcoded claude. With settings the row gates on the
+        # adapter that will ACTUALLY run for this project.
+        return agents.get_adapter(agent_id, self._settings)
 
     def _caps(self):
         return self._adapter().caps

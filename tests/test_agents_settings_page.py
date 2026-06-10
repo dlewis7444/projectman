@@ -33,6 +33,43 @@ def test_real_repo_ships_opencode_bridge():
     assert agents.agent_bridge_source(repo, 'opencode') is not None
 
 
+def test_real_repo_ships_grok_bridge():
+    """T-B4: the repo carries the grok bridge (the JSON hook definition) where
+    the GUI 'Install bridge' button + install_agent_bridge expect it. With this
+    present, the Settings → Agents page shows an Install-bridge row for grok
+    automatically (it checks ``agent_bridge_source(...) is not None``)."""
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = agents.agent_bridge_source(repo, 'grok')
+    assert src is not None
+    assert src.endswith(os.path.join('bridges', 'grok', 'projectman.json'))
+
+
+def test_three_agents_registered_with_display_names():
+    """T-B4: the registry now carries THREE builtins; the settings page + the
+    sidebar submenu iterate ADAPTERS, so all three appear by construction."""
+    ids = list(agents.ADAPTERS.keys())
+    assert 'claude' in ids and 'opencode' in ids and 'grok' in ids
+    assert len(ids) >= 3
+    names = {aid: agents.ADAPTERS[aid].display_name for aid in ids}
+    assert names['claude'] == 'Claude Code'
+    assert names['opencode'] == 'opencode'
+    assert names['grok'] == 'Grok Build'
+
+
+def test_install_grok_bridge_copies_json_definition(tmp_path):
+    """install_agent_bridge drops the grok hook JSON into ~/.grok/hooks/."""
+    app = tmp_path / 'app'
+    (app / 'bridges' / 'grok').mkdir(parents=True)
+    (app / 'bridges' / 'grok' / 'projectman.json').write_text('{"hooks":{}}')
+    home = tmp_path / 'home'
+    home.mkdir()
+    result = agents.install_agent_bridge(str(app), 'grok', home=str(home))
+    assert result == 'installed'
+    dest = home / '.grok' / 'hooks' / 'projectman.json'
+    assert dest.exists()
+    assert dest.read_text() == '{"hooks":{}}'
+
+
 # ── install_agent_bridge ──────────────────────────────────────────────────────
 
 def _app_with_bridge(tmp_path, content='// bridge v1'):
