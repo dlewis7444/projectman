@@ -16,10 +16,9 @@ gi.require_version('Vte', '3.91')
 gi.require_version('GLib', '2.0')
 from gi.repository import Gtk, GLib
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get('DISPLAY') and not os.environ.get('WAYLAND_DISPLAY'),
-    reason='requires a display (DISPLAY or WAYLAND_DISPLAY)'
-)
+from display_gate import requires_display
+
+pytestmark = requires_display
 
 
 def _make_tv(settings=None, path='/tmp/test'):
