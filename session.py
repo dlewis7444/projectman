@@ -148,6 +148,34 @@ def collect_session_state(terminals, active_path):
     return open_paths, focused
 
 
+def collect_agents_map(terminals, open_paths, effective_agent_fn):
+    """Compute {path: agent_id} for the session snapshot — the RUNNING agent.
+
+    terminals          : dict[path → TerminalView-like] (needs
+                         .spawned_agent_signature())
+    open_paths         : paths being persisted (from collect_session_state)
+    effective_agent_fn : fallback resolver (settings.effective_agent), used
+                         ONLY for a path missing from terminals (defensive —
+                         open_paths is sourced from terminals, so this leg is
+                         normally never taken)
+
+    The persisted agent must be the one the live child was actually spawned
+    with (spawn-time truth, the same source the restart prompt reads), NOT the
+    one settings would resolve today. Saved-agent-wins (A2) restores a project
+    with its saved agent even when settings disagree; deriving the save half
+    from settings would re-save that project under the settings agent and the
+    NEXT restore would silently drop the running session.
+    """
+    agents = {}
+    for path in open_paths:
+        tv = terminals.get(path)
+        if tv is not None:
+            agents[path] = tv.spawned_agent_signature()
+        else:
+            agents[path] = effective_agent_fn(path)
+    return agents
+
+
 def plan_restore(open_paths, focused_path, active_map):
     """Compute what to activate vs spawn in the background during restore.
 

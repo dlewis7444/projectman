@@ -14,7 +14,7 @@ from shutdown_window import ShutdownWindow
 from model import Project
 from session import (
     save_session, load_session, load_agents, filter_active_paths,
-    collect_session_state, plan_restore, SESSION_FILE,
+    collect_session_state, collect_agents_map, plan_restore, SESSION_FILE,
 )
 
 
@@ -242,14 +242,20 @@ class AppWindow(Adw.ApplicationWindow):
         """Snapshot running terminals to SESSION_FILE (atomic write).
 
         Persists the per-project agent id alongside each path (session.json v2)
-        so a future restore re-spawns the right agent. For an all-claude fleet
-        the effective agent is 'claude' everywhere; the dict form is written
-        regardless, and the v2 loader reads both forms.
+        so a future restore re-spawns the right agent. The persisted agent is
+        the one the terminal is RUNNING (spawn-time truth via
+        spawned_agent_signature(), the same source the restart prompt reads),
+        not the one settings would pick today — a saved-agent-wins restore (A2)
+        legitimately diverges from settings, and re-saving the settings agent
+        would silently drop that session on the next restore. For an all-claude
+        fleet the dict form is written regardless; the v2 loader reads both
+        forms.
         """
         if not self._settings.resume_projects:
             return
         open_paths, focused = collect_session_state(self._terminals, self._active_path)
-        agents_map = {p: self._settings.effective_agent(p) for p in open_paths}
+        agents_map = collect_agents_map(
+            self._terminals, open_paths, self._settings.effective_agent)
         save_session(SESSION_FILE, open_paths, focused, agents=agents_map)
 
     def _restore_session(self):

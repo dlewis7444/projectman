@@ -285,6 +285,72 @@ def test_new_session_signal_rename():
     assert GObject_signal_exists(Sidebar, 'project-new-session')
 
 
+# ===========================================================================
+# P2 review fix — MAJOR-2: the attached idle→done dot remap is gated on
+# caps.rich_status (its first consumer). A bridgeless agent must not wear a
+# permanent fake-green "work finished" dot.
+# ===========================================================================
+
+def test_attached_idle_dot_stays_idle_for_rich_status_false(monkeypatch):
+    """T5 — rich_status=False, attached, watcher says 'idle' (no status file)
+    → the dot is status-idle, NOT status-done."""
+    import agents
+    caps = agents.AgentCaps(continue_=True, rich_status=False)
+    row = _row_with_adapter(monkeypatch, caps)
+    row.set_process_state('attached')
+    assert row._status_dot.has_css_class('status-idle')
+    assert not row._status_dot.has_css_class('status-done')
+
+
+def test_attached_idle_dot_remaps_to_done_for_rich_status_true(monkeypatch):
+    """T6 — no-regression pin: rich_status=True keeps today's behavior — an
+    attached row with no status file yet renders status-done (green)."""
+    import agents
+    caps = agents.AgentCaps(continue_=True, rich_status=True)
+    row = _row_with_adapter(monkeypatch, caps)
+    row.set_process_state('attached')
+    assert row._status_dot.has_css_class('status-done')
+    assert not row._status_dot.has_css_class('status-idle')
+
+
+class _ExplodingCapsAdapter:
+    """Caps access can be made to raise AFTER construction — exercises the
+    dot path's never-throw fallback without breaking _apply_caps at init."""
+    id = 'fake'
+    display_name = 'Fake (exploding caps)'
+
+    def __init__(self, caps):
+        self._caps = caps
+        self.explode = False
+
+    @property
+    def caps(self):
+        if self.explode:
+            raise RuntimeError('caps unavailable')
+        return self._caps
+
+    def list_sessions(self, project, settings=None):
+        return []
+
+
+def test_attached_dot_survives_adapter_resolution_failure(monkeypatch):
+    """Spec failure mode: if adapter resolution raises, preserve the historic
+    remap (done) — the dot path never throws."""
+    import agents
+    from settings import Settings
+    from model import Project, HistoryReader, StatusWatcher
+    from sidebar import ProjectRow
+    adapter = _ExplodingCapsAdapter(
+        agents.AgentCaps(continue_=True, rich_status=False))
+    monkeypatch.setitem(agents.ADAPTERS, 'fake', adapter)
+    row = ProjectRow(Project(name='test', path='/tmp/test'),
+                     HistoryReader(), StatusWatcher(),
+                     settings=Settings(agent_default='fake'))
+    adapter.explode = True
+    row.set_process_state('attached')   # must not raise
+    assert row._status_dot.has_css_class('status-done')
+
+
 def GObject_signal_exists(cls, name):
     from gi.repository import GObject
     return GObject.signal_lookup(name, cls) != 0
