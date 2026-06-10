@@ -2,17 +2,18 @@
 
 ![ProjectMan](images/ProjectMan.jpg)
 
-A GTK4/Adwaita desktop application for managing [Claude Code](https://claude.ai/code) sessions.
+A GTK4/Adwaita desktop cockpit for AI coding agents.
 
 ProjectMan displays a project sidebar on the left and an embedded VTE terminal on the right,
-running `claude` (or `zellij attach`) per project. Projects are directories under
+running your chosen coding agent — [Claude Code](https://claude.ai/code), [opencode](https://opencode.ai),
+or [Grok Build](https://x.ai/cli) — per project. Projects are directories under
 `~/.ProjectMan/projects/` (configurable via Settings).
 
 ![Main window](images/screencap_main.jpg)
 
 ## Features
 
-- Per-project Claude Code sessions with automatic session restore
+- Per-project agent sessions with automatic session restore
 - Pluggable coding agents — **Claude Code**, **opencode**, and **Grok Build**
   side by side, pick per project (see "Using opencode" / "Using Grok Build")
 - Live status indicators: working / waiting / done / idle
@@ -41,7 +42,13 @@ continuously scans your projects and surfaces actionable findings in a card-base
 - Context drift — stale file references in `CLAUDE.md` (bare filenames, relative paths,
   and absolute paths all resolved; external references deduplicated automatically)
 
-**AI checks (optional, requires Haiku API access):**
+**AI checks (optional, uses the `claude` CLI + Anthropic credentials):**
+
+> The PAA's AI scans run the `claude` CLI against native Anthropic **regardless of
+> your default agent** — they do not route through grok, opencode, or
+> claude-code-router. A machine with no Anthropic access can still use the
+> filesystem checks above; the AI checks simply stay off.
+
 - Semantic staleness — `CLAUDE.md` no longer describes what the project actually does
 - Outdated or conflicting dependency versions
 - General project health
@@ -73,30 +80,66 @@ continuously scans your projects and surfaces actionable findings in a card-base
 | Ubuntu / Debian | `sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-vte-3.91` |
 | Arch | `sudo pacman -S python-gobject gtk4 libadwaita vte3` |
 
-**Other requirements:**
+**Also required:**
 - Python 3.10+
-- [`claude` CLI](https://claude.ai/code) installed and on your PATH
-- Node.js (for the hook script that powers live status indicators)
+- Node.js (for the status-indicator hook script)
 
 **Optional:** `zellij` for multiplexed terminal sessions.
 
+### Agents (install at least one)
+
+ProjectMan is a cockpit for coding agents — it does not bundle one. Install
+whichever you use; each is optional and they work side by side:
+
+| Agent | Install |
+|-------|---------|
+| **Claude Code** | <https://claude.ai/code> |
+| **Grok Build** (`grok`) | `curl -fsSL https://x.ai/cli/install.sh \| bash` — see [Installing Grok Build](#installing-grok-build) |
+| **opencode** | <https://opencode.ai> (see [opencode docs](https://opencode.ai/docs)) |
+
+You can run ProjectMan with just one agent installed; the others appear in the
+**Agent** submenu only when their binary is on your PATH.
+
 ## Installation
 
+1. **Clone and run the installer:**
+
+   ```bash
+   git clone https://github.com/dlewis7444/projectman.git
+   cd projectman
+   ./install.sh
+   ```
+
+   This installs ProjectMan to `~/.local/share/projectman/`, creates a
+   `projectman` launcher in `~/.local/bin/`, and registers it with your desktop
+   environment (GNOME, KDE, etc.) so it appears in your app launcher.
+
+2. **Ensure `~/.local/bin` is on your `PATH`.** If the `projectman` command
+   isn't found after install, add this to your shell profile (`~/.bashrc`,
+   `~/.zshrc`, etc.) and open a new shell:
+
+   ```bash
+   export PATH="$HOME/.local/bin:$PATH"
+   ```
+
+3. **Install at least one agent** (see [Agents](#agents-install-at-least-one)
+   above) so ProjectMan has something to drive.
+
+### Installing Grok Build
+
+To use xAI's [Grok Build](https://x.ai/cli) CLI as an agent:
+
 ```bash
-git clone https://github.com/dlewis7444/projectman.git
-cd projectman
-./install.sh
+curl -fsSL https://x.ai/cli/install.sh | bash
 ```
 
-This installs ProjectMan to `~/.local/share/projectman/`, creates a `projectman` launcher
-in `~/.local/bin/`, and registers it with your desktop environment (GNOME, KDE, etc.) so it
-appears in your app launcher.
-
-> **Note:** `~/.local/bin` must be on your `PATH`. If the `projectman` command isn't found
-> after install, add this to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
-> ```bash
-> export PATH="$HOME/.local/bin:$PATH"
-> ```
+This installs the `grok` binary (typically to `~/.grok/bin/grok`). By default
+grok signs in with a **SuperGrok / xAI account** (browser OAuth on first run). To
+run grok against a **local Ollama / OpenAI-compatible pool with no xAI account**,
+see [Grok + the ollama pool](#grok--the-ollama-pool) below — the per-model
+`api_key` is what lets it skip the browser sign-in. After installing, pick
+**Grok Build** from the sidebar **Agent** submenu or set it as the default in
+**Settings → Agents**.
 
 ### Migrating existing Claude projects
 

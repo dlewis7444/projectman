@@ -1125,6 +1125,89 @@ def install_agent_bridge(app_dir, agent_id, *, home=None):
         return 'error'
 
 
+def bridge_state(app_dir, agent_id, *, home=None):
+    """Report an agent's installed-bridge state WITHOUT installing (M-UX.8/C5).
+
+    The Settings → Agents bridge button claimed "Install bridge" even when the
+    bridge was already installed and current (sweep F8 — C5 SHOWN ≠ ACTUAL).
+    This is the read-only twin of ``install_agent_bridge``: it runs the SAME
+    manifest comparison (transformed source vs dest, exec-bit check) but copies
+    nothing, so the button can reflect machine state. Returns one of:
+
+      * ``'no-bridge'``      — the agent ships no status bridge;
+      * ``'missing-source'`` — a manifest source file is absent from the app tree
+                               (can't install → button offers install but warns);
+      * ``'current'``        — every file present, content-identical, exec bits
+                               correct (button: "Bridge installed ✓" / "Reinstall");
+      * ``'stale'``          — at least one file missing/different/non-executable
+                               (button: "Update bridge" or "Install bridge").
+
+    Defensive: an unreadable dest is treated as stale (re-install will repair);
+    never raises.
+    """
+    import os as _os
+    if home is None:
+        home = _os.path.expanduser('~')
+    manifest = _BRIDGE_MANIFEST.get(agent_id)
+    if not manifest:
+        return 'no-bridge'
+    any_present = False
+    all_current = True
+    for spec in manifest:
+        src = _os.path.join(app_dir, 'bridges', *spec['src'])
+        if not _os.path.exists(src):
+            return 'missing-source'
+        try:
+            with open(src, 'rb') as f:
+                content = f.read()
+            transform = spec.get('transform')
+            if transform is not None:
+                content = transform(content.decode('utf-8'), home).encode('utf-8')
+        except OSError:
+            return 'missing-source'
+        dest = _os.path.join(home, spec['dest'])
+        if not _os.path.exists(dest):
+            all_current = False
+            continue
+        any_present = True
+        try:
+            with open(dest, 'rb') as f:
+                if f.read() != content:
+                    all_current = False
+                    continue
+        except OSError:
+            all_current = False
+            continue
+        if spec.get('executable'):
+            try:
+                if not (_os.stat(dest).st_mode & 0o111):
+                    all_current = False
+            except OSError:
+                all_current = False
+    if all_current and any_present:
+        return 'current'
+    return 'stale'
+
+
+def bridge_button_labels(state):
+    """Map a ``bridge_state`` result to (button label, row subtitle) (M-UX.8).
+
+    Pure presentation so the three labels are unit-pinnable without GTK:
+
+      * ``current``        → ("Reinstall",      "Bridge installed ✓")
+      * ``stale``          → ("Update bridge",  "Some files missing or out of date")
+      * ``missing-source`` → ("Install bridge", "Bridge source not found in the app directory")
+      * ``no-bridge``/else → ("Install bridge", "This agent ships a status bridge")
+    """
+    if state == 'current':
+        return ('Reinstall', 'Bridge installed ✓')
+    if state == 'stale':
+        return ('Update bridge', 'Some files are missing or out of date')
+    if state == 'missing-source':
+        return ('Install bridge', 'Bridge source not found in the app directory')
+    return ('Install bridge', 'Install the status bridge plugin')
+
+
 def agent_doctor(settings, agent_id, *, run_fn=None):
     """Doctor-lite: resolve the agent's binary and run ``<binary> --version``.
 

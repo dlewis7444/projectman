@@ -57,6 +57,7 @@ class ProjectManApp(Adw.Application):
             ('zoom-in', '_zoom_in'),
             ('zoom-out', '_zoom_out'),
             ('zoom-reset', '_zoom_reset'),
+            ('open-settings', '_open_settings'),
         ]:
             action = Gio.SimpleAction.new(name, None)
             action.connect('activate', getattr(self, method))
@@ -65,6 +66,9 @@ class ProjectManApp(Adw.Application):
         self.set_accels_for_action('app.zoom-in', ['<Control>equal'])
         self.set_accels_for_action('app.zoom-out', ['<Control>minus'])
         self.set_accels_for_action('app.zoom-reset', ['<Control>0'])
+        # M-UX.12 (S11): keyboard route to Settings — the only way to reach it was
+        # the mouse-only gear. Mirrors the zoom accels (app action + accel).
+        self.set_accels_for_action('app.open-settings', ['<Control>comma'])
 
         # Signal-safe shutdown: SIGTERM (logout/system stop) and SIGHUP
         # (terminal hangup) must save the session and tear down direct children
@@ -212,6 +216,13 @@ class ProjectManApp(Adw.Application):
         tv = self._get_active_terminal()
         if tv:
             tv.zoom_reset()
+
+    def _open_settings(self, action, param):
+        """M-UX.12: Ctrl+, opens Settings via the window's existing handler
+        (idempotent — re-raises an already-open Settings dialog)."""
+        window = getattr(self, '_window', None)
+        if window is not None:
+            window._on_open_settings()
 
     def _get_active_terminal(self):
         if hasattr(self, '_window') and self._window._active_path:

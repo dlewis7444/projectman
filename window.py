@@ -757,11 +757,16 @@ class AppWindow(Adw.ApplicationWindow):
 
     def _refresh_sidebar_models(self):
         """Push the current provider/model options into the sidebar menus."""
-        from models import build_model_options, model_label
+        from models import build_model_options
+        import agent_configs
         ids, labels = build_model_options(self._settings.providers)
         options = list(zip(ids, labels))
-        global_label = model_label(
-            self._settings.providers, self._settings.model_default)
+        # M-UX.1 (C2): the Model submenu's "Default (…)" item must name what
+        # actually decides the model for the EFFECTIVE default agent — grok /
+        # opencode read their own config (the row used to claim "Anthropic
+        # (native Claude)" while grok ran Qwen). default_model_label returns
+        # claude's native/ccr label unchanged when claude is the default.
+        global_label = agent_configs.default_model_label(self._settings)
         self._sidebar.set_model_options(
             options, self._settings.model_overrides, global_label)
 

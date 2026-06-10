@@ -18,6 +18,8 @@ All notable changes to ProjectMan will be documented in this file.
 - The Grok ollama-pool recipe requires a per-model `api_key` in
   `~/.grok/config.toml` (any non-empty value) — without it grok forces a browser
   sign-in even for custom endpoints. Documented in the README.
+- **`Ctrl+,` opens Settings.** Previously the gear was the only route. _(Found
+  by the Experience Gate pilot.)_
 - **Grok `waiting` dot via phase aging.** Grok fires no hook event while its
   permission prompt is on screen (the wire goes silent — bench mini-probe), so
   the blue dot is now *inferred*: the bridge stamps a `phase`/`phase_ts` on
@@ -31,6 +33,23 @@ All notable changes to ProjectMan will be documented in this file.
   carry no phase fields and behave exactly as before.
 
 ### Changed
+- **Settings → Models now surfaces grok's and opencode's native model configs
+  (read-only).** Each agent that decides its model from its own file —
+  grok's `~/.grok/config.toml`, opencode's `opencode.json` — gets a read-only
+  section headed with the source path and an "edited in the agent's own config"
+  note (the default model is marked). Closes the gap where grok ran Qwen from a
+  file no ProjectMan surface showed. _(Found by the Experience Gate pilot.)_
+- **PAA "Enable AI Scans" copy is honest about Anthropic.** It now states the
+  scans use the `claude` CLI and Anthropic credentials regardless of your
+  default agent (they never route through grok/opencode/ccr). _(Found by the
+  Experience Gate pilot.)_
+- **README and the About page are now agent-neutral.** The headline/intro no
+  longer call ProjectMan a Claude-only app ("desktop cockpit for AI coding
+  agents"), `claude` moved from a hard requirement into an optional **Agents**
+  table (each agent optional, with install pointers), the `PATH` step is a
+  numbered install step, and a new **Installing Grok Build** section documents
+  the curl installer and the account-vs-pool choice. _(Found by the Experience
+  Gate pilot.)_
 - **install.sh disables grok's Claude-compat hooks (load-bearing).** grok reads
   `~/.claude/settings.json` hooks by default, so Claude's ProjectMan hook would
   double-fire on grok events. The grok install step now sets
@@ -39,6 +58,17 @@ All notable changes to ProjectMan will be documented in this file.
   the grok bridge the sole status writer for grok sessions.
 
 ### Fixed
+- **"Default Model" tells the truth for the active default agent.** The row and
+  the sidebar **Model** submenu's "Default (…)" item used to claim "Anthropic
+  (native Claude)" even when grok was the default agent running Qwen. They now
+  show the effective agent's real model story — for grok/opencode, "Managed by
+  &lt;agent&gt; (&lt;config path&gt;)" plus the resolved default model name.
+  _(Found by the Experience Gate pilot.)_
+- **The Settings → Agents bridge button reflects the installed state.** It
+  showed "Install bridge" even when the bridge was already installed and current
+  (C5). It now reads the F12a manifest and shows **Bridge installed ✓ /
+  Reinstall**, **Update bridge**, or **Install bridge** accordingly. _(Found by
+  the Experience Gate pilot.)_
 - **The Settings → Agents "Install bridge" button now installs the WHOLE grok
   bridge.** The GUI path previously copied only the hook JSON — the status
   script it points at never landed. Bridge installs are now manifest-driven and

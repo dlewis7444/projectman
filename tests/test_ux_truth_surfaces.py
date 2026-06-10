@@ -1,0 +1,134 @@
+"""Commit 1 — TRUTH SURFACES (P3.5 items 1-6). Window/app glue tested unbound;
+static copy fixes pinned against the source (the strings are spec-dictated and
+load-bearing — C2). The pure resolvers/parsers they wrap are covered in
+tests/test_agent_configs.py and tests/test_agents_settings_page.py.
+
+Binding tests:
+  M-UX.1  _refresh_sidebar_models pushes the agent-truthful default label
+  M-UX.5  About subtitle is agent-neutral, not "Claude Code sessions"
+  M-UX.7  PAA "Enable AI Scans" copy discloses claude/Anthropic
+  M-UX.12 app wires app.open-settings → Ctrl+comma → window._on_open_settings
+"""
+import os
+import re
+import types
+
+import agent_configs
+from settings import Settings
+
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FIXDIR = os.path.join(REPO, 'tests', 'fixtures')
+
+
+def _read(path):
+    with open(path) as f:
+        return f.read()
+
+
+# ── M-UX.1: the Model submenu "Default (…)" label is agent-truthful ───────────
+
+class _RecordingSidebar:
+    """Records the global_label the window pushes (mirrors the SimpleNamespace
+    recorder pattern in test_lifecycle/test_session_agents)."""
+    def __init__(self):
+        self.global_label = None
+
+    def set_model_options(self, options, overrides, global_label):
+        self.global_label = global_label
+
+
+def _window_with(settings, sidebar):
+    from window import AppWindow
+    fake = types.SimpleNamespace(_settings=settings, _sidebar=sidebar)
+    return fake
+
+
+def test_refresh_sidebar_models_grok_label_truthful(tmp_path, monkeypatch):
+    """BINDING (item 1): with agent_default=grok and a parsed config, the label
+    the window pushes to the Model submenu names grok + the model, NOT
+    'Anthropic'."""
+    from window import AppWindow
+    # Point grok config resolution at a temp config holding the bench fixture
+    # (GROK_CONFIG_PATH is absolute → _expand returns it verbatim).
+    cfg_path = tmp_path / 'config.toml'
+    cfg_path.write_text(_read(os.path.join(FIXDIR, 'grok', 'config.toml')))
+    monkeypatch.setattr(agent_configs, 'GROK_CONFIG_PATH', str(cfg_path))
+
+    sidebar = _RecordingSidebar()
+    fake = _window_with(Settings(agent_default='grok'), sidebar)
+    AppWindow._refresh_sidebar_models(fake)
+
+    assert sidebar.global_label is not None
+    assert 'Anthropic' not in sidebar.global_label
+    assert 'Grok Build' in sidebar.global_label
+    assert 'Qwen3.5 9B (Ollama pool)' in sidebar.global_label
+
+
+def test_refresh_sidebar_models_claude_label_native(monkeypatch):
+    """claude default → today's native label (no regression)."""
+    from window import AppWindow
+    from models import NATIVE_LABEL
+    sidebar = _RecordingSidebar()
+    fake = _window_with(Settings(agent_default='claude'), sidebar)
+    AppWindow._refresh_sidebar_models(fake)
+    assert sidebar.global_label == NATIVE_LABEL
+
+
+# ── M-UX.5: About subtitle is agent-neutral ───────────────────────────────────
+
+def test_about_subtitle_is_agent_neutral():
+    src = _read(os.path.join(REPO, 'settings_window.py'))
+    assert 'GTK4 desktop cockpit for AI coding agents' in src
+    # the lying string is gone from the About page
+    assert 'GTK4 desktop manager for Claude Code sessions' not in src
+
+
+def test_readme_de_clauded():
+    src = _read(os.path.join(REPO, 'README.md'))
+    assert 'managing Claude Code sessions' not in src
+    assert 'cockpit for AI coding agents' in src
+    # grok install subsection + curl installer present
+    assert 'Installing Grok Build' in src
+    assert 'curl -fsSL https://x.ai/cli/install.sh | bash' in src
+    # claude moved out of a hard "required" list into the optional Agents table
+    assert '### Agents (install at least one)' in src
+
+
+# ── M-UX.7: PAA AI-scan copy discloses claude/Anthropic ───────────────────────
+
+def test_paa_ai_scan_copy_discloses_anthropic():
+    src = _read(os.path.join(REPO, 'settings_window.py'))
+    assert "Uses the claude CLI and Anthropic credentials" in src
+    assert 'regardless of your default agent' in src
+    # the bare, non-disclosing string is gone
+    assert "subtitle='Use Claude for deeper project analysis'" not in src
+
+
+# ── M-UX.12: Ctrl+comma → Settings ────────────────────────────────────────────
+
+def test_open_settings_accel_and_action_wired():
+    src = _read(os.path.join(REPO, 'main.py'))
+    # action registered + accel bound to Ctrl+comma, mirroring the zoom accels
+    assert "('open-settings', '_open_settings')" in src
+    assert re.search(
+        r"set_accels_for_action\(\s*'app\.open-settings',\s*\['<Control>comma'\]\)",
+        src)
+
+
+def test_open_settings_calls_window_handler():
+    """Unbound: the app action delegates to window._on_open_settings."""
+    import main
+    calls = []
+    window = types.SimpleNamespace()
+    window._on_open_settings = lambda: calls.append('open')
+    fake = types.SimpleNamespace(_window=window)
+    main.ProjectManApp._open_settings(fake, None, None)
+    assert calls == ['open']
+
+
+def test_open_settings_no_window_is_noop():
+    import main
+    fake = types.SimpleNamespace(_window=None)
+    # must not raise when invoked before the window exists
+    main.ProjectManApp._open_settings(fake, None, None)

@@ -224,6 +224,77 @@ def test_install_bridge_missing_source(tmp_path):
                                        home=str(home)) == 'missing-source'
 
 
+# ── bridge_state + bridge_button_labels (M-UX.8 / C5) ─────────────────────────
+
+def test_bridge_state_no_bridge_agent(tmp_path):
+    assert agents.bridge_state(str(tmp_path), 'claude', home=str(tmp_path)) == 'no-bridge'
+
+
+def test_bridge_state_missing_source(tmp_path):
+    assert agents.bridge_state(str(tmp_path / 'app'), 'opencode',
+                               home=str(tmp_path)) == 'missing-source'
+
+
+def test_bridge_state_stale_when_not_installed(tmp_path):
+    app = _app_with_bridge(tmp_path)
+    home = tmp_path / 'home'
+    home.mkdir()
+    # Source present, nothing in home yet → stale (button: Install/Update).
+    assert agents.bridge_state(str(app), 'opencode', home=str(home)) == 'stale'
+
+
+def test_bridge_state_current_after_install(tmp_path):
+    """BINDING (item 3): after install, manifest state is 'current' → the button
+    becomes 'Reinstall' with 'Bridge installed ✓'."""
+    app = _app_with_bridge(tmp_path)
+    home = tmp_path / 'home'
+    home.mkdir()
+    agents.install_agent_bridge(str(app), 'opencode', home=str(home))
+    assert agents.bridge_state(str(app), 'opencode', home=str(home)) == 'current'
+    label, subtitle = agents.bridge_button_labels('current')
+    assert label == 'Reinstall'
+    assert 'installed' in subtitle
+
+
+def test_bridge_state_stale_when_content_drifts(tmp_path):
+    app = _app_with_bridge(tmp_path, content='// v1')
+    home = tmp_path / 'home'
+    home.mkdir()
+    agents.install_agent_bridge(str(app), 'opencode', home=str(home))
+    assert agents.bridge_state(str(app), 'opencode', home=str(home)) == 'current'
+    # Source changes → dest is now out of date.
+    (app / 'bridges' / 'opencode' / 'projectman.js').write_text('// v2')
+    assert agents.bridge_state(str(app), 'opencode', home=str(home)) == 'stale'
+
+
+def test_bridge_state_grok_current_after_install(tmp_path):
+    """grok's multi-file bridge (JSON + executable script, with the F12b
+    absolute-path rewrite) reports 'current' once installed."""
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    home = tmp_path / 'home'
+    home.mkdir()
+    assert agents.bridge_state(repo, 'grok', home=str(home)) == 'stale'
+    agents.install_agent_bridge(repo, 'grok', home=str(home))
+    assert agents.bridge_state(repo, 'grok', home=str(home)) == 'current'
+
+
+def test_bridge_state_grok_stale_on_lost_exec_bit(tmp_path):
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    home = tmp_path / 'home'
+    home.mkdir()
+    agents.install_agent_bridge(repo, 'grok', home=str(home))
+    script = home / '.grok' / 'hooks' / 'projectman-status.py'
+    script.chmod(0o644)  # strip exec bit
+    assert agents.bridge_state(repo, 'grok', home=str(home)) == 'stale'
+
+
+def test_bridge_button_labels_all_states():
+    assert agents.bridge_button_labels('current')[0] == 'Reinstall'
+    assert agents.bridge_button_labels('stale')[0] == 'Update bridge'
+    assert agents.bridge_button_labels('missing-source')[0] == 'Install bridge'
+    assert agents.bridge_button_labels('no-bridge')[0] == 'Install bridge'
+
+
 # ── agent_doctor ──────────────────────────────────────────────────────────────
 
 def test_doctor_ok_reports_version():

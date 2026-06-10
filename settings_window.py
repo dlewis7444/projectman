@@ -214,7 +214,11 @@ class SettingsWindow(Adw.PreferencesDialog):
 
         self._paa_haiku_row = Adw.SwitchRow(
             title='Enable AI Scans',
-            subtitle='Use Claude for deeper project analysis',
+            # M-UX.7 (C2): the AI scans always shell out to the `claude` CLI with
+            # native Anthropic credentials — NOT your default agent, NOT ccr. Say
+            # so, so a grok/opencode user isn't surprised by Anthropic billing.
+            subtitle='Uses the claude CLI and Anthropic credentials, '
+                     'regardless of your default agent',
         )
         self._paa_haiku_row.set_active(self._settings.paa_allow_haiku)
         self._paa_haiku_row.set_sensitive(self._settings.paa_enabled)
@@ -578,6 +582,17 @@ class SettingsWindow(Adw.PreferencesDialog):
         cur = self._settings.model_default
         self._model_combo.set_selected(ids.index(cur) if cur in ids else 0)
         self._model_combo.connect('notify::selected', self._on_model_default_changed)
+        # M-UX.1 (C2): tell the truth for the EFFECTIVE default agent. The combo
+        # only lists claude/ccr providers, so when grok/opencode is the default
+        # agent (it picks its model from its OWN config) the combo is irrelevant
+        # — show the truthful "Managed by <agent> (<path>)" subtitle and make the
+        # combo insensitive rather than letting it imply it controls grok's model.
+        import agent_configs
+        agent_id = self._settings.agent_default or 'claude'
+        if agent_configs.load_agent_config(agent_id) is not None:
+            self._model_combo.set_subtitle(
+                agent_configs.default_model_label(self._settings))
+            self._model_combo.set_sensitive(False)
         active_group.add(self._model_combo)
 
         # -- Provider definitions (JSON editor) --
@@ -614,8 +629,60 @@ class SettingsWindow(Adw.PreferencesDialog):
         save_row.add_suffix(save_btn)
         btn_group.add(save_row)
 
+        # -- Native agent model configs (read-only, M-UX.2 / C1) --
+        self._build_native_model_sections(page)
+
         # -- claude-code-router --
         self._build_ccr_group(page)
+
+    def _build_native_model_sections(self, page):
+        """Read-only surfacing of grok's + opencode's native model configs.
+
+        M-UX.2 (C1 VISIBILITY): grok and opencode each decide their model from a
+        config file PM never showed (grok's config.toml, opencode's
+        opencode.json). This adds one read-only section per agent that has such a
+        file, headed with the SOURCE PATH and an "edited in the agent's own
+        config" note — the read-first ruling: PM displays, it does not edit these
+        (that is P4). Defensive: a missing/garbage file shows "none found", never
+        raises (the parsers guarantee it).
+        """
+        import agent_configs
+        for agent_id, display in (('grok', 'Grok Build'), ('opencode', 'opencode')):
+            cfg = agent_configs.load_agent_config(agent_id)
+            if cfg is None:
+                continue
+            shown_path = agent_configs._display_path(cfg.source_path)
+            group = Adw.PreferencesGroup(
+                title=f'{display} models',
+                description=(f'Read-only — edited in the agent’s own config '
+                            f'({shown_path}).'),
+            )
+            page.add(group)
+
+            if not cfg.exists or not cfg.models:
+                empty = Adw.ActionRow(title='No models found')
+                empty.set_subtitle(
+                    'No model definitions in this config (or the file is absent).')
+                empty.set_sensitive(False)
+                group.add(empty)
+                continue
+
+            for entry in cfg.models:
+                is_default = (entry.key == cfg.default_key)
+                title = entry.name or entry.key
+                if is_default:
+                    title = f'{title}  •  default'
+                row = Adw.ActionRow(title=title)
+                # Subtitle: the config KEY plus the upstream model id / endpoint
+                # when the config states them — the full "what runs" story.
+                bits = [f'key: {entry.key}']
+                if entry.model and entry.model != entry.key:
+                    bits.append(f'model: {entry.model}')
+                if entry.base_url:
+                    bits.append(entry.base_url)
+                row.set_subtitle('   '.join(bits))
+                row.set_sensitive(False)
+                group.add(row)
 
     def _build_ccr_group(self, page):
         import ccr
@@ -744,6 +811,9 @@ class SettingsWindow(Adw.PreferencesDialog):
 
         # Per-agent config: binary path + doctor-lite check.
         self._agent_binary_rows = {}
+        # M-UX.8: (row, button) per agent so the bridge state can refresh after
+        # an install click without rebuilding the page.
+        self._bridge_rows = {}
         for agent_id in self._agent_default_ids:
             adapter = agents.ADAPTERS[agent_id]
             group = Adw.PreferencesGroup(title=adapter.display_name)
@@ -777,15 +847,17 @@ class SettingsWindow(Adw.PreferencesDialog):
             if agents.agent_bridge_source(self._app_dir(), agent_id) is not None \
                     or agent_id == 'opencode':
                 bridge_row = Adw.ActionRow(title='Status bridge')
-                bridge_row.set_subtitle(
-                    f'Install the {adapter.display_name} status bridge plugin')
-                bridge_btn = Gtk.Button(label='Install bridge')
+                bridge_btn = Gtk.Button()
                 bridge_btn.set_valign(Gtk.Align.CENTER)
                 bridge_btn.add_css_class('flat')
                 bridge_btn.connect(
                     'clicked', lambda b, aid=agent_id: self._on_install_bridge(aid))
                 bridge_row.add_suffix(bridge_btn)
                 group.add(bridge_row)
+                # M-UX.8 (C5): reflect the bridge's ACTUAL installed state via the
+                # F12a manifest rather than always saying "Install bridge".
+                self._bridge_rows[agent_id] = (bridge_row, bridge_btn)
+                self._refresh_bridge_row(agent_id)
 
     @staticmethod
     def _app_dir():
@@ -829,6 +901,19 @@ class SettingsWindow(Adw.PreferencesDialog):
         else:
             existing.set_from_icon_name(icon)
 
+    def _refresh_bridge_row(self, agent_id):
+        """Set the bridge button label + row subtitle from the manifest state
+        (M-UX.8/C5). Called at build and after every install click."""
+        import agents
+        entry = self._bridge_rows.get(agent_id)
+        if entry is None:
+            return
+        row, btn = entry
+        state = agents.bridge_state(self._app_dir(), agent_id)
+        label, subtitle = agents.bridge_button_labels(state)
+        btn.set_label(label)
+        row.set_subtitle(subtitle)
+
     def _on_install_bridge(self, agent_id):
         import agents
         result = agents.install_agent_bridge(self._app_dir(), agent_id)
@@ -842,6 +927,8 @@ class SettingsWindow(Adw.PreferencesDialog):
         toast = Adw.Toast.new(msgs.get(result, result))
         toast.set_timeout(3)
         self.add_toast(toast)
+        # C5: the button label must now reflect the post-install state.
+        self._refresh_bridge_row(agent_id)
 
     # ------------------------------------------------------------------ #
     #  Extra Pages                                                         #
@@ -874,7 +961,9 @@ class SettingsWindow(Adw.PreferencesDialog):
         info_group.add(name_row)
 
         desc_row = Adw.ActionRow(title='Description')
-        desc_row.set_subtitle('GTK4 desktop manager for Claude Code sessions')
+        # M-UX.5 (C2): agent-neutral — the app drives Claude Code, opencode, and
+        # Grok Build, so "Claude Code sessions" lied on a grok-default install.
+        desc_row.set_subtitle('GTK4 desktop cockpit for AI coding agents')
         desc_row.set_sensitive(False)
         info_group.add(desc_row)
 

@@ -1,0 +1,27 @@
+# grok config.toml fixture — models the bench-vm bench state recorded in
+# scripts-local/evidence/experience-gate/coherence-sweep-1/inventory.md
+# (Machine State Summary + FINDING 1/2/10): default = "pool-qwen",
+# [model.pool-qwen] model = "qwen3.5:9b" / name "Qwen3.5 9B (Ollama pool)" /
+# base_url localhost:11434, auto_update = false, [compat.claude] hooks = false.
+# Pins agent_configs.parse_grok_config (M-UX.2). Values from the sweep's
+# verbatim proof lines; the pool recipe shape matches README "Grok + the ollama
+# pool".
+[models]
+default = "pool-qwen"
+
+[model.pool-qwen]
+model = "qwen3.5:9b"
+base_url = "http://localhost:11434/v1"
+name = "Qwen3.5 9B (Ollama pool)"
+context_window = 32768
+api_key = "ollama"
+
+[model.grok-4]
+model = "grok-4-latest"
+name = "Grok 4"
+
+[cli]
+auto_update = false
+
+[compat.claude]
+hooks = false
