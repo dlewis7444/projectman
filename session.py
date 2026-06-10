@@ -189,3 +189,33 @@ def plan_restore(open_paths, focused_path, active_map):
     focused = focused_path if focused_path and focused_path in active_map else None
     background = [p for p in open_paths if p in active_map and p != focused_path]
     return focused, background
+
+
+def plan_emergency_kill(terminals):
+    """Select which terminals to kill on a SIGTERM/SIGHUP emergency shutdown.
+
+    terminals : dict[path → TerminalView-like] (duck-typed: needs
+                ``._child_pid`` and ``._is_zellij``)
+    Returns   : list[str] — paths of DIRECT-spawn terminals with a live child,
+                in dict-iteration order.
+
+    Only direct-spawn children get killed: zellij terminals are skipped because
+    their sessions persist by design (the product's detach value — a logout must
+    not tear them down). Terminals with no live child (``_child_pid is None``)
+    are skipped too.
+    """
+    return [
+        path for path, tv in terminals.items()
+        if tv._child_pid is not None and not tv._is_zellij
+    ]
+
+
+def should_quit_app(primary_window, closing_window):
+    """Decide whether closing ``closing_window`` should quit the whole app.
+
+    True iff the window being closed IS the primary window, or there is no
+    primary window recorded (``None``). A stray/duplicate window closing must
+    not quit the app and take unrelated sessions down with it — defense in
+    depth for the duplicate-window class.
+    """
+    return primary_window is closing_window or primary_window is None

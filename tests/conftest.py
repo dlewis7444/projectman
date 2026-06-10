@@ -17,6 +17,18 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _pin_test_app_id(monkeypatch):
+    """Blanket guard: every test run constructs the app under a TEST DBus id.
+
+    Independent of the display gate — even a future test that constructs
+    ProjectManApp must never share ``io.github.projectman`` with the user's
+    live instance (incident bug c). main.py reads PM_APP_ID at construction.
+    """
+    monkeypatch.setenv('PM_APP_ID', 'io.github.projectman.test')
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_projectman_paths(tmp_path_factory, monkeypatch):
     fake_home = tmp_path_factory.mktemp('_pm_home')
     monkeypatch.setattr(
