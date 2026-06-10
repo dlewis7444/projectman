@@ -80,6 +80,13 @@ class TerminalView(Gtk.Box):
         'process-exited':   (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         'process-started':  (GObject.SignalFlags.RUN_FIRST, None, ()),
         'process-detached': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        # M-UX.10a (C7): a spawn that failed because the agent binary isn't
+        # installed (child exited within ~2s with rc 126/127 — exec-not-found /
+        # not-executable). Carries the missing binary name so window.py can fire
+        # a one-shot install-hint toast and KEEP the row, instead of leaving a
+        # raw bash error + a vanished row. process-exited still fires too (the
+        # row goes 'inactive'); this is the explanatory layer on top.
+        'process-spawn-failed': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self, project, settings, agent_id=None):
@@ -116,6 +123,11 @@ class TerminalView(Gtk.Box):
         # backend (ccr) is wanted but unavailable; cleared on a successful spawn.
         # window.py reads this from the process-started handler.
         self._fallback_reason = None
+        # M-UX.10a: spawn-failure detection. Stamped at each _spawn with the
+        # monotonic time + the binary argv[0]; consulted in the exit path to tell
+        # an exec-not-found death (rc 126/127 within ~2s) from a normal exit.
+        self._spawn_monotonic = None
+        self._spawn_binary = None
         self._font_size = settings.font_size
         # PM-owned pidfd watches, one per spawned child. Each entry is a dict
         # {pid, fd, source_id}. Vte's reaper is no longer in the picture —
@@ -514,6 +526,14 @@ class TerminalView(Gtk.Box):
         # PARENT.
         self._terminal.set_pty(pty)
         self._child_pid = pid
+        # M-UX.10a: remember when + what we launched so the exit path can detect
+        # an exec-not-found death. argv[0] is the binary; under the bash continue
+        # wrapper (`bash -c …`) argv[0] is bash and the REAL miss surfaces as the
+        # wrapper exiting 127 — still within the window, still attributable to the
+        # adapter's binary, which window.py resolves from the adapter.
+        import time as _time
+        self._spawn_monotonic = _time.monotonic()
+        self._spawn_binary = argv_list[0] if argv_list else ''
         self._spawned_model = self._settings.effective_model(self._project.path)
         # The agent id the live child was actually spawned with — lets window.py
         # detect when an agent override leaves a running session stale (B3),
@@ -575,14 +595,41 @@ class TerminalView(Gtk.Box):
         if pid != self._child_pid:
             return False
         self._child_pid = None
+        # M-UX.10a: a fast exec-not-found death is a spawn FAILURE, not a normal
+        # exit. Detect it BEFORE the zellij/exited emits so window.py can fire the
+        # install-hint toast; process-exited still follows (row → 'inactive', kept).
+        spawn_failed = self._is_spawn_failure(status)
         if self._is_zellij and self._zellij_session:
             if zellij.session_alive(self._zellij_session):
                 self.emit('process-detached')
                 return False
             self._is_zellij = False
             self._zellij_session = None
+        if spawn_failed:
+            self.emit('process-spawn-failed', self._spawn_binary or '')
         self.emit('process-exited', status)
         return False  # for idle_add — single-shot
+
+    def _is_spawn_failure(self, status):
+        """True when the just-exited child looks like an exec-not-found death.
+
+        The signature (M-UX.10a): the child exited within ~2s of spawn with exit
+        code 126 (found but not executable) or 127 (not found) — the codes
+        ``os.execvpe`` failure produces (our fork child does ``os._exit(127)``;
+        the bash continue-wrapper relays 127 from a failed ``exec``). A clean
+        agent quit (rc 0) or a signal death never matches, so a real session that
+        ends quickly is not mistaken for a missing binary. Pure + defensive.
+        """
+        if self._spawn_monotonic is None:
+            return False
+        import time as _time
+        if (_time.monotonic() - self._spawn_monotonic) > 2.0:
+            return False
+        try:
+            code = os.waitstatus_to_exitcode(status)
+        except (ValueError, ChildProcessError):
+            return False
+        return code in (126, 127)
 
     def check_child_alive(self):
         """Defensive backup for our pidfd watch.

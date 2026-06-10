@@ -335,6 +335,14 @@ class PAAMonitor(GObject.GObject):
     __gsignals__ = {
         'findings-changed': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         'scan-progress': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # M-UX.4: an on-demand AI scan (Haiku Check) was REFUSED because the
+        # guards weren't met — carries a human reason for window.py to toast.
+        # NO model call is made when this fires (the billing-leak fix).
+        'scan-blocked': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # M-UX.4: an on-demand AI scan finished — carries (project_name,
+        # new_findings) so window.py can SHOW the result (the sweep found Haiku
+        # Check produced no visible output).
+        'single-scan-complete': (GObject.SignalFlags.RUN_FIRST, None, (str, int,)),
     }
 
     def __init__(self, store, ledger, settings):
@@ -373,7 +381,27 @@ class PAAMonitor(GObject.GObject):
         GLib.idle_add(lambda n=names: self.emit('scan-progress', n) or False)
 
     def scan_single_project(self, project_name, project_path):
-        """Force an AI scan of a single project in the background."""
+        """Force an AI scan of a single project (Haiku Check) in the background.
+
+        M-UX.4 (C2/C4/C6 — the billing leak): the AI scan calls the `claude`
+        CLI and bills Anthropic, so it MUST be gated. BOTH guards are checked
+        SYNCHRONOUSLY here, BEFORE any thread or model call:
+
+          * ``paa_enabled``     — the master PAA toggle, and
+          * ``paa_allow_haiku`` — the "Enable AI Scans" toggle.
+
+        If either is off, the method emits ``scan-blocked`` and RETURNS without
+        starting the worker thread — so the disabled path provably makes ZERO
+        ``run_ai_checks`` calls (the sweep saw paa_budget_used jump 0→298 with
+        PAA disabled). On the allowed path the worker runs and emits
+        ``single-scan-complete`` so the result is actually SHOWN (the sweep found
+        no visible output). Returns True when the scan was started, False when
+        blocked (also lets headless tests assert the decision without threads).
+        """
+        if not (self._settings.paa_enabled and self._settings.paa_allow_haiku):
+            self.emit('scan-blocked', 'AI scans are disabled (Settings → PAA)')
+            return False
+
         def _worker():
             self._active_ai_projects = {project_name}
             self._emit_progress()
@@ -387,8 +415,10 @@ class PAAMonitor(GObject.GObject):
             self._active_ai_projects = set()
             self._emit_progress()
             self._last_mtime[project_path] = _project_mtime(project_path)
+            new_findings = 0
             for item in ai_items:
-                self._ledger.add_if_new(item)
+                if self._ledger.add_if_new(item):
+                    new_findings += 1
             if tokens > 0:
                 self._settings.paa_budget_used += tokens
                 self._settings.save()
@@ -396,7 +426,11 @@ class PAAMonitor(GObject.GObject):
             _save_mtime_cache(self._last_mtime)
             count = self._ledger.pending_count
             GLib.idle_add(lambda c=count: self.emit('findings-changed', c) or False)
+            GLib.idle_add(
+                lambda n=project_name, k=new_findings:
+                self.emit('single-scan-complete', n, k) or False)
         threading.Thread(target=_worker, daemon=True).start()
+        return True
 
     def schedule_scan(self):
         """Run scan in background thread to avoid blocking the UI."""

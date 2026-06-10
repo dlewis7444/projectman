@@ -154,7 +154,12 @@ class SettingsWindow(Adw.PreferencesDialog):
 
         self._paa_enabled_row = Adw.SwitchRow(
             title='Enable PAA',
-            subtitle='Scans projects for issues (filesystem only — no API cost)',
+            # M-UX.4 (C2): the old "filesystem only — no API cost" lied — PAA's
+            # AI scans bill Anthropic. Split the copy: the master toggle enables
+            # the monitor (whose FILESYSTEM checks are free); the API cost belongs
+            # to "Enable AI Scans" below, which discloses it.
+            subtitle='Background project health monitor. Filesystem checks are '
+                     'free; AI scans (below) use the claude CLI.',
         )
         self._paa_enabled_row.set_active(self._settings.paa_enabled)
         self._paa_enabled_row.connect('notify::active', self._on_paa_enabled_toggled)

@@ -430,3 +430,43 @@ def test_attached_dot_survives_adapter_resolution_failure(monkeypatch):
 def GObject_signal_exists(cls, name):
     from gi.repository import GObject
     return GObject.signal_lookup(name, cls) != 0
+
+
+# ── M-UX.11 (S12): the two header icon buttons carry tooltips ─────────────────
+
+def _make_sidebar():
+    from model import ProjectStore, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    settings = Settings(projects_dir='/tmp/pm-nonexistent-sidebar-test')
+    store = ProjectStore(settings)
+    history = HistoryReader()
+    watcher = StatusWatcher()
+    return Sidebar(store, history, watcher, version='test', settings=settings)
+
+
+def test_header_icon_buttons_have_tooltips():
+    """S12 audit: the adjacent header icon buttons (New Project + the PAA
+    sparkle) are labeled for keyboard/screen-reader users."""
+    sb = _make_sidebar()
+    assert sb._paa_btn.get_tooltip_text() == 'Projects Admin Agent'
+    # the "New Project" (+) button is the first child of the header row; assert a
+    # button with that tooltip exists in the sidebar.
+    found = _find_button_with_tooltip(sb, 'New Project')
+    assert found, 'the New Project (+) header button has no tooltip'
+
+
+def test_settings_gear_has_tooltip():
+    sb = _make_sidebar()
+    assert _find_button_with_tooltip(sb, 'Settings'), 'Settings gear has no tooltip'
+
+
+def _find_button_with_tooltip(widget, tooltip):
+    if isinstance(widget, Gtk.Button) and widget.get_tooltip_text() == tooltip:
+        return True
+    child = widget.get_first_child() if hasattr(widget, 'get_first_child') else None
+    while child is not None:
+        if _find_button_with_tooltip(child, tooltip):
+            return True
+        child = child.get_next_sibling()
+    return False

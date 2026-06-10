@@ -171,6 +171,9 @@ class ClaudeAdapter:
     """
     id = 'claude'
     display_name = 'Claude Code'
+    # M-UX.10 (C7): shown in the one-shot toast when a spawn fails because the
+    # binary isn't installed — a recovery path, not a raw bash error.
+    install_hint = 'Install from claude.ai/code'
     caps = AgentCaps(
         continue_=True,
         resume_by_id=True,
@@ -494,6 +497,8 @@ class OpencodeAdapter:
     """
     id = 'opencode'
     display_name = 'opencode'
+    # M-UX.10 (C7): recovery hint surfaced on a missing-binary spawn failure.
+    install_hint = 'Install from opencode.ai'
     caps = AgentCaps(
         continue_=True,
         resume_by_id=True,
@@ -764,6 +769,9 @@ class GrokAdapter:
     """
     id = 'grok'
     display_name = 'Grok Build'
+    # M-UX.10 (C7): recovery hint surfaced on a missing-binary spawn failure —
+    # the curl one-liner from the README's "Installing Grok Build".
+    install_hint = 'Install: curl -fsSL https://x.ai/cli/install.sh | bash'
     caps = AgentCaps(
         continue_=True,
         resume_by_id=True,

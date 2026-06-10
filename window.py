@@ -38,6 +38,9 @@ class AppWindow(Adw.ApplicationWindow):
         self._restore_agents: dict = {}
         # Distinct missing-agent ids already toasted (A6 one-shot dedup).
         self._warned_agents: set = set()
+        # (project_path, agent_id) pairs already toasted for a spawn failure
+        # (M-UX.10a one-shot dedup — a restore storm of the same miss is one toast).
+        self._warned_spawn_fail: set = set()
         self._mru = []          # most-recently-used project paths, index 0 = current
         self._archive_win = None
         self._settings_win = None
@@ -50,6 +53,9 @@ class AppWindow(Adw.ApplicationWindow):
         if paa_monitor:
             paa_monitor.connect('findings-changed', self._on_paa_findings_changed)
             paa_monitor.connect('scan-progress', self._on_paa_scan_progress)
+            # M-UX.4: surface the Haiku-Check outcome — refused (guard) or done.
+            paa_monitor.connect('scan-blocked', self._on_paa_scan_blocked)
+            paa_monitor.connect('single-scan-complete', self._on_paa_single_scan_complete)
         zellij_watcher.connect('sessions-changed', self._on_zellij_sessions_changed)
 
         self.set_default_size(1200, 750)
@@ -436,6 +442,57 @@ class AppWindow(Adw.ApplicationWindow):
             self._terminals[self._active_path].spawn_continue(project_name=pname)
         return True
 
+    def _show_toast(self, text, timeout=5):
+        """Fire a one-shot toast (M-UX.3/10/11 share this).
+
+        Plain wrapper over the overlay so failure-surface handlers don't each
+        reimplement Toast plumbing; the ccr fallback path keeps its own
+        aggregating helper (it batches + dedups, this does not)."""
+        toast = Adw.Toast.new(text)
+        toast.set_timeout(timeout)
+        self._toast_overlay.add_toast(toast)
+
+    def _spawn_failure_toast_text(self, agent_id, raw_binary):
+        """The M-UX.10a toast string: '<binary> not found — <display> isn't
+        installed. <install hint>'.
+
+        Resolves the agent's REAL binary + display name + install hint from the
+        adapter (the raw argv[0] can be 'bash' under the continue wrapper, so we
+        prefer the adapter's binary). Pure string assembly; no GTK."""
+        import agents
+        adapter = agents.ADAPTERS.get(agent_id) or agents.get_adapter(agent_id, self._settings)
+        display = getattr(adapter, 'display_name', agent_id)
+        hint = getattr(adapter, 'install_hint', '')
+        binary = agent_id
+        try:
+            if agent_id == 'claude':
+                binary = self._settings.resolved_claude_binary
+            elif hasattr(adapter, '_binary'):
+                binary = adapter._binary(self._settings)
+        except Exception:
+            pass
+        # If the raw argv[0] was a concrete path (not the bash wrapper), prefer it.
+        if raw_binary and os.path.basename(raw_binary) not in ('bash', 'sh', ''):
+            binary = raw_binary
+        msg = f"{binary} not found — {display} isn't installed."
+        if hint:
+            msg = f"{msg} {hint}"
+        return msg
+
+    def _on_spawn_failed(self, project_path, agent_id, raw_binary):
+        """M-UX.10a (C7): a missing-binary spawn → one-shot install-hint toast.
+
+        The row is NOT touched here — process-exited already set it 'inactive'
+        (kept visible because set_active_only no longer fires on the activation
+        attempt, M-UX.10b). This adds the in-app explanation + recovery path the
+        triple-whammy lacked. Warned once per (project, agent) so a restore storm
+        doesn't stack toasts."""
+        key = (project_path, agent_id)
+        if key in self._warned_spawn_fail:
+            return
+        self._warned_spawn_fail.add(key)
+        self._show_toast(self._spawn_failure_toast_text(agent_id, raw_binary))
+
     def _show_ccr_fallback_toast(self, project_name, reason):
         """Enqueue a fallback notice for aggregation; flush after a ~2s window.
 
@@ -534,6 +591,11 @@ class AppWindow(Adw.ApplicationWindow):
 
             def _on_started(t, p=project.path, n=project.name):
                 self._sidebar.set_project_state(p, 'attached', is_zellij=t._is_zellij)
+                # M-UX.10b (C7): the auto "Active Only" filter engages only once
+                # something actually RUNS — NOT on the activation attempt. This is
+                # what keeps a failed-spawn row visible (a spawn that never starts
+                # never flips the filter, so the 'inactive' row isn't hidden).
+                self._sidebar.set_active_only(True)
                 # Surface ccr fallback notice if this spawn fell back to native.
                 if t._fallback_reason:
                     self._show_ccr_fallback_toast(n, t._fallback_reason)
@@ -543,6 +605,8 @@ class AppWindow(Adw.ApplicationWindow):
                        lambda t, s, p=project.path: self._sidebar.set_project_state(p, 'inactive', is_zellij=False))
             tv.connect('process-detached',
                        lambda t, p=project.path: self._sidebar.set_project_state(p, 'detached', is_zellij=True))
+            tv.connect('process-spawn-failed',
+                       lambda t, b, p=project.path: self._on_spawn_failed(p, t._adapter.id, b))
             self._terminals[project.path] = tv
             self._stack.add_named(tv, project.path)
         return self._terminals[project.path]
@@ -583,7 +647,11 @@ class AppWindow(Adw.ApplicationWindow):
     def _on_project_activated(self, sidebar, path):
         if self._search_entry.get_text():
             self._search_entry.set_text('')
-        self._sidebar.set_active_only(True)
+        # M-UX.10b (C7): do NOT enable "Active Only" here. The auto-filter now
+        # fires from the process-started handler (_on_started) — i.e. only once a
+        # child actually runs — so a spawn that FAILS (missing binary) leaves the
+        # row visible in 'inactive' instead of being hidden by an eagerly-set
+        # filter (the triple-whammy's third blow). The manual toggle is untouched.
         self._switch_to_project(path)
 
     def _on_session_activated(self, sidebar, path, session_id):
@@ -705,7 +773,24 @@ class AppWindow(Adw.ApplicationWindow):
             return
         project = self._find_project(path)
         if project:
+            # The paa_enabled AND paa_allow_haiku guard now lives INSIDE
+            # scan_single_project (M-UX.4) — a disabled scan makes zero model
+            # calls and emits 'scan-blocked' (→ toast) instead of silently
+            # billing Anthropic.
             self._paa_monitor.scan_single_project(project.name, project.path)
+
+    def _on_paa_scan_blocked(self, monitor, reason):
+        """M-UX.4 (C6): the Haiku Check was refused — say why, loudly."""
+        self._show_toast(reason)
+
+    def _on_paa_single_scan_complete(self, monitor, project_name, new_findings):
+        """M-UX.4 (C6): show the Haiku Check RESULT (the sweep saw none)."""
+        if new_findings > 0:
+            msg = (f'Scan of {project_name}: {new_findings} new '
+                   f'{"finding" if new_findings == 1 else "findings"}')
+        else:
+            msg = f'Scan of {project_name}: no new findings'
+        self._show_toast(msg)
 
     def _on_paa_scan_progress(self, monitor, names):
         self._sidebar.set_paa_scanning(names)
@@ -729,6 +814,12 @@ class AppWindow(Adw.ApplicationWindow):
     def _on_project_open_zellij(self, sidebar, path):
         """Explicit 'Open in Zellij' — always create/attach zellij session."""
         if self._settings.multiplexer != 'zellij':
+            # M-UX.3 (C6): "New Zellij Session" used to silently no-op (a brief
+            # spinner, then nothing) when the multiplexer wasn't zellij. Say why,
+            # and do NOT spawn (no spinner): the action that does nothing explains
+            # itself. This is the constitution's own origin case for C6.
+            self._show_toast(
+                'Zellij is disabled (Settings → Terminal → Multiplexer)')
             return
         project = self._find_project(path)
         if not project:
@@ -796,6 +887,7 @@ class AppWindow(Adw.ApplicationWindow):
         restart a live session whose running agent now differs.
         """
         from models import FOLLOW_DEFAULT
+        import agents
         overrides = dict(self._settings.agent_overrides)
         if value == FOLLOW_DEFAULT:
             overrides.pop(path, None)
@@ -806,6 +898,14 @@ class AppWindow(Adw.ApplicationWindow):
         # Push the change through apply_settings so terminals + sidebar rows
         # re-resolve the effective agent (subtitle, caps gating, radio state).
         self.apply_settings(self._settings)
+        # M-UX.11 (S8): the selection feedback was too subtle. Fire a one-shot
+        # toast naming the project + the now-effective agent's display name.
+        project = self._find_project(path)
+        name = project.name if project else os.path.basename(path)
+        effective_id = self._settings.effective_agent(path)
+        adapter = agents.ADAPTERS.get(effective_id)
+        display = adapter.display_name if adapter is not None else effective_id
+        self._show_toast(f'Agent for {name}: {display}')
         self._maybe_prompt_restart(path)
 
     def _maybe_prompt_restart(self, path):

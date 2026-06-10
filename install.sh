@@ -10,8 +10,9 @@ HOOK_DEST="$HOME/.claude/projectman/hook.js"
 OPENCODE_PLUGIN_DIR="$HOME/.config/opencode/plugins"
 OPENCODE_PLUGIN_DEST="$OPENCODE_PLUGIN_DIR/projectman.js"
 GROK_HOOKS_DIR="$HOME/.grok/hooks"
-GROK_HOOK_JSON_DEST="$GROK_HOOKS_DIR/projectman.json"
-GROK_HOOK_SCRIPT_DEST="$GROK_HOOKS_DIR/projectman-status.py"
+# (The grok bridge file destinations live in the shared manifest in agents.py —
+# install.sh no longer duplicates them here; the unused GROK_*_DEST vars were
+# removed, SC2034.)
 GROK_CONFIG_TOML="$HOME/.grok/config.toml"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -38,6 +39,26 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     echo "  The data directory ~/.ProjectMan/ was left in place."
     exit 0
 fi
+
+# ── version banner (M-UX.9 — the version-echo papercut) ─────────────────────────
+# Tell the user EXACTLY what they're installing: the VERSION string from main.py
+# plus the git short-hash of the tree being installed (so a "did my pull take?"
+# is answerable from the install output, not guesswork).
+PM_VERSION="$(python3 - "$SCRIPT_DIR/main.py" <<'PY' 2>/dev/null || true
+import re, sys
+try:
+    with open(sys.argv[1]) as f:
+        m = re.search(r"""^VERSION\s*=\s*['"]([^'"]+)['"]""", f.read(), re.M)
+    print(m.group(1) if m else "")
+except OSError:
+    print("")
+PY
+)"
+PM_COMMIT="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+PM_BANNER="ProjectMan"
+[[ -n "$PM_VERSION" ]] && PM_BANNER="$PM_BANNER $PM_VERSION"
+[[ -n "$PM_COMMIT" ]]  && PM_BANNER="$PM_BANNER ($PM_COMMIT)"
+info "Installing $PM_BANNER"
 
 # ── dependency checks ──────────────────────────────────────────────────────────
 check_import() { python3 -c "$1" 2>/dev/null; }
@@ -81,9 +102,11 @@ if ! command -v node &>/dev/null; then
     exit 1
 fi
 
-if ! command -v claude &>/dev/null; then
-    warn "'claude' CLI not found in PATH. Install it before running ProjectMan."
-fi
+# claude is OPTIONAL (ProjectMan drives claude/opencode/grok — install whichever
+# you use). Just record its presence so the hook summary below tells a coherent
+# story instead of a warn-now / "registered!"-later contradiction (S1).
+CLAUDE_PRESENT=true
+command -v claude &>/dev/null || CLAUDE_PRESENT=false
 
 # ── copy app files ─────────────────────────────────────────────────────────────
 info "Installing to $INSTALL_DIR ..."
@@ -205,7 +228,9 @@ register_claude_hooks() {
     fi
 
     if [[ "$existed" == "true" ]]; then
-        local backup="$CLAUDE_SETTINGS.bak.$(date +%Y%m%d-%H%M%S)"
+        # SC2155: declare then assign so the date(1) exit status isn't masked.
+        local backup
+        backup="$CLAUDE_SETTINGS.bak.$(date +%Y%m%d-%H%M%S)"
         cp "$CLAUDE_SETTINGS" "$backup"
         mv "$tmp" "$CLAUDE_SETTINGS"
         info "Registered ProjectMan hooks in $CLAUDE_SETTINGS (backup: $backup)."
@@ -294,19 +319,36 @@ echo "  Uninstall: $SCRIPT_DIR/install.sh --uninstall"
 echo ""
 echo "  To update, pull the latest code and re-run this script."
 echo ""
-case "$HOOK_STATUS" in
-    registered)
-        echo "  Status indicator hooks are registered. Restart any running Claude"
-        echo "  Code sessions for the changes to take effect."
-        ;;
-    already)
-        echo "  Status indicator hooks are already registered in $CLAUDE_SETTINGS."
-        ;;
-    skipped|manual|*)
-        echo "  Status indicators (the coloured dots) require the hook script to be"
-        echo "  registered in Claude Code. See README.md → 'Enabling status indicators'."
-        ;;
-esac
+# M-UX.9 (S1): the claude-hook summary is now per-agent-aware and coherent. When
+# claude isn't installed, we DON'T warn-then-claim-success — the hooks are STAGED
+# in ~/.claude/settings.json and simply activate if/when claude is installed.
+if [[ "$CLAUDE_PRESENT" == "false" ]]; then
+    case "$HOOK_STATUS" in
+        registered|already)
+            echo "  Claude Code not found — its status hooks are staged in"
+            echo "  $CLAUDE_SETTINGS and will activate if you install claude."
+            echo "  (ProjectMan also drives opencode and grok; claude is optional.)"
+            ;;
+        skipped|manual|*)
+            echo "  Claude Code not found, and its hooks weren't staged. If you"
+            echo "  install claude later, see README.md → 'Enabling status indicators'."
+            ;;
+    esac
+else
+    case "$HOOK_STATUS" in
+        registered)
+            echo "  Claude Code status hooks are registered. Restart any running"
+            echo "  Claude Code sessions for the change to take effect."
+            ;;
+        already)
+            echo "  Claude Code status hooks are already registered in $CLAUDE_SETTINGS."
+            ;;
+        skipped|manual|*)
+            echo "  Status indicators (the coloured dots) require the hook script to be"
+            echo "  registered in Claude Code. See README.md → 'Enabling status indicators'."
+            ;;
+    esac
+fi
 case "$OPENCODE_BRIDGE_STATUS" in
     installed)
         echo "  opencode status bridge installed to $OPENCODE_PLUGIN_DEST."
@@ -325,13 +367,17 @@ case "$GROK_BRIDGE_STATUS" in
         echo "  Grok Build status bridge already up to date in $GROK_HOOKS_DIR/."
         ;;
 esac
+# M-UX.9 (S3): the compat note rewritten for someone who has never seen grok's
+# config — explain WHAT the overlap is and WHY we disable it, not just the key.
 case "$GROK_COMPAT_STATUS" in
     installed)
-        echo "  Set [compat.claude] hooks = false in $GROK_CONFIG_TOML"
-        echo "  (so Claude's hooks don't double-fire on grok events)."
+        echo "  grok also reads Claude-style hooks, so without this they'd BOTH"
+        echo "  fire on a grok turn. Set [compat.claude] hooks = false in"
+        echo "  $GROK_CONFIG_TOML so the grok status dot fires exactly once."
         ;;
     already)
-        echo "  grok [compat.claude] hooks already disabled in $GROK_CONFIG_TOML."
+        echo "  grok's Claude-hook overlap is already disabled in $GROK_CONFIG_TOML"
+        echo "  ([compat.claude] hooks = false), so its status dot fires once."
         ;;
 esac
 echo ""

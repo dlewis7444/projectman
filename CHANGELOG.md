@@ -50,6 +50,16 @@ All notable changes to ProjectMan will be documented in this file.
   numbered install step, and a new **Installing Grok Build** section documents
   the curl installer and the account-vs-pool choice. _(Found by the Experience
   Gate pilot.)_
+- **install.sh output is clearer.** It now prints the version + git short-hash
+  it's installing ("Installing ProjectMan 1.1.1 (&lt;hash&gt;)"); the Claude-hook
+  summary is per-agent-coherent (claude absent ⇒ "hooks staged; they activate
+  when claude is installed", no more warn-then-"registered!" contradiction); the
+  grok compat note is rewritten for someone who's never seen grok's config; and
+  the unused `GROK_*_DEST` shell vars (SC2034) were removed. _(Found by the
+  Experience Gate pilot.)_
+- **Selecting a per-project agent gives feedback.** Picking an agent from the
+  sidebar **Agent** submenu now fires a one-shot "Agent for &lt;project&gt;:
+  &lt;agent&gt;" toast. _(Found by the Experience Gate pilot.)_
 - **install.sh disables grok's Claude-compat hooks (load-bearing).** grok reads
   `~/.claude/settings.json` hooks by default, so Claude's ProjectMan hook would
   double-fire on grok events. The grok install step now sets
@@ -58,6 +68,27 @@ All notable changes to ProjectMan will be documented in this file.
   the grok bridge the sole status writer for grok sessions.
 
 ### Fixed
+- **PAA "Haiku Check" no longer bills Anthropic when scans are disabled
+  (billing leak).** The on-demand AI scan called the `claude` CLI
+  unconditionally — with PAA disabled, one click silently spent ~298 Anthropic
+  tokens and showed no result. It now checks **both** guards (`paa_enabled` AND
+  the "Enable AI Scans" toggle) *before* any model call: disabled → zero calls
+  and a "AI scans are disabled (Settings → PAA)" toast; enabled → the scan runs
+  and its result is shown. The PAA copy that claimed "no API cost" is gone.
+  _(Found by the Experience Gate pilot.)_
+- **A missing agent binary no longer wrecks the UI (the first-run
+  triple-whammy).** Activating a project whose agent isn't installed used to
+  show a raw bash error, drop the project row entirely, and auto-enable the
+  "Active Only" filter that hid the wreckage. Now: the spawn failure is
+  detected (fast 126/127 exit), the row STAYS visible as inactive, and a
+  one-shot toast names the binary and how to install it ("<binary> not found —
+  <agent> isn't installed. <install hint>"). The "Active Only" auto-filter now
+  engages only when a session actually starts, never on a failed attempt.
+  _(Found by the Experience Gate pilot.)_
+- **"New Zellij Session" explains itself when zellij is off.** With the
+  multiplexer set to anything but zellij, the action silently no-oped (a brief
+  spinner, then nothing). It now shows "Zellij is disabled (Settings → Terminal
+  → Multiplexer)" and doesn't spin. _(Found by the Experience Gate pilot.)_
 - **"Default Model" tells the truth for the active default agent.** The row and
   the sidebar **Model** submenu's "Default (…)" item used to claim "Anthropic
   (native Claude)" even when grok was the default agent running Qwen. They now
