@@ -4,6 +4,10 @@ All notable changes to ProjectMan will be documented in this file.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-06-10
+
+_(Version 1.1.0 was never released; the label is retired.)_
+
 ### Added
 - **Signal-safe shutdown (SIGTERM/SIGHUP).** A logout, system stop, or terminal
   hangup now saves the session FIRST, then tears down the live **direct-spawn**
