@@ -61,6 +61,15 @@ class ProjectManApp(Adw.Application):
         self._theme_provider = None
 
         icon_theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+        # ICON PLACEMENT RULE (P3.5f, bench-proven): a custom SVG added via
+        # add_search_path must sit at the search-path ROOT (icons/<name>.svg),
+        # NOT under the freedesktop scalable/actions/ hierarchy. GTK4's unthemed
+        # lookup off this path resolves files at the root and IGNORES the
+        # scalable/<context>/ tree — has_icon('pm-sparkle-symbolic') was False at
+        # icons/scalable/actions/ and True at icons/pm-sparkle-symbolic.svg.
+        # (icons/scalable/apps/io.github.projectman.svg likely never resolves via
+        # this path either; the window icon comes from the .desktop file, so it's
+        # left in place for now — flagged, not moved.)
         icon_theme.add_search_path(os.path.join(
             os.path.dirname(os.path.abspath(__file__)), 'icons'
         ))

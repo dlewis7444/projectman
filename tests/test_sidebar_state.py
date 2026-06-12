@@ -651,6 +651,55 @@ def test_claude_project_model_submenu_lists_ccr_options_unchanged(tmp_path):
     assert 'pool-qwen' not in targets
 
 
+def test_claude_override_row_default_label_is_per_row_not_global(tmp_path, monkeypatch):
+    """BINDING (P3.5f / C2, David's second reveal): on a grok-default bench, a
+    project that OVERRIDES its agent to claude shows a 'Default (…)' label that
+    tells CLAUDE's story — NOT the global grok default's 'Grok Build' story, even
+    though the window pushes that grok label as global_label. The row derives its
+    OWN label from its effective agent."""
+    import agent_configs
+    from settings import Settings
+    cfg = tmp_path / 'config.toml'
+    cfg.write_text(_read_fixture('grok', 'config.toml'))
+    monkeypatch.setattr(agent_configs, 'GROK_CONFIG_PATH', str(cfg))
+    from models import FOLLOW_DEFAULT, NATIVE_LABEL
+    # Global default is grok; THIS project overrides to claude.
+    s = Settings(agent_default='grok',
+                 agent_overrides={'/tmp/claudeoverride': 'claude'})
+    row = _make_row_with_settings(s, path='/tmp/claudeoverride')
+    # The window pushes the GROK global label (what _refresh_sidebar_models
+    # computes from agent_default=grok) — the row must NOT wear it.
+    grok_global = agent_configs.default_model_label(s, home=str(tmp_path.parent))
+    row.set_model_options([('openrouter/foo', 'OpenRouter — Foo')],
+                          FOLLOW_DEFAULT, grok_global)
+    labels = _model_submenu_labels(row)
+    default_lbls = [l for l in labels if l.startswith('Default (')]
+    assert len(default_lbls) == 1
+    default_lbl = default_lbls[0]
+    # Tells claude's native story, NOT the grok default's.
+    assert NATIVE_LABEL in default_lbl
+    assert 'Grok Build' not in default_lbl
+
+
+def test_grok_row_default_label_keeps_grok_story(tmp_path, monkeypatch):
+    """REGRESSION (P3.5f / C2): a grok project on a grok bench still shows grok's
+    Default label — the per-row resolver did not regress the grok story."""
+    import agent_configs
+    from settings import Settings
+    cfg = tmp_path / 'config.toml'
+    cfg.write_text(_read_fixture('grok', 'config.toml'))
+    monkeypatch.setattr(agent_configs, 'GROK_CONFIG_PATH', str(cfg))
+    from models import FOLLOW_DEFAULT, NATIVE_LABEL
+    s = Settings(agent_default='grok')
+    row = _make_row_with_settings(s, path='/tmp/grokproj')
+    row.set_model_options([('openrouter/foo', 'OpenRouter — Foo')],
+                          FOLLOW_DEFAULT, NATIVE_LABEL)
+    labels = _model_submenu_labels(row)
+    default_lbls = [l for l in labels if l.startswith('Default (')]
+    assert len(default_lbls) == 1
+    assert 'Grok Build' in default_lbls[0]
+
+
 def _read_fixture(*parts):
     import os
     base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')

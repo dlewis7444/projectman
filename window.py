@@ -934,6 +934,10 @@ class AppWindow(Adw.ApplicationWindow):
         # opencode read their own config (the row used to claim "Anthropic
         # (native Claude)" while grok ran Qwen). default_model_label returns
         # claude's native/ccr label unchanged when claude is the default.
+        # P3.5f (David's second reveal): each ROW now derives its OWN label from
+        # its effective agent (a claude-override row must not wear the global
+        # grok default's story). This global label is passed only as the
+        # fallback for settings-less/legacy rows.
         global_label = agent_configs.default_model_label(self._settings)
         self._sidebar.set_model_options(
             options, self._settings.model_overrides, global_label)

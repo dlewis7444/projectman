@@ -364,11 +364,38 @@ def default_model_label(settings, *, home=None, native_label=None):
     ``native_label`` defaults to ``models.NATIVE_LABEL`` (lazy import to keep
     this module GTK-free and import-light). Pure + defensive — never raises.
     """
+    import agents as _agents
+    agent_id = getattr(settings, 'agent_default', '') or _agents.DEFAULT_AGENT
+    return _label_for_agent(agent_id, home=home, native_label=native_label)
+
+
+def default_model_label_for(settings, project_path, *, home=None,
+                            native_label=None):
+    """Per-ROW truthful "Default Model" label for ``project_path`` (C2 / P3.5f).
+
+    David's second reveal: a claude-OVERRIDE project's Model submenu wore the
+    GLOBAL default agent's label — "Default (Managed by Grok Build…)" on a row
+    that actually runs claude — because the window computed ONE label from
+    ``agent_default`` and pushed it to every row. This resolves the project's
+    EFFECTIVE agent (``settings.effective_agent(project_path)`` — per-project
+    override beats the global default) and labels THAT agent's model story, so a
+    claude-override row reads claude's native/ccr label exactly as it would when
+    claude IS the global default, and a follow-default row matches
+    ``default_model_label`` (the global default agent). Pure + defensive.
+    """
+    agent_id = settings.effective_agent(project_path)
+    return _label_for_agent(agent_id, home=home, native_label=native_label)
+
+
+def _label_for_agent(agent_id, *, home=None, native_label=None):
+    """Shared label body for ``default_model_label`` (global) and
+    ``default_model_label_for`` (per-row). Given a resolved ``agent_id``,
+    return its truthful model-story label per the FB-1b rules. Never raises.
+    """
     if native_label is None:
         from models import NATIVE_LABEL
         native_label = NATIVE_LABEL
     import agents as _agents
-    agent_id = getattr(settings, 'agent_default', '') or _agents.DEFAULT_AGENT
     adapter = _agents.ADAPTERS.get(agent_id)
     display = adapter.display_name if adapter is not None else agent_id
 

@@ -251,6 +251,21 @@ All notable changes to ProjectMan will be documented in this file.
   consumes `caps.rich_status` (M-P3.1, landed last cycle); the slug-collision
   hazard (M-P3.4) is documented at the `slugFor`/hook.js slug sites pending its
   own design round.
+- **The sparkle icon on the Projects Admin Agent button renders instead of an
+  empty box.** The bundled `pm-sparkle-symbolic.svg` lived under
+  `icons/scalable/actions/`, but GTK4's unthemed `add_search_path` lookup
+  resolves files at the search-path ROOT and ignores the freedesktop
+  `scalable/<context>/` tree — so the icon never loaded. The SVG now sits at
+  `icons/pm-sparkle-symbolic.svg`, where the lookup finds it (the placement rule
+  is documented at the `add_search_path` site). _(David's second reveal.)_
+- **A project's Model submenu "Default (…)" label now tells THAT project's
+  story.** The label was computed once from the global default agent and pushed
+  to every row, so a project that overrode its agent to Claude Code on a
+  Grok-default machine read "Default (Managed by Grok Build … — Qwen3.5 9B)" —
+  naming an agent it doesn't run. Each row now derives its own label from its
+  effective agent, so a Claude-override row shows Claude's native model story and
+  a follow-default row still shows the global default's. _(David's second
+  reveal.)_
 
 ## [1.1.1] - 2026-06-10
 

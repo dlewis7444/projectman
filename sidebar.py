@@ -797,10 +797,17 @@ class ProjectRow(Gtk.ListBoxRow):
         Resolved through ``agent_configs`` (pure), keyed off the row's effective
         agent so the menu rebuilds on an agent change via the existing refresh
         path. claude's submenu is byte-identical to before.
+
+        P3.5f (C2, David's second reveal): the "Default (…)" label is now
+        PER-ROW — computed from THIS row's effective agent, not the single
+        global label the window pushes (which a claude-override row would wear
+        as the grok default's story). ``global_label`` is kept only as the
+        fallback for settings-less/legacy rows.
         """
         options = self._effective_model_options(options)
         self._model_submenu.remove_all()
-        default_item = Gio.MenuItem.new(f'Default ({global_label})', None)
+        default_item = Gio.MenuItem.new(
+            f'Default ({self._default_label(global_label)})', None)
         default_item.set_action_and_target_value(
             'row.set-model', GLib.Variant('s', FOLLOW_DEFAULT))
         self._model_submenu.append_item(default_item)
@@ -833,6 +840,23 @@ class ProjectRow(Gtk.ListBoxRow):
             return list(zip(ids, labels))
         except Exception:
             return ccr_options
+
+    def _default_label(self, fallback):
+        """The "Default (…)" model-story label for THIS row's effective agent.
+
+        P3.5f (C2): the window-computed global label describes the GLOBAL default
+        agent; a claude-override row must NOT wear the grok default's story.
+        Resolve per-row via ``agent_configs.default_model_label_for`` (effective
+        agent of this project). Settings-less/legacy rows — or any failure —
+        fall back to the global label, so the menu path never throws."""
+        if self._settings is None:
+            return fallback
+        try:
+            import agent_configs
+            return agent_configs.default_model_label_for(
+                self._settings, self._project.path)
+        except Exception:
+            return fallback
 
     def _on_model_select(self, action, value):
         action.set_state(value)

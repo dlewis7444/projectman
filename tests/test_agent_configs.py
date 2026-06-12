@@ -178,6 +178,50 @@ def test_default_model_label_opencode_truthful(tmp_path):
     assert 'qwen3.5:cloud' in label
 
 
+# ── P3.5f (C2, David's second reveal): PER-ROW default label ──────────────────
+# default_model_label_for resolves the project's EFFECTIVE agent, so a row's
+# "Default (…)" label tells ITS agent's story — not the global default's.
+
+def test_default_model_label_for_claude_override_on_grok_bench(tmp_path):
+    """T1 (BINDING, David's repro): on a grok-default bench, a project that
+    OVERRIDES its agent to claude gets claude's native label — NOT the global
+    grok default's 'Grok Build' story (the C2 bug)."""
+    home = _home_with_grok(tmp_path)
+    s = Settings(
+        agent_default='grok',
+        agent_overrides={'/proj/claude': 'claude'},
+    )
+    label = ac.default_model_label_for(
+        s, '/proj/claude', home=home, native_label='NATIVE')
+    assert label == 'NATIVE'
+    assert 'Grok Build' not in label
+
+
+def test_default_model_label_for_grok_project_on_grok_bench(tmp_path):
+    """T2 (pin today's behavior): a grok project on a grok bench still gets the
+    grok label — the per-row resolver did not regress the grok story."""
+    home = _home_with_grok(tmp_path)
+    s = Settings(
+        agent_default='grok',
+        agent_overrides={'/proj/grok': 'grok'},
+    )
+    label = ac.default_model_label_for(s, '/proj/grok', home=home)
+    assert 'Anthropic' not in label
+    assert 'Grok Build' in label
+    assert 'Qwen3.5 9B (Ollama pool)' in label
+
+
+def test_default_model_label_for_follow_default_matches_global(tmp_path):
+    """T3 (unchanged): a follow-default project (no override) gets the GLOBAL
+    default agent's label — byte-identical to default_model_label."""
+    home = _home_with_grok(tmp_path)
+    s = Settings(agent_default='grok')  # /proj/follow has no override
+    per_row = ac.default_model_label_for(s, '/proj/follow', home=home)
+    global_ = ac.default_model_label(s, home=home)
+    assert per_row == global_
+    assert 'Grok Build' in per_row
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # B1 / M-UX.8-residual — grok [compat.claude] hooks: three states → three strings
 # ════════════════════════════════════════════════════════════════════════════
