@@ -998,6 +998,27 @@ class AppWindow(Adw.ApplicationWindow):
         except OSError:
             return
         self._sidebar.refresh()
+        # B4 (M-UX.15, C7-adjacent / S7): a fresh project silently inherited the
+        # default agent — a "noob" who named it "claude-thing" got grok with no
+        # word. Fire the M-UX.11 toast pattern naming the resolved agent (incl.
+        # the missing-binary fallback) so the agent the project got is never a
+        # surprise.
+        self._show_toast(self._project_created_toast_text(name))
+
+    def _project_created_toast_text(self, name):
+        """The B4 creation toast: "New project '<name>' — agent: <Display>".
+
+        Resolves the EFFECTIVE agent for the new (override-free) project — which
+        is the global default — through ``resolve_adapter`` so the named agent is
+        the one that will ACTUALLY run (the fallback, not the requested id, when
+        the default's binary is missing). Pure string builder; unbound-testable.
+        """
+        import agents
+        path = os.path.join(self._store._projects_dir(), name)
+        effective_id = self._settings.effective_agent(path)
+        adapter, _missing = agents.resolve_adapter(effective_id, self._settings)
+        display = adapter.display_name if adapter is not None else effective_id
+        return f"New project '{name}' — agent: {display}"
 
     def _on_project_rename(self, sidebar, old_path, new_name):
         project = self._find_project(old_path)

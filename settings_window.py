@@ -691,6 +691,22 @@ class SettingsWindow(Adw.PreferencesDialog):
 
     def _build_ccr_group(self, page):
         import ccr
+        import agent_configs
+        # B3 (M-UX.14, C2/C3): when no custom Claude models are configured, the
+        # ccr block stopped frightening users who never set one up — it collapses
+        # to a single self-explaining row instead of showing service-state
+        # controls for a router they don't use.
+        if not agent_configs.ccr_in_use(self._settings):
+            group = Adw.PreferencesGroup(
+                title='Claude Code Router (ccr)',
+            )
+            page.add(group)
+            row = Adw.ActionRow(title='Claude Code Router')
+            row.set_subtitle('not in use (only needed for custom Claude models)')
+            row.set_sensitive(False)
+            group.add(row)
+            return
+
         group = Adw.PreferencesGroup(
             title='Claude Code Router (ccr)',
             description='Custom models are routed through a local ccr service.',
@@ -700,14 +716,15 @@ class SettingsWindow(Adw.PreferencesDialog):
         installed = ccr.available(self._settings)
         status_row = Adw.ActionRow(title='Service')
         if not installed:
-            status_row.set_subtitle('Not installed')
+            status_row.set_subtitle('Not installed (routes custom Claude models)')
             status_row.add_prefix(
                 Gtk.Image.new_from_icon_name('dialog-warning-symbolic'))
         else:
             running = ccr.is_running(self._settings)
             status_row.set_subtitle(
-                'Installed — service running' if running
-                else 'Installed — service stopped')
+                'Installed — service running (routes custom Claude models)'
+                if running
+                else 'Installed — service stopped (routes custom Claude models)')
             status_row.add_prefix(
                 Gtk.Image.new_from_icon_name('emblem-ok-symbolic'))
         status_row.set_sensitive(False)
@@ -791,6 +808,7 @@ class SettingsWindow(Adw.PreferencesDialog):
 
     def _build_agents_page(self):
         import agents
+        import agent_configs
         page = Adw.PreferencesPage(
             title='Agents', icon_name='applications-engineering-symbolic'
         )
@@ -847,6 +865,27 @@ class SettingsWindow(Adw.PreferencesDialog):
                 'clicked', lambda b, aid=agent_id, r=check_row: self._on_agent_doctor(aid, r))
             check_row.add_suffix(check_btn)
             group.add(check_row)
+
+            # B2 (M-UX.13, C1/C2): per-agent account status — "is my subscription
+            # connected?" answered at a glance, presence-based (the Check button
+            # above stays the live probe). Contents are never read; only the
+            # token file's existence/size (or, for opencode, parsed providers).
+            account_line = agent_configs.account_status_line(agent_id)
+            if account_line is not None:
+                account_row = Adw.ActionRow(title='Account')
+                account_row.set_subtitle(account_line)
+                account_row.set_sensitive(False)
+                group.add(account_row)
+
+            # B1 (M-UX.8-residual / F10, C1/C5): grok reads Claude-style hooks by
+            # default, which would make Claude's hook double-fire on grok events.
+            # Surface the [compat.claude] hooks state read-only (the file-driven
+            # behavior was invisible — a C1 defect).
+            if agent_id == 'grok':
+                compat_row = Adw.ActionRow(title='Claude-hooks compat')
+                compat_row.set_subtitle(agent_configs.grok_compat_hooks_line())
+                compat_row.set_sensitive(False)
+                group.add(compat_row)
 
             # Status-bridge install button (only for agents that ship one).
             if agents.agent_bridge_source(self._app_dir(), agent_id) is not None \

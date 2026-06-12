@@ -404,3 +404,95 @@ def test_agent_change_follow_default_clears_override():
     fake._find_project = lambda p: types.SimpleNamespace(name='myproj', path='/proj')
     AppWindow._on_project_agent_change(fake, object(), '/proj', FOLLOW_DEFAULT)
     assert s.agent_overrides == {}  # override cleared
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# B4 — M-UX.15: project creation toast names the resolved agent (window, unbound)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _store_for(projects_dir):
+    """A minimal ProjectStore-like object exposing _projects_dir()."""
+    return types.SimpleNamespace(_projects_dir=lambda: projects_dir)
+
+
+def test_project_created_toast_follows_default(tmp_path):
+    """BINDING (B4): a new project with no override → toast names the global
+    default agent's display name, exactly one toast."""
+    from window import AppWindow
+    s = Settings(agent_default='grok')
+    fake = types.SimpleNamespace(_settings=s, _store=_store_for(str(tmp_path)))
+    text = AppWindow._project_created_toast_text(fake, 'shiny')
+    assert text == "New project 'shiny' — agent: Grok Build"
+
+
+def test_project_created_toast_claude_default(tmp_path):
+    from window import AppWindow
+    s = Settings(agent_default='claude')
+    fake = types.SimpleNamespace(_settings=s, _store=_store_for(str(tmp_path)))
+    text = AppWindow._project_created_toast_text(fake, 'thing')
+    assert text == "New project 'thing' — agent: Claude Code"
+
+
+def test_project_created_toast_resolves_fallback_for_unknown_default(tmp_path):
+    """BINDING (B4 — 'incl. fallback'): an unregistered default agent resolves
+    through resolve_adapter to the ACTUAL fallback's display name, never the
+    dead id."""
+    from window import AppWindow
+    s = Settings(agent_default='ghost-agent')
+    fake = types.SimpleNamespace(_settings=s, _store=_store_for(str(tmp_path)))
+    text = AppWindow._project_created_toast_text(fake, 'p')
+    assert 'ghost-agent' not in text
+    assert text.startswith("New project 'p' — agent: ")
+    # The fallback is a real registered adapter display name.
+    assert text.split('agent: ', 1)[1] in {
+        agents.ADAPTERS[a].display_name for a in agents.ADAPTERS}
+
+
+def test_on_project_create_fires_exactly_one_creation_toast(tmp_path):
+    """BINDING (B4): the create handler emits exactly one toast with the resolved
+    display name (and still refreshes the sidebar / creates the dir)."""
+    from window import AppWindow
+    projects = tmp_path / 'projects'
+    projects.mkdir()
+    s = Settings(agent_default='grok')
+    toasts = []
+    from model import ProjectStore
+    store = ProjectStore(s)
+    # Point the store at the temp projects dir.
+    s.projects_dir = str(projects)
+    refreshed = []
+    fake = types.SimpleNamespace(
+        _settings=s,
+        _store=store,
+        _sidebar=types.SimpleNamespace(refresh=lambda: refreshed.append(True)),
+        _show_toast=lambda text, timeout=5: toasts.append(text),
+    )
+    # The real toast-text builder (exercised through the create handler).
+    fake._project_created_toast_text = lambda name: AppWindow._project_created_toast_text(fake, name)
+    AppWindow._on_project_create(fake, object(), 'fresh')
+    assert (projects / 'fresh').is_dir()       # dir created
+    assert refreshed == [True]                  # sidebar refreshed
+    assert toasts == ["New project 'fresh' — agent: Grok Build"]
+
+
+def test_on_project_create_oserror_emits_no_toast(tmp_path):
+    """A failed mkdir aborts before the toast (no toast for a project that
+    wasn't created)."""
+    from window import AppWindow
+    toasts = []
+
+    class _BadStore:
+        def _projects_dir(self):
+            return str(tmp_path)
+
+        def create_project(self, name):
+            raise OSError('boom')
+
+    fake = types.SimpleNamespace(
+        _settings=Settings(),
+        _store=_BadStore(),
+        _sidebar=types.SimpleNamespace(refresh=lambda: toasts.append('REFRESH')),
+        _show_toast=lambda text, timeout=5: toasts.append(text),
+    )
+    AppWindow._on_project_create(fake, object(), 'nope')
+    assert toasts == []

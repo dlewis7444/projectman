@@ -20,6 +20,25 @@ All notable changes to ProjectMan will be documented in this file.
   sign-in even for custom endpoints. Documented in the README.
 - **`Ctrl+,` opens Settings.** Previously the gear was the only route. _(Found
   by the Experience Gate pilot.)_
+- **Settings → Agents now answers "is my account connected?" per agent.** Each
+  agent gets a read-only **Account** line, presence-based (the **Check** button
+  stays the live probe): claude shows "Signed in (credentials present)" or
+  "Not signed in — run `claude` once to sign in"; grok shows "Signed in (token
+  present)", "API key configured (&lt;config path&gt;)" (the offline-pool
+  recipe), or "Not signed in — `grok login`"; opencode reports what's provable
+  from its config — "Providers configured: &lt;n&gt; (&lt;path&gt;)" or "No
+  providers found". Token files are checked for presence only; their contents
+  are never read. _(Experience Gate round-1 yield.)_
+- **The grok section shows the Claude-hooks compat state.** A read-only
+  "Claude-hooks compat" line reads `[compat.claude] hooks` from
+  `~/.grok/config.toml`: "disabled ✓ (status dots fire once)" when set false,
+  otherwise "⚠ enabled — Claude's hooks may double-fire on grok events (fixed by
+  Install/Update bridge)". Closes the gap where a file-driven behavior had no UI.
+  _(Experience Gate round-1 yield.)_
+- **Creating a project tells you which agent it got.** The `+` flow now fires a
+  one-shot "New project '&lt;name&gt;' — agent: &lt;Display&gt;" toast naming the
+  resolved effective agent (including the missing-binary fallback), so a fresh
+  project's agent is never a silent surprise. _(Experience Gate round-1 yield.)_
 - **Grok `waiting` dot via phase aging.** Grok fires no hook event while its
   permission prompt is on screen (the wire goes silent — bench mini-probe), so
   the blue dot is now *inferred*: the bridge stamps a `phase`/`phase_ts` on
@@ -60,6 +79,13 @@ All notable changes to ProjectMan will be documented in this file.
 - **Selecting a per-project agent gives feedback.** Picking an agent from the
   sidebar **Agent** submenu now fires a one-shot "Agent for &lt;project&gt;:
   &lt;agent&gt;" toast. _(Found by the Experience Gate pilot.)_
+- **The Claude Code Router (ccr) block no longer frightens people who don't use
+  it.** When no custom Claude models are configured (no providers and no
+  custom model overrides), the Models page collapses ccr to a single row —
+  "Claude Code Router: not in use (only needed for custom Claude models)" —
+  instead of showing service-state controls for a router you don't use. When in
+  use, the full controls show as before, and the status line now adds "(routes
+  custom Claude models)". _(Experience Gate round-1 yield.)_
 - **install.sh disables grok's Claude-compat hooks (load-bearing).** grok reads
   `~/.claude/settings.json` hooks by default, so Claude's ProjectMan hook would
   double-fire on grok events. The grok install step now sets

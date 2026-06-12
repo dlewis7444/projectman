@@ -30,6 +30,19 @@ OPENCODE_CONFIG_PATHS = (
     '~/.config/opencode/config.json',  # older builds named it config.json
 )
 
+# Auth / account presence files (B2). These are checked for EXISTENCE + SIZE
+# only — the credential CONTENTS are never read (a token file's mere presence is
+# the signal). Each path is PROVABLE from the repo's own docs/fixtures:
+#   * claude:  ~/.claude/.credentials.json  (the standard `claude` login store)
+#   * grok:    ~/.grok/auth.json            (README.md: grok's OAuth flow writes
+#              this file on sign-in; "no ~/.grok/auth.json is ever created" when
+#              running offline with a per-model api_key).
+# opencode has NO verifiable auth-file location in this repo's fixtures or docs,
+# so B2 reports opencode's account state from its PARSED config (providers
+# found) instead of inventing an auth path (flagged-not-guessed applies to code).
+CLAUDE_CREDENTIALS_PATH = '~/.claude/.credentials.json'
+GROK_AUTH_PATH = '~/.grok/auth.json'
+
 
 @dataclass
 class ModelEntry:
@@ -152,6 +165,82 @@ def load_grok_config(*, home=None, path=None):
         return AgentModelConfig(agent_id='grok', source_path=src, exists=False)
     cfg = parse_grok_config(text, source_path=src)
     return cfg
+
+
+# ── B1 / M-UX.8-residual: grok's [compat.claude] hooks compat surface ─────────
+#
+# F10 (sweep) + C1/C5: grok reads Claude-style hooks by default, so Claude's
+# ProjectMan hook would DOUBLE-FIRE on grok events and fight the grok bridge for
+# the status dot. install.sh sets ``[compat.claude] hooks = false`` to make the
+# grok bridge the sole status writer — but nothing in the UI SHOWED that key's
+# state (a behavior driven only by a TOML file = a C1 defect). This pure check
+# surfaces it on the Agents page. Three states → three strings.
+
+# compat.claude.hooks states (kept as constants so the UI strings are pinnable).
+COMPAT_HOOKS_DISABLED = 'disabled'   # hooks = false  → the desired install state
+COMPAT_HOOKS_ENABLED = 'enabled'     # hooks = true   → may double-fire
+COMPAT_HOOKS_ABSENT = 'absent'       # key/file absent → grok's default (enabled)
+
+
+def grok_compat_hooks_state(text, *, _empty_is_absent=True):
+    """Classify grok config TOML's ``[compat.claude] hooks`` into one of three
+    states (B1). PURE + defensive — never raises.
+
+      * ``hooks = false``  → ``COMPAT_HOOKS_DISABLED`` (the bridge is the sole
+        status writer; the install.sh-applied state);
+      * ``hooks = true``   → ``COMPAT_HOOKS_ENABLED`` (Claude's hooks may
+        double-fire on grok events);
+      * key absent / file absent / garbage → ``COMPAT_HOOKS_ABSENT`` (grok's
+        own default is enabled, so this reads the same risk as ``enabled``).
+
+    A non-boolean ``hooks`` value (a typo'd config) is treated as ABSENT — we
+    only claim "disabled ✓" when the file unambiguously says ``false``.
+    """
+    if not text or not text.strip():
+        return COMPAT_HOOKS_ABSENT
+    try:
+        import tomllib
+        data = tomllib.loads(text)
+    except Exception:
+        # Unparseable TOML: we cannot prove hooks=false, so do not claim the
+        # safe state. Treat as absent (same risk class as enabled).
+        return COMPAT_HOOKS_ABSENT
+    if not isinstance(data, dict):
+        return COMPAT_HOOKS_ABSENT
+    compat = data.get('compat')
+    claude = compat.get('claude') if isinstance(compat, dict) else None
+    if not isinstance(claude, dict):
+        return COMPAT_HOOKS_ABSENT
+    hooks = claude.get('hooks')
+    if hooks is False:
+        return COMPAT_HOOKS_DISABLED
+    if hooks is True:
+        return COMPAT_HOOKS_ENABLED
+    return COMPAT_HOOKS_ABSENT
+
+
+def grok_compat_hooks_line(*, home=None, path=None):
+    """The read-only "Claude-hooks compat" subtitle for the grok Agents section
+    (B1). Loads grok's config (defensive) and maps its state to one string:
+
+      * disabled       → ``"disabled ✓ (status dots fire once)"``
+      * enabled/absent → ``"⚠ enabled — Claude's hooks may double-fire on grok
+        events (fixed by Install/Update bridge)"``
+
+    Pure-ish glue over ``grok_compat_hooks_state`` (reads the file, never its
+    meaning beyond the one key). Never raises.
+    """
+    src = path or _expand(GROK_CONFIG_PATH, home)
+    try:
+        with open(src, 'r', encoding='utf-8') as f:
+            text = f.read()
+    except OSError:
+        text = ''
+    state = grok_compat_hooks_state(text)
+    if state == COMPAT_HOOKS_DISABLED:
+        return 'disabled ✓ (status dots fire once)'
+    return ("⚠ enabled — Claude's hooks may double-fire on grok events "
+            "(fixed by Install/Update bridge)")
 
 
 # ── opencode: ~/.config/opencode/opencode.json ────────────────────────────────
@@ -310,3 +399,176 @@ def _display_path(path, *, home=None):
     except (ValueError, TypeError):
         pass
     return path
+
+
+# ── B2 / M-UX.13: per-agent account / auth status (PRESENCE-BASED) ────────────
+#
+# Constitution C1/C2 + triage-2 S2/S3/S9: the Agents page showed grok/opencode
+# as a binary to INVOKE, never a subscription to HONOR — "is my account
+# connected?" had no answer short of running a session. This adds one read-only
+# status line per agent on the Agents page, driven by PRESENCE of the agent's
+# own token store (existence + size ONLY — credential CONTENTS are never read).
+# The doctor "Check" button remains the live probe; this is the at-a-glance line.
+#
+# Honesty rule (flagged-not-guessed, extended to CODE): we only check auth-file
+# paths PROVABLE from this repo's docs/fixtures (claude's .credentials.json,
+# grok's auth.json per README). opencode has no verifiable auth-store path here,
+# so its line reports what we CAN prove — configured providers from its parsed
+# config — and never invents an auth-file path.
+
+
+def _nonempty_file(path):
+    """True iff ``path`` exists and is a non-empty regular file. Existence +
+    SIZE only — the file is never opened/read. Never raises."""
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+def claude_account_line(*, home=None, path=None):
+    """The Agents-page account status line for claude (B2). Presence-based.
+
+      * ``~/.claude/.credentials.json`` non-empty → "Signed in (credentials
+        present)";
+      * else → "Not signed in — run `claude` once to sign in".
+
+    Existence + size only; contents never read. Never raises.
+    """
+    src = path or _expand(CLAUDE_CREDENTIALS_PATH, home)
+    if _nonempty_file(src):
+        return 'Signed in (credentials present)'
+    return 'Not signed in — run `claude` once to sign in'
+
+
+def grok_account_line(*, home=None, auth_path=None, config_path=None):
+    """The Agents-page account status line for grok (B2).
+
+      * ``~/.grok/auth.json`` non-empty → "Signed in (token present)";
+      * else if any parsed ``[model.*]`` block carries an ``api_key`` →
+        "API key configured (<config path>)";
+      * else → "Not signed in — `grok login`".
+
+    The auth file is checked for existence + size only (never read). The
+    ``api_key`` fallback honors the README's offline-pool recipe (a per-model
+    ``api_key`` means grok never runs its OAuth flow, so no auth.json exists yet
+    the account is "configured"). Never raises.
+    """
+    src = auth_path or _expand(GROK_AUTH_PATH, home)
+    if _nonempty_file(src):
+        return 'Signed in (token present)'
+    cfg = load_grok_config(home=home, path=config_path)
+    if _grok_has_api_key(cfg, home=home, path=config_path):
+        shown = _display_path(cfg.source_path, home=home)
+        return f'API key configured ({shown})'
+    return 'Not signed in — `grok login`'
+
+
+def _grok_has_api_key(cfg, *, home=None, path=None):
+    """True iff grok's parsed config has a non-empty ``api_key`` in any
+    ``[model.*]`` block. We must re-read the raw config because the parsed
+    ``ModelEntry`` deliberately drops credential fields — but we only test the
+    PRESENCE of a non-empty key, never surface its value. Never raises."""
+    if cfg is None or not cfg.exists:
+        return False
+    src = path or cfg.source_path or _expand(GROK_CONFIG_PATH, home)
+    try:
+        with open(src, 'r', encoding='utf-8') as f:
+            text = f.read()
+    except OSError:
+        return False
+    try:
+        import tomllib
+        data = tomllib.loads(text)
+    except Exception:
+        return False
+    model_tbl = data.get('model') if isinstance(data, dict) else None
+    if not isinstance(model_tbl, dict):
+        return False
+    for block in model_tbl.values():
+        if isinstance(block, dict):
+            key = block.get('api_key')
+            if isinstance(key, str) and key.strip():
+                return True
+    return False
+
+
+def opencode_account_line(*, home=None, config_path=None):
+    """The Agents-page account status line for opencode (B2).
+
+    opencode's auth-store location is NOT verifiable from this repo's fixtures
+    or docs, so we DO NOT invent one. We report what is provable from its parsed
+    config:
+
+      * providers found → "Providers configured: <n> (<config path>)";
+      * none / no config → "No providers found".
+
+    Never raises (the opencode parser guarantees it).
+    """
+    cfg = load_opencode_config(home=home, path=config_path)
+    n = _opencode_provider_count(cfg)
+    if n > 0:
+        shown = _display_path(cfg.source_path, home=home)
+        return f'Providers configured: {n} ({shown})'
+    return 'No providers found'
+
+
+def _opencode_provider_count(cfg):
+    """Number of distinct providers in a parsed opencode config. The parser
+    flattens to ``<provider>/<model>`` keys, so derive the provider set from the
+    leading segment of each entry key. Never raises."""
+    if cfg is None or not cfg.models:
+        return 0
+    providers = set()
+    for entry in cfg.models:
+        key = getattr(entry, 'key', '') or ''
+        providers.add(key.split('/', 1)[0] if '/' in key else key)
+    providers.discard('')
+    return len(providers)
+
+
+def account_status_line(agent_id, *, home=None):
+    """Dispatch to the right B2 account-status line for ``agent_id``.
+
+    Returns the presence-based status string for claude/grok/opencode, or None
+    for agents with no account surface (an unknown id → None). Never raises.
+    """
+    if agent_id == 'claude':
+        return claude_account_line(home=home)
+    if agent_id == 'grok':
+        return grok_account_line(home=home)
+    if agent_id == 'opencode':
+        return opencode_account_line(home=home)
+    return None
+
+
+# ── B3 / M-UX.14: is the ccr block "in use"? ──────────────────────────────────
+#
+# C2/C3 + triage-2 S9: the Claude Code Router block ("Installed — service
+# stopped") frightened users who never configured a custom Claude model. This
+# pure decision collapses the block to a single self-explaining row when ccr is
+# not in use, and shows the full controls when it is.
+
+
+def ccr_in_use(settings):
+    """True iff the ccr block should show its FULL controls (B3).
+
+    ccr is "in use" when the user has configured custom Claude models — i.e.
+    ``providers`` is non-empty, OR any custom (``provider/model``) id is set as
+    the default or a per-project override. The empty state (``providers == {}``
+    AND no custom model overrides) collapses the block to one explanatory row.
+    Defensive — tolerates a settings object missing the attributes. Never raises.
+    """
+    providers = getattr(settings, 'providers', {}) or {}
+    if isinstance(providers, dict) and providers:
+        return True
+    # No providers defined: a default/override referencing a 'provider/model'
+    # still means ccr was meant to be used (even if the provider is now gone).
+    candidates = [getattr(settings, 'model_default', '') or '']
+    overrides = getattr(settings, 'model_overrides', {}) or {}
+    if isinstance(overrides, dict):
+        candidates.extend(v or '' for v in overrides.values())
+    for model in candidates:
+        if isinstance(model, str) and '/' in model:
+            return True
+    return False

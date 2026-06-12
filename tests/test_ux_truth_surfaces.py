@@ -132,3 +132,47 @@ def test_open_settings_no_window_is_noop():
     fake = types.SimpleNamespace(_window=None)
     # must not raise when invoked before the window exists
     main.ProjectManApp._open_settings(fake, None, None)
+
+
+# ── B1: grok compat row is wired into the Agents page (C1/C5) ──────────────────
+
+def test_agents_page_wires_grok_compat_line():
+    """The Agents page consumes the pure compat check for the grok section
+    (B1). The strings themselves live in agent_configs (pinned there)."""
+    src = _read(os.path.join(REPO, 'settings_window.py'))
+    assert 'grok_compat_hooks_line' in src
+    assert 'Claude-hooks compat' in src
+
+
+# ── B2: per-agent account status row is wired into the Agents page (C1/C2) ─────
+
+def test_agents_page_wires_account_status_line():
+    """The Agents page consumes the presence-based account line for every agent
+    that has one (B2). The strings are pinned in test_agent_configs."""
+    src = _read(os.path.join(REPO, 'settings_window.py'))
+    assert 'account_status_line' in src
+    # The row is labelled 'Account' (the at-a-glance subscription line).
+    assert "Adw.ActionRow(title='Account')" in src
+
+
+def test_account_lines_are_presence_based_strings():
+    """C2: the four B2 outcome strings exist verbatim in agent_configs (the
+    load-bearing copy the Agents page renders)."""
+    src = _read(os.path.join(REPO, 'agent_configs.py'))
+    assert 'Signed in (credentials present)' in src
+    assert 'Signed in (token present)' in src
+    assert 'API key configured' in src
+    assert 'Providers configured:' in src
+    assert 'No providers found' in src
+
+
+# ── B3: the ccr block self-explains / collapses when not in use (C2/C3) ────────
+
+def test_ccr_group_consults_in_use_decision():
+    """B3: _build_ccr_group gates on agent_configs.ccr_in_use and renders the
+    one-row collapsed form when not in use."""
+    src = _read(os.path.join(REPO, 'settings_window.py'))
+    assert 'ccr_in_use' in src
+    assert 'not in use (only needed for custom Claude models)' in src
+    # In-use status line gains the routing clarifier.
+    assert 'routes custom Claude models' in src
