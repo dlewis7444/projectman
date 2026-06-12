@@ -176,3 +176,48 @@ def test_ccr_group_consults_in_use_decision():
     assert 'not in use (only needed for custom Claude models)' in src
     # In-use status line gains the routing clarifier.
     assert 'routes custom Claude models' in src
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# P3.5e FB-5 / FB-6 — install/first-launch + PAA copy fixes (static copy pins;
+# the strings are spec-dictated and load-bearing — C2/C7).
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_readme_package_table_lists_dbus_x11():
+    """BINDING (FB-5 / noob S1): dbus-x11 in the README package table — a
+    minimal install crashes hard without a session bus."""
+    src = _read(os.path.join(REPO, 'README.md'))
+    assert 'dbus-x11' in src
+    # Every distro line that installs GTK also names the dbus package.
+    assert 'vte291-gtk4 dbus-x11' in src               # Fedora
+    assert 'gir1.2-vte-3.91 dbus-x11' in src           # Ubuntu/Debian
+
+
+def test_install_sh_warns_on_missing_dbus_launch():
+    """BINDING (FB-5): install.sh checks for dbus-launch and WARNS (non-fatal,
+    same pattern as the other checks) naming dbus-x11."""
+    src = _read(os.path.join(REPO, 'install.sh'))
+    assert "command -v dbus-launch" in src
+    assert 'dbus-x11' in src
+    # It is a warn (recoverable), not a hard error+exit.
+    assert "warn \"'dbus-launch' not found" in src
+
+
+def test_paa_disabled_window_points_to_settings_with_shortcut():
+    """BINDING (FB-6 / noob S8): the PAA-disabled window text gains the inline
+    enable pointer with the Ctrl+comma shortcut. The source stores the arrow as
+    a \\u2192 escape (the module's style), so assert the phrase arrow-agnostic."""
+    src = _read(os.path.join(REPO, 'paa_card_window.py'))
+    assert 'Enable it in Settings' in src
+    assert 'PAA (Ctrl+comma)' in src
+    # The bare pre-fix copy (no shortcut pointer) is gone.
+    assert "'Enable the Projects Admin Agent in Settings" not in src
+
+
+def test_readme_always_on_qualified_by_paa_enabled():
+    """BINDING (FB-6): README 'always on' → 'always on while PAA is enabled'
+    (the disabled-window reality: nothing scans when PAA is off)."""
+    src = _read(os.path.join(REPO, 'README.md'))
+    assert 'always on while PAA is enabled' in src
+    # The bare, over-promising 'always on)' header is gone.
+    assert 'checks (always on):' not in src

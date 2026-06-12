@@ -63,13 +63,26 @@ class Sidebar(Gtk.Box):
         btn_row.append(add_btn)
 
         self._paa_btn = Gtk.Button()
-        self._paa_btn_label = Gtk.Label(label='\u2728')
-        self._paa_btn.set_child(self._paa_btn_label)
+        # FB-8 (C9): a BUNDLED symbolic icon, not a bare U+2728 Gtk.Label \u2014 the
+        # glyph rendered as a Unicode tofu box on hosts with no emoji font (the
+        # withheld round-2 finding). Image.new_from_icon_name resolves
+        # pm-sparkle-symbolic from the app's icon search path (main.py adds
+        # ./icons), inheriting the button's foreground via currentColor.
+        self._paa_btn_icon = Gtk.Image.new_from_icon_name('pm-sparkle-symbolic')
+        self._paa_btn.set_child(self._paa_btn_icon)
         self._paa_btn.add_css_class('flat')
         self._paa_btn.add_css_class('circular')
         self._paa_btn.set_tooltip_text('Projects Admin Agent')
         self._paa_btn.connect('clicked', lambda b: self.emit('show-paa-window'))
         btn_row.append(self._paa_btn)
+        # The count/scanning indicator that used to ride the button's text label
+        # now lives in a small adjacent label (the icon child carries no text).
+        self._paa_count_label = Gtk.Label()
+        self._paa_count_label.add_css_class('caption')
+        self._paa_count_label.add_css_class('dim-label')
+        self._paa_count_label.add_css_class('pm-paa-count')
+        self._paa_count_label.set_visible(False)
+        btn_row.append(self._paa_count_label)
         self._paa_count = 0
         self._paa_scanning = False
 
@@ -318,13 +331,19 @@ class Sidebar(Gtk.Box):
             self._paa_btn.set_tooltip_text('Projects Admin Agent')
 
     def _update_paa_label(self):
-        """Rebuild the sparkle button label from count + scanning state."""
-        parts = ['\u2728']
+        """Rebuild the adjacent count/scanning indicator from count + scanning
+        state (FB-8). The sparkle itself is now a fixed bundled icon; only the
+        count + scanning glyph are dynamic, so they render in the adjacent count
+        label. The label is hidden when there is nothing to show (no pending
+        findings, not scanning), so a clean state shows just the icon."""
+        parts = []
         if self._paa_count > 0:
             parts.append(str(self._paa_count))
         if self._paa_scanning:
             parts.append('\u27f3')  # ⟳
-        self._paa_btn_label.set_label(' '.join(parts))
+        text = ' '.join(parts)
+        self._paa_count_label.set_label(text)
+        self._paa_count_label.set_visible(bool(text))
 
     def start_paa_throb(self):
         """Start the golden glow animation."""
@@ -765,10 +784,21 @@ class ProjectRow(Gtk.ListBoxRow):
     def set_model_options(self, options, current, global_label):
         """Populate the 'Model' submenu.
 
-        options: list of (model_id, label); model_id '' is native Claude.
+        options: list of (model_id, label); model_id '' is native Claude (the
+                 ccr/providers list — used for claude and any agent with no
+                 native model-config surface).
         current: the active selection — FOLLOW_DEFAULT, '' or 'provider/model'.
         global_label: label of the global default, shown on the Default entry.
+
+        FB-1a (P3.5e, C2/C4): when the row's EFFECTIVE agent is a native-config
+        agent (grok/opencode), the submenu lists THAT agent's native models
+        instead of the ccr list — grok's ``[model.*]`` keys / opencode's
+        ``provider/model`` ids, the exact strings the adapter passes to ``-m``.
+        Resolved through ``agent_configs`` (pure), keyed off the row's effective
+        agent so the menu rebuilds on an agent change via the existing refresh
+        path. claude's submenu is byte-identical to before.
         """
+        options = self._effective_model_options(options)
         self._model_submenu.remove_all()
         default_item = Gio.MenuItem.new(f'Default ({global_label})', None)
         default_item.set_action_and_target_value(
@@ -781,6 +811,28 @@ class ProjectRow(Gtk.ListBoxRow):
             self._model_submenu.append_item(item)
         self._model_action.set_state(GLib.Variant('s', current))
         self._rebuild_popover()
+
+    def _effective_model_options(self, ccr_options):
+        """The model options to show for THIS row's effective agent (FB-1a).
+
+        For a native-config agent (grok/opencode) return its native models as
+        ``[(id, label)]`` (the id is the ``-m`` value: grok KEY / opencode
+        ``provider/model``); for claude or any agent with no native surface —
+        or if resolution fails for any reason — return the passed ccr options
+        unchanged (the menu path must never throw). Settings-less/legacy rows
+        keep the ccr list."""
+        if self._settings is None:
+            return ccr_options
+        try:
+            import agent_configs
+            agent_id = self._settings.effective_agent(self._project.path)
+            native = agent_configs.native_model_options(agent_id)
+            if native is None:
+                return ccr_options
+            ids, labels = native
+            return list(zip(ids, labels))
+        except Exception:
+            return ccr_options
 
     def _on_model_select(self, action, value):
         action.set_state(value)

@@ -122,7 +122,20 @@ class Settings:
             inst = cls(**known)
             inst._migrate_claude_binary()
             return inst
-        except (FileNotFoundError, json.JSONDecodeError, TypeError):
+        except FileNotFoundError:
+            # FB-7 (power #2): on a genuine first run (no settings.json yet),
+            # PERSIST the defaults so the file exists from launch one — a user
+            # who never opens Settings still gets a stable, inspectable config
+            # (and tooling/back-ups have something to read). A corrupt/invalid
+            # file (below) is NEVER overwritten — that path keeps the in-memory
+            # defaults but leaves the on-disk file untouched for recovery.
+            inst = cls()
+            try:
+                inst.save(path)
+            except OSError:
+                pass
+            return inst
+        except (json.JSONDecodeError, TypeError):
             return cls()
 
     def _migrate_claude_binary(self) -> None:

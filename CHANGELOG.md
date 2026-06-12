@@ -50,6 +50,19 @@ All notable changes to ProjectMan will be documented in this file.
   (documented): a long-running *approved* tool briefly shows a false `waiting`
   that self-corrects when the tool completes. Claude/opencode status files
   carry no phase fields and behave exactly as before.
+- **The per-project Model submenu lists each agent's native models.** Picking a
+  grok or opencode project's model in the sidebar now offers that agent's OWN
+  models — grok's `~/.grok/config.toml` `[model.*]` keys, opencode's configured
+  `provider/model` ids — instead of only the Claude/ccr list. The selection is
+  written verbatim into the project's model override and passed to the agent as
+  `-m <value>`, exactly as the adapters already expect (so the README's promise
+  to "set the per-project model to pool-qwen in ProjectMan" finally works). The
+  config-declared default is marked `• default`; claude's submenu is unchanged.
+  _(Experience Gate round 2 — noob/subscriber S7.)_
+- **README/install notes for `dbus-x11`.** The package table and `install.sh`
+  now name the `dbus-x11` package (providing `dbus-launch`); `install.sh` warns
+  when it's missing, since a minimal install crashes hard with no session bus.
+  _(Experience Gate round 2 — noob S1.)_
 
 ### Changed
 - **Settings → Models now surfaces grok's and opencode's native model configs
@@ -94,6 +107,26 @@ All notable changes to ProjectMan will be documented in this file.
   the grok bridge the sole status writer for grok sessions.
 
 ### Fixed
+- **The Projects Admin Agent button is a real icon on every font stack.** The
+  sparkle button shipped as a bare ✨ (`U+2728`) text label, which rendered as a
+  Unicode "tofu" box on any host without an emoji font. It is now a bundled
+  symbolic icon (`pm-sparkle-symbolic`), drawn with `currentColor` so it follows
+  the theme; the pending-count and scanning indicator moved to a small adjacent
+  label. _(David's withheld round-2 finding.)_
+- **The Default-Model label no longer infers a model that isn't running.** When
+  a grok config declares no `[models] default`, the label now reads "built-in
+  default (managed by Grok Build)" instead of promoting a lone `[model.*]` block
+  as if it were active — the real default in that case is grok's built-in model,
+  invisible to the config. _(Experience Gate round 2 — the cross-instrument
+  correction: a coherence-sweep candidate fix was disproven by a subscriber's
+  live turn.)_
+- **First-launch papercuts.** A fresh install now writes `settings.json` on the
+  first launch (defaults persisted, not just held in memory); the empty-state
+  placeholder reads "Select a project in the sidebar to start a session"; the
+  Filter entry and remaining header controls all carry tooltips. The PAA window's
+  disabled state points at "Settings → PAA (Ctrl+comma)", and the README's PAA
+  filesystem checks are "always on while PAA is enabled" (they don't run when PAA
+  is off). _(Experience Gate round 2 — power #1/#2, noob S8.)_
 - **The sidebar subtitle now tells the truth about what's running.** When a
   restored session kept running one agent while the row was already configured
   for a *different* next-session agent (e.g. a live opencode session under a row

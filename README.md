@@ -36,7 +36,7 @@ or [Grok Build](https://x.ai/cli) — per project. Projects are directories unde
 The sparkle (✦) button in the sidebar opens the PAA — a background health monitor that
 continuously scans your projects and surfaces actionable findings in a card-based window.
 
-**Filesystem checks (always on):**
+**Filesystem checks (always on while PAA is enabled):**
 - Missing `CLAUDE.md`
 - No git repository
 - Context drift — stale file references in `CLAUDE.md` (bare filenames, relative paths,
@@ -76,9 +76,12 @@ continuously scans your projects and surfaces actionable findings in a card-base
 
 | Distro | Command |
 |--------|---------|
-| Fedora / RHEL | `sudo dnf install python3-gobject gtk4 libadwaita vte291-gtk4` |
-| Ubuntu / Debian | `sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-vte-3.91` |
-| Arch | `sudo pacman -S python-gobject gtk4 libadwaita vte3` |
+| Fedora / RHEL | `sudo dnf install python3-gobject gtk4 libadwaita vte291-gtk4 dbus-x11` |
+| Ubuntu / Debian | `sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-vte-3.91 dbus-x11` |
+| Arch | `sudo pacman -S python-gobject gtk4 libadwaita vte3 dbus` |
+
+`dbus-x11` provides `dbus-launch`, which a minimal/headless install may lack —
+without a session bus ProjectMan crashes hard on first launch.
 
 **Also required:**
 - Python 3.10+

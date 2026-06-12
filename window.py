@@ -75,6 +75,8 @@ class AppWindow(Adw.ApplicationWindow):
 
         self._search_entry = Gtk.SearchEntry()
         self._search_entry.set_placeholder_text('Filter…')
+        # FB-7 tooltip audit: the only header widget that lacked one.
+        self._search_entry.set_tooltip_text('Filter projects by name')
         self._search_entry.set_max_width_chars(14)
         self._search_entry.connect('search-changed', self._on_search_changed)
         self._search_entry.connect('stop-search', self._on_search_stop)
@@ -122,7 +124,7 @@ class AppWindow(Adw.ApplicationWindow):
         placeholder = Adw.StatusPage()
         placeholder.set_title('Select a Project')
         placeholder.set_description(
-            'Click a project in the sidebar to start a session'
+            'Select a project in the sidebar to start a session'
         )
         placeholder.set_icon_name('folder-symbolic')
         self._stack.add_named(placeholder, '__placeholder__')

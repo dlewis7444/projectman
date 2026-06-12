@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!--
+    pm-sparkle-symbolic — the Projects Admin Agent button glyph (FB-8, C9).
+    A bundled symbolic icon replacing the bare U+2728 Gtk.Label that rendered
+    as a Unicode tofu box on hosts with no emoji font. Two concave four-point
+    stars (a large one + a small accent), drawn as straight-edge "sparkle"
+    paths. fill="currentColor" so it inherits the button's foreground colour
+    and scales cleanly at any size.
+  -->
+  <g fill="currentColor">
+    <!-- Large four-point star centred at (9.5, 9). Each tip dips back toward
+         the centre at the mid-edge to form the classic sparkle silhouette. -->
+    <path d="M9.5 2 L10.8 7.7 L16 9 L10.8 10.3 L9.5 16 L8.2 10.3 L3 9 L8.2 7.7 Z"/>
+    <!-- Small accent star at the upper-left (3, 3.5). -->
+    <path d="M3 0.5 L3.6 2.9 L6 3.5 L3.6 4.1 L3 6.5 L2.4 4.1 L0 3.5 L2.4 2.9 Z"/>
+  </g>
+</svg>

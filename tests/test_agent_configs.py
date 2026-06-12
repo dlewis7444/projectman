@@ -377,3 +377,115 @@ def test_ccr_in_use_false_with_native_default_and_overrides():
     """Native default ('') + native overrides ('') → still not in use."""
     s = Settings(model_default='', model_overrides={'/p': ''})
     assert ac.ccr_in_use(s) is False
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# P3.5e FB-1b — the CROSS-CORRECTED built-in-default label (sweep F11 REJECTED
+# by subscriber-2's observed turn). NO `[models] default` ⇒ the label reads
+# "built-in default", NEVER a sole-block inference; an explicit default names it.
+# ════════════════════════════════════════════════════════════════════════════
+
+def _home_with_grok_text(tmp_path, text):
+    (tmp_path / '.grok').mkdir()
+    (tmp_path / '.grok' / 'config.toml').write_text(text)
+    return str(tmp_path)
+
+
+def test_default_model_label_no_default_key_says_built_in(tmp_path):
+    """BINDING (FB-1b): grok config with model blocks but NO [models] default →
+    the label says 'built-in', and does NOT promote the sole block to default.
+    Reverting to the old `return base` (no 'built-in') FAILS this."""
+    # A SOLE model block, no [models] default — the exact F11 trap shape.
+    text = ('[model.pool-qwen]\nmodel = "qwen3.5:9b"\n'
+            'name = "Qwen3.5 9B (Ollama pool)"\n')
+    home = _home_with_grok_text(tmp_path, text)
+    s = Settings(agent_default='grok')
+    label = ac.default_model_label(s, home=home, native_label='NATIVE')
+    assert 'built-in' in label
+    assert 'Grok Build' in label
+    # The sole block must NOT be inferred as the active/default model.
+    assert 'Qwen3.5 9B (Ollama pool)' not in label
+    assert 'Anthropic' not in label
+
+
+def test_default_model_label_explicit_default_names_it(tmp_path):
+    """BINDING (FB-1b): an explicit [models] default → the label NAMES the model
+    (the no-default 'built-in' string must NOT appear)."""
+    text = ('[models]\ndefault = "pool-qwen"\n[model.pool-qwen]\n'
+            'model = "qwen3.5:9b"\nname = "Qwen3.5 9B (Ollama pool)"\n')
+    home = _home_with_grok_text(tmp_path, text)
+    s = Settings(agent_default='grok')
+    label = ac.default_model_label(s, home=home, native_label='NATIVE')
+    assert 'Qwen3.5 9B (Ollama pool)' in label
+    assert 'built-in' not in label
+
+
+def test_default_model_label_default_key_no_block_shows_bare_key(tmp_path):
+    """A [models] default naming a built-in id with no [model.*] block → the
+    bare key (NOT the 'built-in default' no-key string — a default WAS declared)."""
+    text = '[models]\ndefault = "grok-build"\n'
+    home = _home_with_grok_text(tmp_path, text)
+    s = Settings(agent_default='grok')
+    label = ac.default_model_label(s, home=home, native_label='NATIVE')
+    assert 'grok-build' in label
+    assert 'built-in default' not in label
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# P3.5e FB-1a / FB-1c — native_model_options: the per-project Model picker lists
+# the effective agent's NATIVE models; the config-declared default is marked.
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_native_model_options_claude_is_none():
+    """claude has no native model-config surface → None (picker stays ccr)."""
+    assert ac.native_model_options('claude', home='/nowhere') is None
+    assert ac.native_model_options('unknown-xyz', home='/nowhere') is None
+
+
+def test_native_model_options_grok_lists_keys_with_default_marker(tmp_path):
+    """BINDING (FB-1a/1c): grok options carry the [model.*] KEYS as ids (the -m
+    value), and the [models] default key gets the '• default' marker."""
+    home = _home_with_grok(tmp_path)   # bench fixture: default = pool-qwen
+    ids, labels = ac.native_model_options('grok', home=home)
+    # The KEY (the -m value) is what's stored, not a display name.
+    assert 'pool-qwen' in ids
+    assert 'grok-4' in ids
+    # FB-1c: exactly the declared default is marked.
+    marked = [lbl for lbl in labels if ac.DEFAULT_MARKER in lbl]
+    assert len(marked) == 1
+    assert 'pool-qwen' in marked[0]
+    # The non-default model is NOT marked.
+    grok4_label = labels[ids.index('grok-4')]
+    assert ac.DEFAULT_MARKER not in grok4_label
+
+
+def test_native_model_options_grok_no_default_no_marker(tmp_path):
+    """BINDING (FB-1c): no [models] default → NO entry is marked (no false
+    'active' claim — the cross-corrected truth)."""
+    text = ('[model.pool-qwen]\nmodel = "qwen3.5:9b"\nname = "Qwen"\n'
+            '[model.grok-4]\nmodel = "grok-4-latest"\nname = "Grok 4"\n')
+    home = _home_with_grok_text(tmp_path, text)
+    ids, labels = ac.native_model_options('grok', home=home)
+    assert set(ids) == {'pool-qwen', 'grok-4'}
+    assert not any(ac.DEFAULT_MARKER in lbl for lbl in labels)
+
+
+def test_native_model_options_opencode_lists_provider_model_ids(tmp_path):
+    """BINDING (FB-1a): opencode options carry 'provider/model' ids (the -m
+    value) and mark the declared default."""
+    home = tmp_path
+    (home / '.config' / 'opencode').mkdir(parents=True)
+    with open(OPENCODE_FIX) as f:
+        (home / '.config' / 'opencode' / 'opencode.json').write_text(f.read())
+    ids, labels = ac.native_model_options('opencode', home=str(home))
+    assert 'ollama/qwen3.5:cloud' in ids   # the default, marked
+    marked = [lbl for lbl in labels if ac.DEFAULT_MARKER in lbl]
+    assert len(marked) == 1
+    assert 'qwen3.5:cloud' in marked[0]
+
+
+def test_native_model_options_grok_absent_config_empty_lists(tmp_path):
+    """A native agent with no config on disk → ([], []) (the row still shows the
+    Default entry), never None and never a raise."""
+    result = ac.native_model_options('grok', home=str(tmp_path))
+    assert result == ([], [])

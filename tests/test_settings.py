@@ -42,6 +42,32 @@ def test_load_missing_file(tmp_path):
     assert s.font_size == 11  # defaults returned
 
 
+def test_load_missing_file_persists_defaults(tmp_path):
+    """BINDING (FB-7 / power #2): a genuine first run (no settings.json) WRITES
+    the defaults so the file exists from launch one. Reverting the first-run
+    write (return cls() without save) leaves the file absent and FAILS this."""
+    import json
+    path = tmp_path / 'settings.json'
+    assert not path.exists()
+    s = Settings.load(str(path))
+    assert path.exists()                 # the file was created
+    data = json.loads(path.read_text())
+    # The persisted content is the full defaults (round-trips to the same obj).
+    assert data['font_size'] == 11
+    assert data['agent_default'] == 'claude'
+    assert Settings.load(str(path)).font_size == s.font_size
+
+
+def test_load_corrupt_json_does_not_overwrite(tmp_path):
+    """A corrupt file is NEVER overwritten on load (recovery preserved) — only a
+    GENUINELY ABSENT file triggers the first-run write."""
+    path = tmp_path / 'settings.json'
+    path.write_text('not json!')
+    s = Settings.load(str(path))
+    assert s.font_size == 11             # in-memory defaults on parse error
+    assert path.read_text() == 'not json!'   # on-disk file left untouched
+
+
 def test_load_corrupt_json(tmp_path):
     path = tmp_path / 'settings.json'
     path.write_text('not json!')

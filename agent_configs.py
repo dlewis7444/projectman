@@ -352,6 +352,15 @@ def default_model_label(settings, *, home=None, native_label=None):
         the agent + path attribution still hold, so the row never lies about
         WHICH agent owns the model.
 
+    FB-1b (the CROSS-CORRECTED ruling, P3.5e): when the config declares NO
+    ``[models] default`` key, the suffix reads ``"— built-in default (managed
+    by <Display>)"`` — NEVER a sole-``[model.*]``-block inference. Coherence
+    sweep-2's F11 proposed treating a lone model block as the effective default;
+    subscriber-2's OBSERVED live turn DISPROVED it (grok's real default with no
+    ``default`` key is the BUILT-IN grok-build, invisible to the config — the
+    lone pool-qwen block "looks active and isn't"). So no default key ⇒ say
+    "built-in default", do not promote any block.
+
     ``native_label`` defaults to ``models.NATIVE_LABEL`` (lazy import to keep
     this module GTK-free and import-light). Pure + defensive — never raises.
     """
@@ -370,16 +379,18 @@ def default_model_label(settings, *, home=None, native_label=None):
 
     src = _display_path(cfg.source_path, home=home)
     base = f'Managed by {display} ({src})'
-    entry = cfg.default_entry()
-    if entry is not None:
-        name = entry.name or entry.model or entry.key
-        if name:
-            return f'{base} — {name}'
     if cfg.default_key:
+        entry = cfg.default_entry()
+        if entry is not None:
+            name = entry.name or entry.model or entry.key
+            if name:
+                return f'{base} — {name}'
         # Config names a default but no matching [model.*] block (a built-in
         # model id) — show the bare key rather than nothing.
         return f'{base} — {cfg.default_key}'
-    return base
+    # FB-1b: NO declared default key. The truth is the agent's BUILT-IN default
+    # (invisible to the config); we must NOT infer a sole block as active.
+    return f'{base} — built-in default (managed by {display})'
 
 
 def _display_path(path, *, home=None):
@@ -399,6 +410,61 @@ def _display_path(path, *, home=None):
     except (ValueError, TypeError):
         pass
     return path
+
+
+# ── FB-1a / FB-1c: native per-project model picker options ────────────────────
+#
+# noob S7 / subscriber S7 (C2/C4): our own P3.5 README promises "set the
+# per-project model to pool-qwen in ProjectMan", but the picker only ever listed
+# claude/ccr models — the no-subscription grok flow dead-ended. This surfaces the
+# EFFECTIVE agent's NATIVE models for the per-project Model submenu:
+#   * grok     → each ``[model.<key>]`` block; the stored value is the KEY
+#                (``pool-qwen``) — exactly what GrokAdapter passes to ``-m``;
+#   * opencode → each ``provider.<pid>.models.<mid>``; the stored value is the
+#                ``<provider>/<model>`` id — what OpencodeAdapter passes to ``-m``.
+# The config-declared default (``default_key``) is flagged with a "• default"
+# marker (FB-1c, opencode parity); when the config declares NO default key, NO
+# entry is marked (the cross-corrected FB-1b truth — the real default is the
+# agent's built-in, invisible to the config, so we never fake an active marker).
+
+# Suffix appended to the model whose key matches the config's declared default.
+DEFAULT_MARKER = ' • default'   # " • default"
+
+
+def native_model_options(agent_id, *, home=None, cfg=None):
+    """``(ids, labels)`` parallel lists of ``agent_id``'s NATIVE models, or
+    ``None`` for an agent with no native model-config surface (claude/unknown —
+    that picker stays the ccr/providers list, byte-identical to today).
+
+    ``ids`` are the values written into ``model_overrides[path]`` and passed to
+    the adapter's ``-m`` (grok = the config KEY; opencode = ``provider/model``).
+    ``labels`` are the human display strings, with the config-declared default
+    suffixed ``" • default"`` (FB-1c). An absent/garbage config yields
+    ``([], [])`` — the agent IS native but has no parseable models, so the
+    submenu shows just the Default entry the row prepends. Pure + defensive
+    (the underlying parsers never raise). ``cfg`` injectable for tests.
+    """
+    if cfg is None:
+        cfg = load_agent_config(agent_id, home=home)
+    if cfg is None:
+        return None
+    ids = []
+    labels = []
+    has_default = bool(cfg.default_key)
+    for entry in cfg.models:
+        key = getattr(entry, 'key', '') or ''
+        if not key:
+            continue
+        label = entry.name or entry.model or key
+        # Show the key alongside a distinct display name so the stored value is
+        # legible (grok keys like ``pool-qwen`` ARE the -m value).
+        if entry.name and entry.name != key:
+            label = f'{entry.name} ({key})'
+        if has_default and key == cfg.default_key:
+            label = f'{label}{DEFAULT_MARKER}'
+        ids.append(key)
+        labels.append(label)
+    return ids, labels
 
 
 # ── B2 / M-UX.13: per-agent account / auth status (PRESENCE-BASED) ────────────

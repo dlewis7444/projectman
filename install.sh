@@ -102,6 +102,17 @@ if ! command -v node &>/dev/null; then
     exit 1
 fi
 
+# dbus-launch is OPTIONAL at install time but REQUIRED at runtime: without a
+# session bus, ProjectMan crashes hard on first launch on a minimal/headless
+# install (noob S1). Warn now (same non-fatal pattern as the claude check below)
+# so the missing package is named before the crash, not after.
+if ! command -v dbus-launch &>/dev/null; then
+    warn "'dbus-launch' not found — install dbus-x11 (a session bus is required at runtime)."
+    echo "  Fedora / RHEL:   sudo dnf install dbus-x11"
+    echo "  Ubuntu / Debian: sudo apt install dbus-x11"
+    echo "  Arch:            sudo pacman -S dbus"
+fi
+
 # claude is OPTIONAL (ProjectMan drives claude/opencode/grok — install whichever
 # you use). Just record its presence so the hook summary below tells a coherent
 # story instead of a warn-now / "registered!"-later contradiction (S1).

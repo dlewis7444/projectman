@@ -571,7 +571,7 @@ class PAACardWindow(Adw.Window):
             if not self._settings.paa_enabled:
                 self._empty.set_title('PAA Disabled')
                 self._empty.set_description(
-                    'Enable the Projects Admin Agent in Settings \u2192 PAA'
+                    'Enable it in Settings \u2192 PAA (Ctrl+comma)'
                 )
                 self._empty.set_icon_name('system-shutdown-symbolic')
             elif len(all_items) > 0:

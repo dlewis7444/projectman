@@ -580,3 +580,118 @@ def _find_button_with_tooltip(widget, tooltip):
             return True
         child = child.get_next_sibling()
     return False
+
+
+# ===========================================================================
+# P3.5e FB-1a: the per-project Model submenu lists the EFFECTIVE agent's
+# NATIVE models (grok config keys / opencode provider-model ids), not the
+# ccr/providers list. claude submenu stays byte-identical to today.
+# ===========================================================================
+
+def _model_submenu_labels(row):
+    from gi.repository import GLib
+    out = []
+    for i in range(row._model_submenu.get_n_items()):
+        v = row._model_submenu.get_item_attribute_value(i, 'label', GLib.VariantType('s'))
+        if v:
+            out.append(v.get_string())
+    return out
+
+
+def _model_submenu_targets(row):
+    """The set-model target VALUES (what a pick writes to model_overrides)."""
+    from gi.repository import GLib
+    out = []
+    for i in range(row._model_submenu.get_n_items()):
+        v = row._model_submenu.get_item_attribute_value(i, 'target', GLib.VariantType('s'))
+        if v:
+            out.append(v.get_string())
+    return out
+
+
+def test_grok_project_model_submenu_lists_native_models(tmp_path, monkeypatch):
+    """BINDING (FB-1a): a grok project's Model submenu contains pool-qwen — the
+    config KEY — and offering it as the set-model target (the -m value). The ccr
+    providers list is NOT what's shown."""
+    import agent_configs
+    from settings import Settings
+    cfg = tmp_path / 'config.toml'
+    cfg.write_text(_read_fixture('grok', 'config.toml'))
+    monkeypatch.setattr(agent_configs, 'GROK_CONFIG_PATH', str(cfg))
+    from models import FOLLOW_DEFAULT, NATIVE_LABEL
+    s = Settings(agent_default='grok')
+    row = _make_row_with_settings(s, path='/tmp/grokproj')
+    # The sidebar pushes the ccr/providers option list; a grok row REPLACES it
+    # with grok's native models (this is what window._refresh_sidebar_models
+    # drives for every row).
+    row.set_model_options([('openrouter/foo', 'OpenRouter — Foo')],
+                          FOLLOW_DEFAULT, NATIVE_LABEL)
+    labels = _model_submenu_labels(row)
+    targets = _model_submenu_targets(row)
+    assert any('pool-qwen' in lbl for lbl in labels)
+    assert 'pool-qwen' in targets   # the exact -m value GrokAdapter passes
+    assert 'grok-4' in targets
+    # The ccr option did NOT survive — the native list replaced it.
+    assert 'openrouter/foo' not in targets
+
+
+def test_claude_project_model_submenu_lists_ccr_options_unchanged(tmp_path):
+    """REGRESSION (FB-1a): a claude project's submenu is the ccr/providers list —
+    byte-identical to before (native resolution returns None for claude)."""
+    from settings import Settings
+    from models import FOLLOW_DEFAULT, NATIVE_LABEL
+    s = Settings(agent_default='claude')
+    row = _make_row_with_settings(s, path='/tmp/claudeproj')
+    # Push a ccr option list; for claude it must be shown verbatim.
+    row.set_model_options([('openrouter/foo', 'OpenRouter — Foo')],
+                          FOLLOW_DEFAULT, NATIVE_LABEL)
+    targets = _model_submenu_targets(row)
+    assert 'openrouter/foo' in targets
+    # No grok/opencode native keys leak in.
+    assert 'pool-qwen' not in targets
+
+
+def _read_fixture(*parts):
+    import os
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')
+    with open(os.path.join(base, *parts)) as f:
+        return f.read()
+
+
+# ===========================================================================
+# P3.5e FB-8 (C9): the PAA button ships a BUNDLED symbolic icon, not a bare
+# U+2728 Gtk.Label; the count/scanning indicator renders in an adjacent label.
+# ===========================================================================
+
+def test_paa_button_child_is_an_icon_not_a_text_label():
+    """BINDING (FB-8): the sparkle button's child is a Gtk.Image bound to
+    pm-sparkle-symbolic — NOT a bare glyph Gtk.Label (which rendered as tofu
+    without an emoji font). Reverting to the Gtk.Label FAILS this."""
+    sb = _make_sidebar()
+    child = sb._paa_btn.get_child()
+    assert isinstance(child, Gtk.Image)
+    assert child.get_icon_name() == 'pm-sparkle-symbolic'
+    # The button no longer carries a text label attribute at all.
+    assert not hasattr(sb, '_paa_btn_label')
+
+
+def test_paa_count_label_renders_count_and_scanning_states():
+    """BINDING (FB-8): count/scanning render via the adjacent count label
+    (string-pinned), and a clean state hides it (icon-only)."""
+    sb = _make_sidebar()
+    # Clean state: nothing pending, not scanning → label hidden, empty string.
+    assert sb._paa_count_label.get_label() == ''
+    assert sb._paa_count_label.get_visible() is False
+    # Pending findings → the count shows.
+    sb.set_paa_pending_count(3)
+    assert sb._paa_count_label.get_label() == '3'
+    assert sb._paa_count_label.get_visible() is True
+    # Scanning adds the ⟳ glyph alongside the count.
+    sb.set_paa_scanning('alpha, beta')
+    assert '3' in sb._paa_count_label.get_label()
+    assert '⟳' in sb._paa_count_label.get_label()
+    # Scanning ends, count goes to zero → label hides again.
+    sb.set_paa_scanning('')
+    sb.set_paa_pending_count(0)
+    assert sb._paa_count_label.get_label() == ''
+    assert sb._paa_count_label.get_visible() is False
