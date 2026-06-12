@@ -33,6 +33,18 @@ class ProjectManApp(Adw.Application):
         self.connect('startup', self._on_startup)
         self.connect('activate', self._on_activate)
 
+    def _apply_debug_flag(self, settings):
+        """Apply ``--debug`` to the loaded settings, but ONLY when it was passed.
+
+        The flag is a per-launch FORCE-ON, not a source of truth. The old code
+        assigned ``settings.debug_logging = self._debug_flag`` unconditionally,
+        so a flagless launch forced it to False — and a later ``settings.save()``
+        persisted that False, silently overwriting (killing) the Settings-window
+        toggle. Now absence of the flag leaves the saved/Settings value
+        authoritative; presence forces debug on for this run."""
+        if self._debug_flag:
+            settings.debug_logging = True
+
     def _on_startup(self, app):
         Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
 
@@ -105,7 +117,7 @@ class ProjectManApp(Adw.Application):
             except OSError as e:
                 print(f'ProjectMan: migration failed: {e}', file=sys.stderr)
         self._settings = Settings.load()
-        self._settings.debug_logging = self._debug_flag
+        self._apply_debug_flag(self._settings)
         self._store = ProjectStore(self._settings)
         self._history = HistoryReader()
         self._history.load()

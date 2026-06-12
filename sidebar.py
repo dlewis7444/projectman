@@ -142,6 +142,9 @@ class Sidebar(Gtk.Box):
             self._new_project_row = None
         # Preserve process running state across rebuilds
         running_state = {path: row._process_state for path, row in self._rows.items()}
+        # Preserve the live running-agent (C5) across rebuilds too, so a refresh
+        # doesn't drop the mismatch subtitle of a still-running session.
+        running_agent = {path: row._running_agent for path, row in self._rows.items()}
 
         self._rows.clear()
         while True:
@@ -156,6 +159,8 @@ class Sidebar(Gtk.Box):
             if proj.path in running_state:
                 row._process_state = running_state[proj.path]
                 row.update_status()
+            if running_agent.get(proj.path) is not None:
+                row.set_running_agent(running_agent[proj.path])
             row.connect('session-activated',
                         lambda r, p, sid, pp=proj.path: self.emit('session-activated', pp, sid))
             row.connect('project-archive',
@@ -229,6 +234,12 @@ class Sidebar(Gtk.Box):
             if self._active_only:
                 self._listbox.invalidate_filter()
             self._update_count_label()
+
+    def set_running_agent(self, path, agent_id):
+        """Push the live child's actual agent onto a row (C5). ``None`` clears
+        it. No-op for an unknown path so window.py can fire unconditionally."""
+        if path in self._rows:
+            self._rows[path].set_running_agent(agent_id)
 
     def flash_sweeper_caught(self, path, duration_ms=2000):
         """Briefly italicize the project name to signal that the polling
@@ -420,6 +431,11 @@ class ProjectRow(Gtk.ListBoxRow):
         self._process_state = 'inactive'
         self._is_zellij = False
         self._new_session_row = None
+        # The agent id the LIVE child is actually running (C5 truth), pushed in
+        # from window.py's process-started/exited flow. None when nothing runs.
+        # When it disagrees with the configured/effective agent (a restored
+        # saved-agent-wins session, A2), the subtitle leads with what's running.
+        self._running_agent = None
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_child(outer)
@@ -567,29 +583,62 @@ class ProjectRow(Gtk.ListBoxRow):
             self._arrow.set_visible(caps.sessions)
         self._update_subtitle()
 
-    def _update_subtitle(self):
-        """Show the effective agent (+ model when set) as the row subtitle (B3).
+    def _subtitle_text(self):
+        """Pure builder for the row subtitle string (B3 + C5). Returns the text
+        to show, or ``None`` when the row should stay clean (no subtitle).
 
-        Surfaces a non-default configuration without opening the menus: shown
-        only when the effective agent isn't the default OR a model is pinned, so
-        a plain default/native row stays clean. ``agent · provider/model``.
+        Two shapes:
+          * NO live mismatch — the running agent is absent OR equals the
+            configured/effective agent: today's string, BYTE-IDENTICAL —
+            ``<AgentDisplay>`` (+ ``" · " + model`` when a model is pinned),
+            and ``None`` for a plain default agent with no model.
+          * LIVE mismatch — a child is running a DIFFERENT agent than the one
+            configured for the next session (a restored saved-agent-wins
+            session, A2): lead with what is ACTUALLY running, naming the next:
+            ``<RunningDisplay> (next: <ConfiguredDisplay>)`` (+ the model
+            suffix, preserved in both shapes). Always shown — the truth of a
+            live mismatch overrides the clean-default hide rule (C5).
+        """
+        if self._settings is None:
+            return None
+        agent_id = self._settings.effective_agent(self._project.path)
+        model = self._settings.effective_model(self._project.path)
+        running = self._running_agent
+        mismatch = running is not None and running != agent_id
+        if mismatch:
+            head = (f'{self._agent_display_name(running)} '
+                    f'(next: {self._agent_display_name(agent_id)})')
+        else:
+            is_default_agent = (
+                agent_id == self._settings.agent_default == agents.DEFAULT_AGENT)
+            if is_default_agent and not model:
+                return None
+            head = self._agent_display_name(agent_id)
+        parts = [head]
+        if model:
+            parts.append(model)
+        return ' · '.join(parts)
+
+    def _update_subtitle(self):
+        """Render the subtitle from the pure builder (B3 + C5).
+
+        Surfaces a non-default configuration — or a live agent mismatch — without
+        opening the menus; a plain default/native row stays clean.
         """
         if not hasattr(self, '_subtitle_label'):
             return
-        if self._settings is None:
+        text = self._subtitle_text()
+        if text is None:
             self._subtitle_label.set_visible(False)
             return
-        agent_id = self._settings.effective_agent(self._project.path)
-        model = self._settings.effective_model(self._project.path)
-        is_default_agent = agent_id == self._settings.agent_default == agents.DEFAULT_AGENT
-        if is_default_agent and not model:
-            self._subtitle_label.set_visible(False)
-            return
-        parts = [self._agent_display_name(agent_id)]
-        if model:
-            parts.append(model)
-        self._subtitle_label.set_text(' · '.join(parts))
+        self._subtitle_label.set_text(text)
         self._subtitle_label.set_visible(True)
+
+    def set_running_agent(self, agent_id):
+        """Record the agent the live child is actually running (C5) and refresh
+        the subtitle. ``None`` clears it (the session ended)."""
+        self._running_agent = agent_id
+        self._update_subtitle()
 
     def _set_menu_item_present(self, label, present, inserter):
         """Ensure a top-level menu item with ``label`` is present/absent.

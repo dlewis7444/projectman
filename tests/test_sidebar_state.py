@@ -351,6 +351,116 @@ def test_subtitle_shows_agent_and_model():
     assert 'opencode' in txt and 'ollama/qwen3.5:cloud' in txt
 
 
+# ===========================================================================
+# P3.5d Item 1 (FINDING 3 / C5): the subtitle tells the truth about NOW.
+# A restored saved-agent-wins session (A2) can RUN a different agent than the
+# one configured for the next session; the subtitle must lead with what is
+# actually running. T1 = the mismatch string verbatim; T2 = byte-identical
+# golden when running == configured (the pin that breaks if we always show the
+# running form); T3 = no live session → today's string; T4 = model suffix in
+# both shapes.
+# ===========================================================================
+
+def test_subtitle_running_agent_mismatch_leads_with_running():
+    """T1: live child runs grok while the row is configured for opencode →
+    '<Running> (next: <Configured>)'. Reverting the running-first builder (always
+    showing the configured agent) yields 'opencode' and FAILS this."""
+    from settings import Settings
+    s = Settings(agent_default='claude', agent_overrides={'/tmp/p': 'opencode'})
+    row = _make_row_with_settings(s, path='/tmp/p')
+    row.set_running_agent('grok')
+    assert row._subtitle_label.get_visible() is True
+    assert row._subtitle_label.get_text() == 'Grok Build (next: opencode)'
+
+
+def test_subtitle_running_equals_configured_is_byte_identical():
+    """T2 (GOLDEN pin): running == configured → today's exact string, byte for
+    byte. If the builder ALWAYS rendered the running-first form this would read
+    'opencode (next: opencode)' and FAIL."""
+    from settings import Settings
+    s = Settings(agent_default='claude', agent_overrides={'/tmp/p': 'opencode'})
+    # Baseline: no running agent → today's string.
+    baseline = _make_row_with_settings(s, path='/tmp/p')
+    golden = baseline._subtitle_label.get_text()
+    assert golden == 'opencode'
+    # Running agent EQUALS the configured one → identical to the baseline.
+    row = _make_row_with_settings(s, path='/tmp/p')
+    row.set_running_agent('opencode')
+    assert row._subtitle_label.get_text() == golden
+    assert row._subtitle_label.get_text() == 'opencode'
+
+
+def test_subtitle_no_running_session_is_todays_string():
+    """T3: no live session (running is None) → today's string unchanged, and a
+    plain default row stays clean (no subtitle)."""
+    from settings import Settings
+    # Non-default agent, no running session → shows the configured agent.
+    s = Settings(agent_default='claude', agent_overrides={'/tmp/p': 'opencode'})
+    row = _make_row_with_settings(s, path='/tmp/p')
+    assert row._running_agent is None
+    assert row._subtitle_label.get_text() == 'opencode'
+    # Plain default + no model + no running session → hidden (clean).
+    plain = _make_row_with_settings(Settings(agent_default='claude'), path='/tmp/q')
+    assert plain._subtitle_label.get_visible() is False
+
+
+def test_subtitle_model_suffix_preserved_in_both_shapes():
+    """T4: the ' · <model>' suffix is preserved in BOTH the byte-identical shape
+    and the running-mismatch shape."""
+    from settings import Settings
+    s = Settings(agent_default='claude',
+                 agent_overrides={'/tmp/p': 'opencode'},
+                 model_overrides={'/tmp/p': 'ollama/qwen3.5:cloud'})
+    # No mismatch → today's 'agent · model' shape, byte-identical.
+    matched = _make_row_with_settings(s, path='/tmp/p')
+    assert matched._subtitle_label.get_text() == 'opencode · ollama/qwen3.5:cloud'
+    # Mismatch → running-first head, model suffix still appended.
+    row = _make_row_with_settings(s, path='/tmp/p')
+    row.set_running_agent('grok')
+    assert (row._subtitle_label.get_text()
+            == 'Grok Build (next: opencode) · ollama/qwen3.5:cloud')
+
+
+def test_subtitle_mismatch_overrides_clean_default_hide():
+    """C5 corollary: a default-configured row (normally hidden) still shows the
+    truth when a live child runs a NON-default agent."""
+    from settings import Settings
+    s = Settings(agent_default='claude')          # default → normally hidden
+    row = _make_row_with_settings(s, path='/tmp/p')
+    assert row._subtitle_label.get_visible() is False   # clean while idle
+    row.set_running_agent('grok')                  # live child runs grok
+    assert row._subtitle_label.get_visible() is True
+    assert row._subtitle_label.get_text() == 'Grok Build (next: Claude Code)'
+
+
+def test_set_running_agent_none_restores_clean_subtitle():
+    """Clearing the running agent (session ended) restores the configured-only
+    subtitle — the mismatch form is gone."""
+    from settings import Settings
+    s = Settings(agent_default='claude', agent_overrides={'/tmp/p': 'opencode'})
+    row = _make_row_with_settings(s, path='/tmp/p')
+    row.set_running_agent('grok')
+    assert row._subtitle_label.get_text() == 'Grok Build (next: opencode)'
+    row.set_running_agent(None)
+    assert row._subtitle_label.get_text() == 'opencode'
+
+
+def test_sidebar_set_running_agent_unknown_path_is_noop():
+    """Sidebar.set_running_agent for a path with no row must not raise (window.py
+    fires it unconditionally)."""
+    from settings import Settings
+    from sidebar import Sidebar
+    from model import HistoryReader, StatusWatcher
+
+    class _EmptyStore:
+        def load_projects(self):
+            return []
+
+    sb = Sidebar(_EmptyStore(), HistoryReader(), StatusWatcher(),
+                 settings=Settings())
+    sb.set_running_agent('/no/such/path', 'grok')   # must be a silent no-op
+
+
 def test_new_session_signal_rename():
     """The signal is project-new-session (renamed from project-new-claude)."""
     from settings import Settings

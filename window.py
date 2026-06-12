@@ -482,11 +482,20 @@ class AppWindow(Adw.ApplicationWindow):
     def _on_spawn_failed(self, project_path, agent_id, raw_binary):
         """M-UX.10a (C7): a missing-binary spawn → one-shot install-hint toast.
 
-        The row is NOT touched here — process-exited already set it 'inactive'
+        The row is NOT removed here — process-exited already set it 'inactive'
         (kept visible because set_active_only no longer fires on the activation
         attempt, M-UX.10b). This adds the in-app explanation + recovery path the
         triple-whammy lacked. Warned once per (project, agent) so a restore storm
-        doesn't stack toasts."""
+        doesn't stack toasts.
+
+        A failure ALWAYS reveals the board (C7): restore arms "Active Only"
+        eagerly for the successful case, but a spawn that FAILS would then leave
+        the user with LESS UI — the just-failed 'inactive' row hidden behind a
+        filter they didn't set. So a failed spawn drops the filter, every time
+        (idempotent — the toast is one-shot, this is not, and dropping an
+        already-off filter is a no-op). Restore's eager filter for the
+        successful path is untouched."""
+        self._sidebar.set_active_only(False)
         key = (project_path, agent_id)
         if key in self._warned_spawn_fail:
             return
@@ -591,6 +600,12 @@ class AppWindow(Adw.ApplicationWindow):
 
             def _on_started(t, p=project.path, n=project.name):
                 self._sidebar.set_project_state(p, 'attached', is_zellij=t._is_zellij)
+                # C5: tell the row which agent the child is ACTUALLY running, so a
+                # restored saved-agent-wins session (A2) whose live agent differs
+                # from the configured one shows the truth, not the next-session
+                # agent. Spawn-time truth via spawned_agent_signature() — the same
+                # source the restart prompt reads.
+                self._sidebar.set_running_agent(p, t.spawned_agent_signature())
                 # M-UX.10b (C7): the auto "Active Only" filter engages only once
                 # something actually RUNS — NOT on the activation attempt. This is
                 # what keeps a failed-spawn row visible (a spawn that never starts
@@ -600,11 +615,20 @@ class AppWindow(Adw.ApplicationWindow):
                 if t._fallback_reason:
                     self._show_ccr_fallback_toast(n, t._fallback_reason)
 
+            def _on_exited(t, s, p=project.path):
+                self._sidebar.set_project_state(p, 'inactive', is_zellij=False)
+                # No live child → no running agent; clear the C5 mismatch subtitle.
+                self._sidebar.set_running_agent(p, None)
+
+            def _on_detached(t, p=project.path):
+                self._sidebar.set_project_state(p, 'detached', is_zellij=True)
+                # Detached to a multiplexer — no live child here whose agent we
+                # can attest; drop the C5 mismatch subtitle (detach-to-none).
+                self._sidebar.set_running_agent(p, None)
+
             tv.connect('process-started', _on_started)
-            tv.connect('process-exited',
-                       lambda t, s, p=project.path: self._sidebar.set_project_state(p, 'inactive', is_zellij=False))
-            tv.connect('process-detached',
-                       lambda t, p=project.path: self._sidebar.set_project_state(p, 'detached', is_zellij=True))
+            tv.connect('process-exited', _on_exited)
+            tv.connect('process-detached', _on_detached)
             tv.connect('process-spawn-failed',
                        lambda t, b, p=project.path: self._on_spawn_failed(p, t._adapter.id, b))
             self._terminals[project.path] = tv

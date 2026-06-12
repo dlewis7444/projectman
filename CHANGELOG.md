@@ -94,6 +94,25 @@ All notable changes to ProjectMan will be documented in this file.
   the grok bridge the sole status writer for grok sessions.
 
 ### Fixed
+- **The sidebar subtitle now tells the truth about what's running.** When a
+  restored session kept running one agent while the row was already configured
+  for a *different* next-session agent (e.g. a live opencode session under a row
+  set to Grok Build), the subtitle showed only the configured agent — claiming a
+  backend that wasn't actually running. It now leads with what's live:
+  "&lt;Running&gt; (next: &lt;Configured&gt;)" while a mismatch exists, and is
+  unchanged (the configured agent, with any model suffix) otherwise. _(Found by
+  the Experience Gate flow-audit-0.)_
+- **A failed spawn no longer leaves you with less UI than before.** Restoring a
+  session arms the "Active Only" filter; if a restored project's agent binary was
+  missing, the just-failed row was correctly kept but then **hidden** behind that
+  filter — the recovery toast pointed at a row you couldn't see. A spawn failure
+  now always drops the filter, revealing the board so the failed project (and its
+  install hint) stays in view. _(Experience Gate known-edge.)_
+- **The Settings "debug logging" toggle is no longer a dead knob.** Launching
+  without `--debug` unconditionally forced debug logging **off**, and the next
+  settings save persisted that — so the Settings-window toggle never stuck.
+  `--debug` now only overrides when actually passed; absent, the saved value is
+  authoritative. _(P0-era ticket.)_
 - **Picking a different agent for a restored session now actually switches it.**
   A restored session keeps its agent "sticky" so a *global* default change can't
   silently swap a running session out from under you. But that stickiness was

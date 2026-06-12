@@ -246,3 +246,73 @@ def test_conftest_pins_test_app_id():
     """T8 — the autouse fixture pins PM_APP_ID to the test id for every run, so
     no test can ever construct under the user's real DBus identity."""
     assert os.environ['PM_APP_ID'] == 'io.github.projectman.test'
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# P3.5d Item 3 (P0-era dead-knob): --debug only OVERRIDES when PRESENT. The old
+# unconditional `settings.debug_logging = self._debug_flag` forced False on every
+# flagless launch, and a later settings.save() persisted it — killing the
+# Settings-window toggle. The real production method is ProjectManApp.
+# _apply_debug_flag; tested UNBOUND against a SimpleNamespace carrying _debug_flag
+# (the same pattern as the other lifecycle methods). T7 = flag → True even when
+# saved False; T8 = no flag + saved True → stays True (dead knob LIVES);
+# T9 = no flag + saved False → False.
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_p35d_t7_debug_flag_forces_on_even_when_saved_false():
+    """T7: --debug present → debug_logging True even when the saved/Settings value
+    is False."""
+    from settings import Settings
+    s = Settings(debug_logging=False)
+    fake = types.SimpleNamespace(_debug_flag=True)
+    main.ProjectManApp._apply_debug_flag(fake, s)
+    assert s.debug_logging is True
+
+
+def test_p35d_t8_no_flag_leaves_saved_true_authoritative():
+    """T8 (the dead knob lives): no --debug + a saved True → stays True. The old
+    unconditional assignment forced it to False here; reverting the fix FAILS."""
+    from settings import Settings
+    s = Settings(debug_logging=True)
+    fake = types.SimpleNamespace(_debug_flag=False)
+    main.ProjectManApp._apply_debug_flag(fake, s)
+    assert s.debug_logging is True
+
+
+def test_p35d_t9_no_flag_leaves_saved_false_false():
+    """T9: no --debug + a saved False → stays False (no spurious enablement)."""
+    from settings import Settings
+    s = Settings(debug_logging=False)
+    fake = types.SimpleNamespace(_debug_flag=False)
+    main.ProjectManApp._apply_debug_flag(fake, s)
+    assert s.debug_logging is False
+
+
+def test_p35d_debug_flag_argv_parsing():
+    """main() derives the flag from --debug in argv and strips it before app.run
+    (the flag is consumed, never forwarded to GApplication)."""
+    import sys
+    saved = sys.argv
+    constructed = {}
+    run_argv = {}
+    try:
+        sys.argv = ['main.py', '--debug', 'extra']
+
+        class _FakeApp:
+            def __init__(self, debug_flag=False):
+                constructed['flag'] = debug_flag
+
+            def run(self, argv):
+                run_argv['argv'] = argv
+
+        orig = main.ProjectManApp
+        main.ProjectManApp = _FakeApp
+        try:
+            main.main()
+        finally:
+            main.ProjectManApp = orig
+    finally:
+        sys.argv = saved
+    assert constructed['flag'] is True
+    assert '--debug' not in run_argv['argv']
+    assert 'extra' in run_argv['argv']

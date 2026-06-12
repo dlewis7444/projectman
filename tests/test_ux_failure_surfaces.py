@@ -85,12 +85,15 @@ def test_is_spawn_failure_signal_death_is_not_failure():
 # M-UX.10a — the toast text + one-shot dedup (window, unbound)
 # ════════════════════════════════════════════════════════════════════════════
 
-def _win(settings=None, toasts=None):
+def _win(settings=None, toasts=None, sidebar=None):
     sink = toasts if toasts is not None else []
     fake = types.SimpleNamespace()
     fake._settings = settings or Settings()
     fake._warned_spawn_fail = set()
     fake._toast_overlay = types.SimpleNamespace(add_toast=lambda t: sink.append(t))
+    # A recorder sidebar so handlers that touch the filter (_on_spawn_failed
+    # drops Active Only — P3.5d Item 2/C7) have a faithful seam to record on.
+    fake._sidebar = sidebar if sidebar is not None else _Sidebar()
     # Real one-shot toast helper from window.py — exercises the actual Adw.Toast
     # plumbing (headless-safe) so handlers that call self._show_toast work.
     from window import AppWindow
@@ -139,8 +142,10 @@ def test_on_spawn_failed_fires_one_toast_then_dedups():
     AppWindow._on_spawn_failed(fake, '/p', 'grok', 'grok')  # repeat → dedup
     assert len(toasts) == 1
     assert "Grok Build isn't installed" in str(toasts[0].get_title())
-    # no set_project_state / row removal lives in this handler
-    assert not hasattr(fake, '_sidebar')
+    # No set_project_state / row REMOVAL lives in this handler — process-exited
+    # owns the 'inactive' state. (The handler does drop the filter; see the T5
+    # P3.5d test below.)
+    assert fake._sidebar.states == []
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -194,6 +199,56 @@ def test_active_only_set_when_process_starts():
     on_started(t)
     assert ('/proj', 'attached') in sb.states
     assert sb.active_only_calls == [True]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# P3.5d Item 2 (C7): a FAILED spawn must defeat the filter. Restore arms
+# "Active Only" eagerly for the successful case; if a restored project's spawn
+# then fails, the eager filter would hide the just-failed row (LESS UI after a
+# failure). The fix: _on_spawn_failed ALSO drops Active Only. The successful
+# restore path is untouched.
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_t5_spawn_failure_drops_active_only_filter():
+    """T5 (the reveal): _on_spawn_failed calls set_active_only(False) — a failure
+    always reveals the board. Reverting that line leaves active_only_calls empty
+    and FAILS this."""
+    from window import AppWindow
+    sb = _Sidebar()
+    fake = _win(Settings(agent_default='grok'), sidebar=sb)
+    fake._spawn_failure_toast_text = lambda aid, rb: AppWindow._spawn_failure_toast_text(fake, aid, rb)
+    AppWindow._on_spawn_failed(fake, '/proj', 'grok', 'grok')
+    assert sb.active_only_calls == [False]      # the filter was dropped
+
+
+def test_t5_spawn_failure_drops_filter_every_time_even_when_deduped():
+    """The toast is one-shot (dedup), but the filter drop is NOT — a second
+    failure of the same miss still reveals the board (idempotent)."""
+    from window import AppWindow
+    toasts = []
+    sb = _Sidebar()
+    fake = _win(Settings(agent_default='grok'), toasts, sidebar=sb)
+    fake._spawn_failure_toast_text = lambda aid, rb: AppWindow._spawn_failure_toast_text(fake, aid, rb)
+    AppWindow._on_spawn_failed(fake, '/proj', 'grok', 'grok')
+    AppWindow._on_spawn_failed(fake, '/proj', 'grok', 'grok')  # deduped toast
+    assert len(toasts) == 1                     # toast one-shot
+    assert sb.active_only_calls == [False, False]   # filter dropped both times
+
+
+def test_t6_successful_restore_filter_behavior_unchanged():
+    """T6: the successful-restore eager filter is untouched — a clean start fires
+    set_active_only(True) and NEVER set_active_only(False). Only a failure drops
+    it; this pins that the fix didn't bleed into the success path."""
+    sb = _Sidebar()
+    t = types.SimpleNamespace(_is_zellij=False, _fallback_reason=None)
+
+    # The success path's _on_started closure body (window._get_or_create_terminal):
+    def on_started(t, p='/proj'):
+        sb.set_project_state(p, 'attached', is_zellij=t._is_zellij)
+        sb.set_active_only(True)
+    on_started(t)
+    assert sb.active_only_calls == [True]       # eager ON preserved
+    assert False not in sb.active_only_calls    # success NEVER drops the filter
 
 
 # ════════════════════════════════════════════════════════════════════════════
