@@ -107,6 +107,35 @@ All notable changes to ProjectMan will be documented in this file.
   the grok bridge the sole status writer for grok sessions.
 
 ### Fixed
+- **Ending a session and starting a new one honors a pending agent change.** A
+  restored session pinned the agent it was running so an incidental global default
+  change couldn't swap it mid-flight — but that pin outlived the session: after
+  deactivating and reactivating, the project re-spawned the OLD agent even when
+  you had switched it (e.g. restored Grok Build, switched to Claude Code,
+  deactivate, reactivate → it came back as Grok Build). The pin's lifetime is now
+  the SESSION's: it is dropped when the child truly ends (natural exit, deactivate,
+  or the session being killed) and re-resolved on the next launch, while a zellij
+  detach/reattach still keeps it. _(David's withheld round-2 finding #2.)_
+- **A failed restore can no longer erase the last good session.** A session that
+  died the instant it restored (e.g. a zellij/no-auth project) left nothing
+  running, and the close-time save then wrote an empty session over the last good
+  one — silently losing it. ProjectMan now skips the overwrite when nothing ran
+  this run and a non-empty session already exists (logging one line), preserving
+  the previous session. Deliberately closing everything still saves. _(Experience
+  Gate round 2 — power #3/#8.)_
+- **A session that dies leaves an explanation, and the project you're looking at
+  never vanishes.** When a child exits, the pane now shows a "session ended — exit
+  N" line instead of freezing silently, and if the dying project is the one in
+  view, the Active Only filter is dropped so its row stays visible. _(Experience
+  Gate round 2 — power #6.)_
+- **Agent-change / new-session over a live zellij project no longer orphans the
+  zellij server.** The direct-spawn path now tears down the zellij session first,
+  the same way the deactivate path always has (one shared helper). _(Experience
+  Gate round 2 — flow-audit-1.)_
+- **The "agent not installed" toast waits to be read.** The spawn-failure toast
+  (missing agent binary) is now persistent until dismissed, like the ccr fallback
+  toast — previously it auto-dismissed after five seconds, so an unfocused user
+  could miss the install hint entirely. _(Experience Gate round 2 — RB-1.)_
 - **The Projects Admin Agent button is a real icon on every font stack.** The
   sparkle button shipped as a bare ✨ (`U+2728`) text label, which rendered as a
   Unicode "tofu" box on any host without an emoji font. It is now a bundled

@@ -210,6 +210,93 @@ def test_explicit_agent_spawn_uses_that_adapter(monkeypatch):
     assert captured['argv'] == ['fake-agent']
 
 
+# ── FB-9 (P3.5e): sticky-agent lifetime = SESSION lifetime (the David repro) ───
+# Construction-time _explicit_agent (A2) is cleared when the child TRULY ends and
+# re-resolved at the next spawn, so a deactivate→reactivate honors a pending
+# per-project override; a detach/reattach keeps it. Full round-trip here (real
+# TerminalView, display-gated); the clear/preserve funnel is unit-tested headless
+# in test_terminal_lifetime.py.
+
+def test_fb9_deactivate_reactivate_honors_pending_override(monkeypatch):
+    """T-a (THE DAVID REPRO): a restored-grok session (explicit agent 'fake')
+    whose project is NOW overridden to claude, deactivated then reactivated, must
+    spawn CLAUDE. Reverting the FB-9 clear leaves _explicit_agent='fake' and the
+    reactivation re-spawns the fake agent → this FAILS with the verbatim repro."""
+    import agents
+    from settings import Settings
+    monkeypatch.setitem(agents.ADAPTERS, 'fake', _FakeAdapter())
+    # Restored as the fake agent, but settings now OVERRIDE this project → claude.
+    s = Settings(agent_default='claude', agent_overrides={'/tmp/react': 'claude'})
+    tv = _make_tv(settings=s, path='/tmp/react', agent_id='fake')
+    assert tv._adapter.id == 'fake'            # restored agent at construction
+    assert s.effective_agent('/tmp/react') == 'claude'   # override is pending
+    # --- deactivate: the child ends (SIGTERM → exit). Simulate the exit funnel.
+    tv._child_pid = 4242
+    tv._fire_exit_if_current(4242, 0)
+    assert tv._explicit_agent is None          # FB-9: the dead session's agent dropped
+    # --- reactivate: spawn_continue. It must re-resolve to the pending override.
+    captured = {}
+    with patch.object(tv, '_spawn',
+                      side_effect=lambda argv, env=None: captured.update(argv=argv)):
+        tv.spawn_continue(project_name='react')
+    assert tv._adapter.id == 'claude'          # the override won
+    assert captured['argv'] != ['fake-agent']  # NOT the dead restore agent
+
+
+def test_fb9_detach_reattach_keeps_explicit_agent(monkeypatch):
+    """T-b: a zellij DETACH preserves the restore agent — a reattach resumes the
+    same agent. Over-clearing on detach FAILS this."""
+    import agents
+    from settings import Settings
+    monkeypatch.setitem(agents.ADAPTERS, 'fake', _FakeAdapter())
+    s = Settings(agent_default='claude', agent_overrides={'/tmp/det': 'claude'})
+    tv = _make_tv(settings=s, path='/tmp/det', agent_id='fake')
+    tv._child_pid = 4242
+    tv._is_zellij = True
+    tv._zellij_session = 'pm-det'
+    with patch('terminal.zellij.session_alive', return_value=True):
+        tv._fire_exit_if_current(4242, 0)      # session still alive → DETACH
+    assert tv._explicit_agent == 'fake'        # preserved through detach
+
+
+def test_fb9_a2_restore_pin_unchanged(monkeypatch):
+    """T-c: A2 is intact — a restored session that is NEVER ended keeps its
+    explicit agent across an incidental settings change (the original A2 pin)."""
+    import agents
+    from settings import Settings
+    monkeypatch.setitem(agents.ADAPTERS, 'fake', _FakeAdapter())
+    tv = _make_tv(settings=Settings(agent_default='claude'),
+                  path='/tmp/a2', agent_id='fake')
+    tv.apply_settings(Settings(agent_default='claude'))
+    assert tv._adapter.id == 'fake'            # still sticky (no end occurred)
+    # And a spawn (e.g. an explicit restart of the SAME restored session) still
+    # uses the restored agent — A2 saved-agent-wins on restart.
+    captured = {}
+    with patch.object(tv, '_spawn',
+                      side_effect=lambda argv, env=None: captured.update(argv=argv)):
+        tv.spawn_fresh(project_name='a2')
+    assert captured['argv'] == ['fake-agent']
+
+
+def test_fb9_natural_exit_then_reactivate_follows_effective_agent(monkeypatch):
+    """T-d: a natural exit (no override pending) → the next activation follows
+    settings.effective_agent (here claude), proving the clear+re-resolve is the
+    general behavior, not a special-case of the override path."""
+    import agents
+    from settings import Settings
+    monkeypatch.setitem(agents.ADAPTERS, 'fake', _FakeAdapter())
+    s = Settings(agent_default='claude')       # no per-project override
+    tv = _make_tv(settings=s, path='/tmp/nat', agent_id='fake')
+    tv._child_pid = 4242
+    tv._fire_exit_if_current(4242, 0)          # natural exit
+    assert tv._explicit_agent is None
+    captured = {}
+    with patch.object(tv, '_spawn',
+                      side_effect=lambda argv, env=None: captured.update(argv=argv)):
+        tv.spawn_continue(project_name='nat')
+    assert tv._adapter.id == 'claude'          # follows effective_agent now
+
+
 # ── A3: zellij env comes through the adapter, including custom-model fallback ──
 
 def test_zellij_custom_model_ccr_missing_sets_fallback(tmp_path, monkeypatch):

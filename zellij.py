@@ -42,6 +42,22 @@ def session_exists(name: str) -> bool:
     return os.path.exists(os.path.join(socket_dir(), name))
 
 
+def kill_session(name: str) -> None:
+    """Kill the zellij SERVER session ``name`` (FB-4 — the one implementation).
+
+    The deactivate path and the agent-change/new-session spawn path both need to
+    tear down a live zellij server session (not just the local attach child, which
+    persists the server by design). This is that single call. Defensive: only
+    runs ``zellij kill-session`` when the session actually exists, and never
+    raises (a missing zellij binary / dead session is a no-op)."""
+    try:
+        if session_exists(name):
+            subprocess.run(['zellij', 'kill-session', name],
+                           capture_output=True)
+    except Exception:
+        pass
+
+
 def session_alive(name: str) -> bool:
     """Return True if zellij reports this session as active (not EXITED).
 

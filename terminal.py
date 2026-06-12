@@ -370,8 +370,30 @@ class TerminalView(Gtk.Box):
         # (which runs ccr.spawn_env) sets a fresh reason below; clearing here
         # avoids a stale reason from a prior failed spawn leaking through.
         self._fallback_reason = None
+        # FB-4 (C4/C6): an agent-change / new-session DIRECT spawn over a live
+        # zellij project must tear down the zellij SERVER session first — the
+        # deactivate path already does this; the spawn path used to kill only the
+        # local attach child (_kill_child), orphaning the server. Mirror the
+        # deactivate kill via the shared zellij.kill_session helper. Only when
+        # this terminal currently holds a zellij session; a non-zellij spawn skips
+        # it. Clear the zellij flags so the new direct child isn't mistaken for a
+        # detach on its eventual exit.
+        if self._is_zellij and self._zellij_session:
+            zellij.kill_session(self._zellij_session)
+            self._is_zellij = False
+            self._zellij_session = None
         self._kill_child()
         self._terminal.reset(True, True)
+        # FB-9: re-resolve the adapter at spawn entry from the CURRENT effective
+        # state — an explicit restore agent when one is still set (A2 sticky),
+        # else settings.effective_agent. After a true session end cleared
+        # _explicit_agent, this is what lets the NEXT spawn follow a pending
+        # per-project override (the deactivate→reactivate repro) instead of the
+        # dead session's agent. A restored session that was never ended keeps its
+        # explicit agent, so A2 is intact.
+        resolved = (self._explicit_agent if self._explicit_agent is not None
+                    else self._settings.effective_agent(self._project.path))
+        self._adapter = agents.get_adapter(resolved, self._settings)
         plan = self._adapter.spawn_plan(
             self._settings, self._project, mode, session_id=session_id
         )
@@ -601,10 +623,22 @@ class TerminalView(Gtk.Box):
         spawn_failed = self._is_spawn_failure(status)
         if self._is_zellij and self._zellij_session:
             if zellij.session_alive(self._zellij_session):
+                # DETACH, not an end: the zellij session lives on and a reattach
+                # legitimately resumes THIS agent. PRESERVE _explicit_agent — the
+                # restored saved-agent (A2) must survive a detach/reattach.
                 self.emit('process-detached')
                 return False
             self._is_zellij = False
             self._zellij_session = None
+        # FB-9 (David's reveal #2, C8-amended): sticky-agent lifetime = SESSION
+        # lifetime. We are past the detach early-return, so the child has TRULY
+        # ended (natural exit, deactivate via SIGTERM, zellij-kill, or spawn
+        # failure) — not detached. Drop the construction-time restore agent so a
+        # PENDING per-project override (e.g. restored-grok with the row now set
+        # to claude) is honored on the next activation, instead of the dead
+        # session's agent outliving it. The next spawn re-resolves the adapter
+        # (spawn_agent), so a cleared explicit agent picks up effective_agent.
+        self._explicit_agent = None
         if spawn_failed:
             self.emit('process-spawn-failed', self._spawn_binary or '')
         self.emit('process-exited', status)
@@ -711,6 +745,18 @@ class TerminalView(Gtk.Box):
         global/default changes never do, so A2 stays intact.
         """
         self._explicit_agent = None
+
+    def feed_session_ended(self, code):
+        """FB-3 (C7): write a one-line 'session ended' banner into the pane —
+        DISPLAY ONLY (vte feed_child-free: this is ``feed``, terminal output, not
+        input to a child). A late-dying child leaves a frozen pane with no
+        explanation; this line says it ended and with what exit code. Never
+        raises (a feed on a torn-down terminal must not crash the exit path)."""
+        try:
+            self._terminal.feed(
+                f'\r\n[session ended — exit {code}]\r\n'.encode('utf-8'))
+        except Exception:
+            pass
 
     def get_terminal(self):
         return self._terminal

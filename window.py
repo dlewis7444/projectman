@@ -15,7 +15,7 @@ from model import Project
 from session import (
     save_session, load_session, load_agents, filter_active_paths,
     collect_session_state, collect_agents_map, plan_restore,
-    plan_emergency_kill, should_quit_app, SESSION_FILE,
+    plan_emergency_kill, should_quit_app, should_save_session, SESSION_FILE,
 )
 
 
@@ -41,6 +41,11 @@ class AppWindow(Adw.ApplicationWindow):
         # (project_path, agent_id) pairs already toasted for a spawn failure
         # (M-UX.10a one-shot dedup — a restore storm of the same miss is one toast).
         self._warned_spawn_fail: set = set()
+        # FB-2 (C7/C8): did ANY agent child actually start this run? Set in the
+        # process-started handler. The close-time save consults this so a FAILED
+        # restore (nothing ever ran) can't overwrite the last good session.json
+        # with an empty open_paths — the session-erasure guard.
+        self._any_started_this_run = False
         self._mru = []          # most-recently-used project paths, index 0 = current
         self._archive_win = None
         self._settings_win = None
@@ -299,6 +304,21 @@ class AppWindow(Adw.ApplicationWindow):
         if not self._settings.resume_projects:
             return
         open_paths, focused = collect_session_state(self._terminals, self._active_path)
+        # FB-2 (C7/C8): the session-erasure guard. If NOTHING started this run and
+        # the existing session.json still holds open paths, a failed restore is
+        # about to overwrite the last good session with an empty list — SKIP the
+        # write and say so (one stderr line). Anything that started this run, or
+        # an already-empty existing session, saves normally.
+        if not self._any_started_this_run:
+            existing_open, _ = load_session(SESSION_FILE)
+            if not should_save_session(self._any_started_this_run, existing_open):
+                print(
+                    'ProjectMan: nothing started this run; preserving the '
+                    f'existing session ({len(existing_open)} project(s)) '
+                    'instead of overwriting it.',
+                    file=sys.stderr,
+                )
+                return
         agents_map = collect_agents_map(
             self._terminals, open_paths, self._settings.effective_agent)
         save_session(SESSION_FILE, open_paths, focused, agents=agents_map)
@@ -502,7 +522,35 @@ class AppWindow(Adw.ApplicationWindow):
         if key in self._warned_spawn_fail:
             return
         self._warned_spawn_fail.add(key)
-        self._show_toast(self._spawn_failure_toast_text(agent_id, raw_binary))
+        # FB-10 (RB-1, H2): the spawn-failure toast is PERSISTENT (timeout=0, like
+        # the ccr fallback toast). RB-1's repro proved the mechanism fired — but
+        # at timeout=5 it auto-dismissed before an unfocused user looked, reading
+        # as "no toast". A missing-binary failure (C7) needs a recovery hint that
+        # waits to be read. Dedup (_warned_spawn_fail) is unchanged.
+        self._show_toast(self._spawn_failure_toast_text(agent_id, raw_binary),
+                         timeout=0)
+
+    def _handle_late_death(self, tv, status, path):
+        """FB-3 (C7): a child exited — surface it in the pane and never let the
+        ACTIVE project vanish.
+
+        (a) Feed a one-line 'session ended — exit <code>' banner into the pane
+            (display-only) so a late/external death doesn't leave a frozen,
+            unexplained terminal. The exit code is derived from the raw wait
+            status; an undecodable status falls back to the raw number.
+        (b) If the dying project is the ACTIVE/visible one, drop the Active Only
+            filter — you were looking at it; it must not disappear behind a
+            filter when it goes inactive. A BACKGROUND death does NOT touch the
+            filter (its row was already hidden by the user's own choice; the
+            toast/dedup paths are unchanged).
+        """
+        try:
+            code = os.waitstatus_to_exitcode(status)
+        except (ValueError, ChildProcessError):
+            code = status
+        tv.feed_session_ended(code)
+        if path == self._active_path:
+            self._sidebar.set_active_only(False)
 
     def _show_ccr_fallback_toast(self, project_name, reason):
         """Enqueue a fallback notice for aggregation; flush after a ~2s window.
@@ -601,6 +649,10 @@ class AppWindow(Adw.ApplicationWindow):
             tv = TerminalView(project, self._settings, agent_id=agent_id)
 
             def _on_started(t, p=project.path, n=project.name):
+                # FB-2: a child actually ran this run → the close-time save is now
+                # authorized to overwrite session.json (a failed restore never
+                # reaches here, so it can't erase the last good session).
+                self._any_started_this_run = True
                 self._sidebar.set_project_state(p, 'attached', is_zellij=t._is_zellij)
                 # C5: tell the row which agent the child is ACTUALLY running, so a
                 # restored saved-agent-wins session (A2) whose live agent differs
@@ -621,6 +673,10 @@ class AppWindow(Adw.ApplicationWindow):
                 self._sidebar.set_project_state(p, 'inactive', is_zellij=False)
                 # No live child → no running agent; clear the C5 mismatch subtitle.
                 self._sidebar.set_running_agent(p, None)
+                # FB-3 (C7): a dying child must not leave a frozen, unexplained
+                # pane — feed a "session ended" banner — and the project you were
+                # LOOKING at must never vanish behind the Active Only filter.
+                self._handle_late_death(t, s, p)
 
             def _on_detached(t, p=project.path):
                 self._sidebar.set_project_state(p, 'detached', is_zellij=True)
@@ -700,7 +756,6 @@ class AppWindow(Adw.ApplicationWindow):
             return
         if tv._is_zellij:
             import zellij as z
-            import subprocess
             project = self._find_project(path)
             if project:
                 sname = z.session_name(project.name)
@@ -710,11 +765,11 @@ class AppWindow(Adw.ApplicationWindow):
                 # zellij finishes cleaning up the session socket, causing
                 # session_alive() to return True and the project to stay
                 # visible as "detached" in the Active list.
+                existed = z.session_exists(sname)
                 tv._is_zellij = False
                 tv._zellij_session = None
-                if z.session_exists(sname):
-                    subprocess.run(['zellij', 'kill-session', sname],
-                                   capture_output=True)
+                if existed:
+                    z.kill_session(sname)   # FB-4: the shared kill helper
                     if tv._child_pid is None:
                         self._sidebar.set_project_state(path, 'inactive')
         else:
@@ -732,11 +787,7 @@ class AppWindow(Adw.ApplicationWindow):
         if project:
             if self._settings.multiplexer == 'zellij':
                 import zellij as z
-                import subprocess
-                sname = z.session_name(project.name)
-                if z.session_exists(sname):
-                    subprocess.run(['zellij', 'kill-session', sname],
-                                   capture_output=True)
+                z.kill_session(z.session_name(project.name))  # FB-4 shared helper
             self._store.archive(project)
         self._sidebar.refresh()
         self._sync_running_state()

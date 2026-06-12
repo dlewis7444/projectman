@@ -163,3 +163,47 @@ def test_check_child_alive_respawn_race_does_not_double_fire():
         tv.check_child_alive()
     assert exited_fired == []
     assert tv._child_pid == 12345
+
+
+# ── FB-4 (P3.5e): a DIRECT spawn over a live zellij project kills the server ──
+# session first (mirror of the deactivate path) — orphan-free agent change.
+
+def test_spawn_agent_on_live_zellij_kills_session_first():
+    """BINDING (FB-4): spawn_agent on a terminal currently holding a live zellij
+    session calls zellij.kill_session for it (and clears the zellij flags) before
+    the new direct spawn — the spawn path no longer orphans the server."""
+    tv = _make_tv()
+    tv._is_zellij = True
+    tv._zellij_session = 'pm-test'
+    killed = []
+    with patch('terminal.zellij.kill_session',
+               side_effect=lambda name: killed.append(name)), \
+         patch.object(tv, '_spawn', side_effect=lambda argv, env=None: None):
+        tv.spawn_agent('continue')
+    assert killed == ['pm-test']        # the server session was killed
+    assert tv._is_zellij is False       # flags cleared for the new direct child
+    assert tv._zellij_session is None
+
+
+def test_spawn_agent_non_zellij_does_not_kill_session():
+    """BINDING (FB-4): a non-zellij spawn never calls kill_session."""
+    tv = _make_tv()
+    assert tv._is_zellij is False
+    killed = []
+    with patch('terminal.zellij.kill_session',
+               side_effect=lambda name: killed.append(name)), \
+         patch.object(tv, '_spawn', side_effect=lambda argv, env=None: None):
+        tv.spawn_agent('continue')
+    assert killed == []
+
+
+def test_feed_session_ended_writes_banner_to_pane():
+    """FB-3: feed_session_ended writes the display-only banner via vte feed (NOT
+    feed_child — it's terminal output, not input). The code appears in the bytes."""
+    tv = _make_tv()
+    fed = []
+    with patch.object(tv._terminal, 'feed', side_effect=lambda b: fed.append(b)):
+        tv.feed_session_ended(127)
+    assert len(fed) == 1
+    assert b'session ended' in fed[0]
+    assert b'127' in fed[0]

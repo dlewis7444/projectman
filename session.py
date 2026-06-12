@@ -210,6 +210,32 @@ def plan_emergency_kill(terminals):
     ]
 
 
+def should_save_session(any_started_this_run, existing_open_paths):
+    """FB-2 (power #3/#8, C7/C8): whether a close-time save may overwrite
+    session.json — the session-erasure guard.
+
+    A FAILED restore (e.g. a zellij/no-auth session that dies the instant it
+    restores) leaves NOTHING running; the close-time save would then write an
+    EMPTY open_paths over the last good session, silently erasing it. So:
+
+      * if SOMETHING started this run (any_started_this_run) → SAVE — this is the
+        normal path, and a deliberate close-everything (the user really did close
+        all sessions after starting them) still saves the empty result; AND
+      * if NOTHING started this run but the existing session.json ALSO has no open
+        paths → SAVE — there's nothing to lose (a fresh install, or a prior empty
+        session); BUT
+      * if NOTHING started this run AND the existing session.json HAS open paths →
+        SKIP — preserve the last good session (a failed restore can never erase
+        it).
+
+    Pure boolean decision (the AppWindow logs the skip + reads the existing
+    paths). Returns True to save, False to skip.
+    """
+    if any_started_this_run:
+        return True
+    return not existing_open_paths
+
+
 def should_quit_app(primary_window, closing_window):
     """Decide whether closing ``closing_window`` should quit the whole app.
 
