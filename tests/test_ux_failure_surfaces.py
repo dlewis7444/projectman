@@ -381,7 +381,7 @@ def test_agent_change_fires_feedback_toast():
     from models import FOLLOW_DEFAULT
     toasts = []
     s = Settings(agent_overrides={})
-    fake = types.SimpleNamespace(_settings=s)
+    fake = types.SimpleNamespace(_settings=s, _terminals={})
     fake._toast_overlay = types.SimpleNamespace(add_toast=lambda t: toasts.append(t))
     fake._show_toast = lambda text, timeout=5: toasts.append(text)
     fake.apply_settings = lambda s: None
@@ -397,7 +397,7 @@ def test_agent_change_follow_default_clears_override():
     from models import FOLLOW_DEFAULT
     toasts = []
     s = Settings(agent_overrides={'/proj': 'grok'})
-    fake = types.SimpleNamespace(_settings=s)
+    fake = types.SimpleNamespace(_settings=s, _terminals={})
     fake._show_toast = lambda text, timeout=5: toasts.append(text)
     fake.apply_settings = lambda s: None
     fake._maybe_prompt_restart = lambda p: None
@@ -496,3 +496,143 @@ def test_on_project_create_oserror_emits_no_toast(tmp_path):
     )
     AppWindow._on_project_create(fake, object(), 'nope')
     assert toasts == []
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# P3.5c (S8 ship-blocker) — an EXPLICIT per-project agent pick must defeat the
+# A2 restore-stickiness, WITHOUT breaking the A2 protection against incidental
+# global/default changes. Unbound real methods against faithful fakes (house
+# pattern): the terminal stub drives the REAL TerminalView.apply_settings /
+# clear_explicit_agent (GTK side stubbed) so the adapter RE-RESOLUTION is genuine
+# production code, and the REAL AppWindow._on_project_agent_change drives the wire.
+# ════════════════════════════════════════════════════════════════════════════
+
+def _restored_grok_terminal(settings, path='/proj'):
+    """A faithful TerminalView stub for a RESTORED grok session.
+
+    Carries sticky ``_explicit_agent='grok'`` (A2) + a live child. Exposes the
+    REAL ``apply_settings`` and ``clear_explicit_agent`` (bound below), with the
+    GTK-touching helpers stubbed so the adapter re-resolution runs unchanged.
+    """
+    import agents
+    from terminal import TerminalView
+    term = types.SimpleNamespace(
+        _explicit_agent='grok',
+        _project=types.SimpleNamespace(path=path),
+        _settings=settings,
+        _adapter=agents.get_adapter('grok', settings),
+        _child_pid=4242,                    # a live child (restart prompt arms)
+        _spawned_agent='grok',              # the live child's agent (C8)
+        _font_size=settings.font_size,
+        # GTK side — stubbed no-ops so the real apply_settings body runs.
+        _terminal=types.SimpleNamespace(
+            set_scrollback_lines=lambda n: None, set_audible_bell=lambda b: None),
+        _apply_font=lambda: None,
+        _apply_colors=lambda: None,
+    )
+    # Bind the REAL methods so the test exercises production logic.
+    term.apply_settings = lambda s: TerminalView.apply_settings(term, s)
+    term.clear_explicit_agent = lambda: TerminalView.clear_explicit_agent(term)
+    term.spawned_agent_signature = lambda: term._spawned_agent
+    return term
+
+
+def _window_fake(settings, terminals):
+    """An AppWindow stub wired so _on_project_agent_change runs end-to-end."""
+    fake = types.SimpleNamespace(_settings=settings, _terminals=terminals)
+    fake._show_toast = lambda text, timeout=5: None
+    fake._find_project = lambda p: types.SimpleNamespace(
+        name='myproj', path='/proj')
+    fake._maybe_prompt_restart = lambda p: None
+    # The REAL apply_settings touches sidebar; use the load-bearing half only:
+    # push settings into each terminal (which re-resolves its adapter).
+    def _apply(s):
+        fake._settings = s
+        for tv in terminals.values():
+            tv.apply_settings(s)
+    fake.apply_settings = _apply
+    return fake
+
+
+def test_p35c_t1_explicit_pick_defeats_restore_stickiness():
+    """T1 (the David repro): a restored grok terminal; the user picks 'claude'
+    from the per-project Agent submenu → after the handler, the terminal's
+    resolved adapter is claude (and a spawn plan built now carries claude argv).
+    On revert (no clear_explicit_agent call), the adapter stays grok → FAILS."""
+    from window import AppWindow
+    s = Settings(agent_default='claude')
+    term = _restored_grok_terminal(s)
+    fake = _window_fake(s, {'/proj': term})
+
+    AppWindow._on_project_agent_change(fake, object(), '/proj', 'claude')
+
+    assert term._adapter.id == 'claude'             # stickiness defeated
+    assert term._explicit_agent is None             # override cleared
+    # The next spawn carries CLAUDE argv, not grok.
+    plan = term._adapter.spawn_plan(s, term._project, 'fresh')
+    assert 'claude' in plan.argv[0]
+    assert 'grok' not in plan.argv[0]
+
+
+def test_p35c_t2_global_default_change_stays_sticky_A2_pin():
+    """T2 (A2 regression pin): the SAME restored grok terminal; change
+    agent_default and run ONLY apply_settings (NO submenu pick) → the adapter
+    stays grok (restore-stickiness intact). If the fix clears stickiness on
+    global changes too, this FAILS."""
+    s = Settings(agent_default='claude')
+    term = _restored_grok_terminal(s)
+
+    # A global default change with NO explicit per-project pick.
+    s.agent_default = 'opencode'
+    term.apply_settings(s)
+
+    assert term._adapter.id == 'grok'               # A2 stickiness intact
+    assert term._explicit_agent == 'grok'           # untouched
+
+
+def test_p35c_t3_follow_default_pick_clears_stickiness():
+    """T3: an explicit FOLLOW_DEFAULT pick (the user chose to follow the global
+    default) also clears the restore-stickiness → adapter == agent_default."""
+    from window import AppWindow
+    from models import FOLLOW_DEFAULT
+    s = Settings(agent_default='opencode', agent_overrides={'/proj': 'grok'})
+    term = _restored_grok_terminal(s)
+    fake = _window_fake(s, {'/proj': term})
+
+    AppWindow._on_project_agent_change(fake, object(), '/proj', FOLLOW_DEFAULT)
+
+    assert s.agent_overrides == {}                  # override removed
+    assert term._explicit_agent is None             # stickiness cleared
+    assert term._adapter.id == 'opencode'           # now follows the default
+
+
+def test_p35c_t4_no_terminal_for_path_completes_cleanly():
+    """T4: no terminal exists for the path → the handler completes, the override
+    is written, and nothing raises (clear_explicit_agent is never reached)."""
+    from window import AppWindow
+    s = Settings(agent_default='claude')
+    fake = _window_fake(s, {})                       # no terminals at all
+
+    AppWindow._on_project_agent_change(fake, object(), '/proj', 'grok')
+
+    assert s.agent_overrides == {'/proj': 'grok'}   # override still written
+
+
+def test_p35c_t5_no_residual_agent_staleness_after_respawn():
+    """T5 (C8 end-state): after T1's handler, the spawned-agent-vs-effective
+    disagreement is GONE once the restart's respawn stamps the new agent — the
+    restart prompt's staleness check would not fire a SECOND time."""
+    from window import AppWindow
+    s = Settings(agent_default='claude')
+    term = _restored_grok_terminal(s)
+    fake = _window_fake(s, {'/proj': term})
+
+    AppWindow._on_project_agent_change(fake, object(), '/proj', 'claude')
+
+    # Simulate the restart-prompt's "Restart Now" respawn: the child is stamped
+    # with the now-resolved adapter id (terminal._spawn does this at spawn time).
+    term._spawned_agent = term._adapter.id
+
+    effective = s.effective_agent('/proj')
+    assert term.spawned_agent_signature() == effective   # no disagreement
+    assert effective == 'claude'

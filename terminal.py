@@ -698,5 +698,19 @@ class TerminalView(Gtk.Box):
         self._terminal.set_scrollback_lines(settings.scrollback_lines)
         self._terminal.set_audible_bell(settings.audible_bell)
 
+    def clear_explicit_agent(self):
+        """Drop the sticky restore agent so an EXPLICIT per-project pick wins.
+
+        Contract (S8 ship-blocker): ``_explicit_agent`` makes a RESTORED
+        session's agent sticky (A2) so an *incidental* GLOBAL/default settings
+        change can't silently swap a running restored agent. But a deliberate
+        per-project Agent-submenu pick (B3) MUST defeat that stickiness —
+        otherwise the restart prompt re-spawns the OLD agent. Clearing the
+        override lets the next ``apply_settings`` re-resolve the adapter to the
+        new ``effective_agent``. ONLY the explicit-pick handler calls this;
+        global/default changes never do, so A2 stays intact.
+        """
+        self._explicit_agent = None
+
     def get_terminal(self):
         return self._terminal

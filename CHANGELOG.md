@@ -94,6 +94,15 @@ All notable changes to ProjectMan will be documented in this file.
   the grok bridge the sole status writer for grok sessions.
 
 ### Fixed
+- **Picking a different agent for a restored session now actually switches it.**
+  A restored session keeps its agent "sticky" so a *global* default change can't
+  silently swap a running session out from under you. But that stickiness was
+  also swallowing a *deliberate* per-project pick: choosing Agent → Claude Code
+  on a restored Grok session, then clicking "Restart this session now?", brought
+  the session back **still running Grok**. An explicit per-project pick now drops
+  the stickiness before the restart re-resolves the backend, so the new agent
+  spawns; an incidental global/default change still leaves a restored session
+  untouched. _(Found by Experience Gate subscriber-walk S8; confirmed by David.)_
 - **PAA "Haiku Check" no longer bills Anthropic when scans are disabled
   (billing leak).** The on-demand AI scan called the `claude` CLI
   unconditionally — with PAA disabled, one click silently spent ~298 Anthropic

@@ -895,6 +895,16 @@ class AppWindow(Adw.ApplicationWindow):
             overrides[path] = value
         self._settings.agent_overrides = overrides
         self._settings.save()
+        # S8 ship-blocker: an EXPLICIT per-project pick must defeat the A2
+        # restore-stickiness. A restored session's TerminalView carries a sticky
+        # ``_explicit_agent`` that ``apply_settings`` honors over settings — so
+        # without this, the restart prompt would re-spawn the OLD agent. Clear it
+        # BEFORE apply_settings so the adapter re-resolves to the new effective
+        # agent. Covers BOTH a named pick AND FOLLOW_DEFAULT (the user explicitly
+        # chose to follow the default). No terminal for the path → nothing to do.
+        tv = self._terminals.get(path)
+        if tv is not None:
+            tv.clear_explicit_agent()
         # Push the change through apply_settings so terminals + sidebar rows
         # re-resolve the effective agent (subtitle, caps gating, radio state).
         self.apply_settings(self._settings)
