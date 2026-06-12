@@ -178,6 +178,34 @@ def test_ccr_group_consults_in_use_decision():
     assert 'routes custom Claude models' in src
 
 
+# ── G4 (reveal-3 item 6): the providers subtitle is a literal string, not Pango
+# markup. AdwActionRow subtitles parse markup by default, so the '<id>'
+# placeholder fired a Gtk-WARNING on every Settings open and broke the render.
+# SettingsWindow isn't headless-constructible (its __init__ calls present()), so
+# this is a source pin in the existing settings_window idiom; the QB carries the
+# stderr-clean / subtitle-renders proof to the bench gate. ──────────────────────
+
+def test_providers_subtitle_disables_markup_before_setting_it():
+    """BINDING (G4 / reveal-3 item 6, bench round 2): the Provider Definitions
+    row turns OFF markup parsing BEFORE its angle-bracket-bearing subtitle is
+    set. ORDER is the binding contract — GTK parses the subtitle as markup AT
+    SET TIME, so a set_use_markup(False) that arrives after set_subtitle leaves
+    the warning live (the bench proved a mere co-location pin misses this)."""
+    src = _read(os.path.join(REPO, 'settings_window.py'))
+    # The literal-shape subtitle with the angle-bracket placeholder still ships.
+    assert '{"<id>": {"name", "base_url", "api_key", ' in src
+    # Markup parsing is explicitly disabled (the False literal, not a variable).
+    assert 'save_row.set_use_markup(False)' in src
+    # THE ORDER PIN: set_use_markup(False) precedes set_subtitle on save_row.
+    markup_idx = src.index('save_row.set_use_markup(False)')
+    subtitle_idx = src.index('save_row.set_subtitle(')
+    assert markup_idx < subtitle_idx
+    # And both sit in the providers block (before the Save Providers button),
+    # so the suppression applies to THIS row, not some unrelated later setter.
+    save_btn_idx = src.index("Gtk.Button(label='Save Providers')")
+    assert subtitle_idx < save_btn_idx
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # P3.5e FB-5 / FB-6 — install/first-launch + PAA copy fixes (static copy pins;
 # the strings are spec-dictated and load-bearing — C2/C7).

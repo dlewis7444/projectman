@@ -623,6 +623,13 @@ class SettingsWindow(Adw.PreferencesDialog):
         btn_group = Adw.PreferencesGroup()
         page.add(btn_group)
         save_row = Adw.ActionRow(title='Provider Definitions')
+        # reveal-3 item 6 (G4, shipped 1.0.1, pre-program): the subtitle is a
+        # literal JSON-shape hint with angle-bracket placeholders, NOT Pango
+        # markup. AdwActionRow subtitles parse markup by default, so '<id>' fired
+        # a Gtk-WARNING (Element "markup" closed but open element is "id") on
+        # every Settings open and broke the render. It is a literal string.
+        # Must precede set_subtitle: markup is parsed AT SET TIME (bench round 2).
+        save_row.set_use_markup(False)
         save_row.set_subtitle(
             '{"<id>": {"name", "base_url", "api_key", '
             '"models": {"<id>": {"name"}}}}'

@@ -806,12 +806,23 @@ class ProjectRow(Gtk.ListBoxRow):
         """
         options = self._effective_model_options(options)
         self._model_submenu.remove_all()
-        default_item = Gio.MenuItem.new(
-            f'Default ({self._default_label(global_label)})', None)
+        # reveal-3 item 1 (G1, C2/C4): a claude row with no override showed BOTH
+        # 'Default (Anthropic (native Claude))' AND a bare 'Anthropic (native
+        # Claude)' — the native sentinel (build_model_options index 0, id '')
+        # duplicates the Default item's resolved story. Same class hits a
+        # grok/opencode row whose default resolves to a listed native model. We
+        # compute the Default story ONCE and suppress any option that merely
+        # restates it. FOLLOW_DEFAULT (track the default) and an explicit pin
+        # stay distinct choices; we only drop a redundant pin the user hasn't
+        # taken — a LIVE pin (current == model_id) stays visible and checked.
+        default_story = self._default_label(global_label)
+        default_item = Gio.MenuItem.new(f'Default ({default_story})', None)
         default_item.set_action_and_target_value(
             'row.set-model', GLib.Variant('s', FOLLOW_DEFAULT))
         self._model_submenu.append_item(default_item)
         for model_id, label in options:
+            if label == default_story and current != model_id:
+                continue
             item = Gio.MenuItem.new(label, None)
             item.set_action_and_target_value(
                 'row.set-model', GLib.Variant('s', model_id))

@@ -248,6 +248,76 @@ def test_conftest_pins_test_app_id():
     assert os.environ['PM_APP_ID'] == 'io.github.projectman.test'
 
 
+# ── G3 (reveal-3 item 3, C3): auto-activate the new project on create ─────────
+#
+# Creating a project dropped the user on a dead pane. _on_project_create now
+# routes through the CANONICAL activation path (_on_project_activated, the
+# restore precedent) so the new project opens straight into its agent — while
+# the B4 creation toast STAYS (it names the resolved agent). Unbound-method
+# idiom against duck-typed recorders, as elsewhere in this file.
+
+def _create_fake(projects_dir='/tmp/projects', create_raises=None):
+    """A SimpleNamespace self for AppWindow._on_project_create: records
+    create/refresh/activate/toast; _store.create_project can be made to raise."""
+    calls = []
+
+    def create_project(name):
+        calls.append(('create', name))
+        if create_raises is not None:
+            raise create_raises
+
+    store = types.SimpleNamespace(
+        create_project=create_project,
+        _projects_dir=lambda: projects_dir,
+    )
+    sidebar = types.SimpleNamespace(refresh=lambda: calls.append(('refresh',)))
+    fake = types.SimpleNamespace(_store=store, _sidebar=sidebar)
+    fake._on_project_activated = (
+        lambda sb, path: calls.append(('activate', sb, path)))
+    fake._show_toast = lambda text: calls.append(('toast', text))
+    fake._project_created_toast_text = lambda name: f"toast::{name}"
+    return fake, calls
+
+
+def test_g3a_create_activates_new_project_canonically():
+    """T-G3a (revert proof mandated): a successful create activates the new
+    project through the canonical _on_project_activated path with the
+    store-derived path (the terminal/stack presentation the activation drives).
+    Neutering the activation call FAILS this. Order: create → refresh →
+    activate (then toast)."""
+    fake, calls = _create_fake(projects_dir='/tmp/projects')
+    AppWindow._on_project_create(fake, fake._sidebar, 'newproj')
+    expected_path = os.path.join('/tmp/projects', 'newproj')
+    assert ('activate', fake._sidebar, expected_path) in calls
+    # canonical ordering: create, then refresh, then activate.
+    assert calls.index(('create', 'newproj')) < calls.index(('refresh',))
+    assert calls.index(('refresh',)) < calls.index(
+        ('activate', fake._sidebar, expected_path))
+
+
+def test_g3b_creation_toast_still_fires():
+    """T-G3b (regression pin on B4): the creation toast still fires AFTER the new
+    activation — adding G3 did not displace the agent-naming toast."""
+    fake, calls = _create_fake()
+    AppWindow._on_project_create(fake, fake._sidebar, 'newproj')
+    assert ('toast', 'toast::newproj') in calls
+    # toast comes after the activation (the spawn makes the named agent concrete).
+    expected_path = os.path.join('/tmp/projects', 'newproj')
+    assert calls.index(('activate', fake._sidebar, expected_path)) < calls.index(
+        ('toast', 'toast::newproj'))
+
+
+def test_g3c_create_failure_skips_activation_and_toast():
+    """T-G3c: create raising OSError returns early — no activation, no toast.
+    The pre-existing clean early-return is preserved."""
+    fake, calls = _create_fake(create_raises=OSError('boom'))
+    AppWindow._on_project_create(fake, fake._sidebar, 'newproj')
+    assert ('create', 'newproj') in calls
+    assert not any(c[0] == 'activate' for c in calls)
+    assert not any(c[0] == 'toast' for c in calls)
+    assert not any(c[0] == 'refresh' for c in calls)
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # P3.5d Item 3 (P0-era dead-knob): --debug only OVERRIDES when PRESENT. The old
 # unconditional `settings.debug_logging = self._debug_flag` forced False on every

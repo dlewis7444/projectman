@@ -700,6 +700,116 @@ def test_grok_row_default_label_keeps_grok_story(tmp_path, monkeypatch):
     assert 'Grok Build' in default_lbls[0]
 
 
+# ===========================================================================
+# G1 (reveal-3 item 1, C2/C4): the Model submenu must not offer the same
+# choice twice. A native option whose LABEL restates the Default story is a
+# redundant pin the user hasn't taken — suppress it UNLESS it is the live
+# selection (a pin the user DID take stays visible and checked).
+# ===========================================================================
+
+def _model_submenu_targets_all(row):
+    """Like _model_submenu_targets but None-safe: the native sentinel's target
+    is the EMPTY string '', whose GLib.Variant is falsy — the `if v` form above
+    would silently drop it. Test the native-sentinel presence with this."""
+    from gi.repository import GLib
+    out = []
+    for i in range(row._model_submenu.get_n_items()):
+        v = row._model_submenu.get_item_attribute_value(i, 'target', GLib.VariantType('s'))
+        if v is not None:
+            out.append(v.get_string())
+    return out
+
+
+def test_g1a_claude_no_providers_default_native_dedups(monkeypatch):
+    """T-G1a (the verbatim repro): claude effective agent, NO providers, global
+    default native, current=FOLLOW_DEFAULT → the submenu contains EXACTLY one
+    item, 'Default (Anthropic (native Claude))'. The bare native sentinel that
+    duplicated the Default story is gone. Reverting the suppression FAILS here
+    (the bare 'Anthropic (native Claude)' entry reappears)."""
+    import agent_configs
+    from settings import Settings
+    from models import FOLLOW_DEFAULT, NATIVE_LABEL, build_model_options
+    # claude default, no providers → ccr option list is just the native sentinel.
+    s = Settings(agent_default='claude', providers={})
+    ids, labels = build_model_options(s.providers)
+    options = list(zip(ids, labels))           # [('', 'Anthropic (native Claude)')]
+    assert options == [('', NATIVE_LABEL)]
+    row = _make_row_with_settings(s, path='/tmp/claudeproj')
+    row.set_model_options(options, FOLLOW_DEFAULT, NATIVE_LABEL)
+    menu = _model_submenu_labels(row)
+    assert menu == [f'Default ({NATIVE_LABEL})']
+    # No bare native entry survives.
+    assert NATIVE_LABEL not in menu
+    assert _model_submenu_targets(row) == [FOLLOW_DEFAULT]
+
+
+def test_g1b_providers_native_suppressed_provider_entries_intact():
+    """T-G1b: providers configured, global default native → menu = Default +
+    provider entries; the native sentinel (whose label == the Default story) is
+    suppressed; the provider entries survive intact."""
+    from settings import Settings
+    from models import FOLLOW_DEFAULT, NATIVE_LABEL, build_model_options
+    providers = {
+        'openrouter': {'name': 'OpenRouter', 'base_url': '', 'api_key': '',
+                       'models': {'foo': {'name': 'Foo'}}},
+    }
+    s = Settings(agent_default='claude', providers=providers)
+    options = [(i, l) for i, l in zip(*build_model_options(s.providers))]
+    row = _make_row_with_settings(s, path='/tmp/claudeproj')
+    row.set_model_options(options, FOLLOW_DEFAULT, NATIVE_LABEL)
+    targets = _model_submenu_targets(row)
+    labels = _model_submenu_labels(row)
+    # native sentinel ('') suppressed; provider entry intact.
+    assert '' not in targets
+    assert 'openrouter/foo' in targets
+    assert NATIVE_LABEL not in labels        # only inside the 'Default (…)' label
+    assert labels[0] == f'Default ({NATIVE_LABEL})'
+
+
+def test_g1c_default_is_provider_model_native_sentinel_present():
+    """T-G1c: the Default story resolves to a PROVIDER model's label → the native
+    sentinel no longer duplicates and IS present; the provider entry whose label
+    equals the Default story is the one suppressed.
+
+    Uses a settings-less row so the row's Default label is exactly the pushed
+    ``global_label`` (a claude-settings row always tells the native story per
+    P3.5f, which would re-suppress the native sentinel — not the case under
+    test). build_model_options gives the native sentinel + the provider entry."""
+    from models import FOLLOW_DEFAULT, NATIVE_LABEL, build_model_options
+    providers = {
+        'openrouter': {'name': 'OpenRouter', 'base_url': '', 'api_key': '',
+                       'models': {'foo': {'name': 'Foo'}}},
+    }
+    options = [(i, l) for i, l in zip(*build_model_options(providers))]
+    story = 'OpenRouter — Foo'                 # the global default's resolved label
+    row = _make_row()                          # no settings → Default label == global_label
+    row.set_model_options(options, FOLLOW_DEFAULT, story)
+    targets = _model_submenu_targets_all(row)
+    labels = _model_submenu_labels(row)
+    # The native sentinel is present (its label != the provider Default story).
+    assert '' in targets
+    assert NATIVE_LABEL in labels
+    # The provider entry whose label == the Default story is suppressed.
+    assert 'openrouter/foo' not in targets
+    assert labels[0] == f'Default ({story})'
+
+
+def test_g1d_live_pin_to_suppressed_id_stays_present_and_checked():
+    """T-G1d: when current is PINNED to the would-be-suppressed id, the entry is
+    PRESENT and the action state points at it — a pin the user took must stay
+    visible and checked, never silently dropped."""
+    from settings import Settings
+    from models import NATIVE_LABEL, build_model_options
+    s = Settings(agent_default='claude', providers={})
+    options = list(zip(*build_model_options(s.providers)))  # [('', NATIVE_LABEL)]
+    row = _make_row_with_settings(s, path='/tmp/claudeproj')
+    # current pinned to '' (the native sentinel that equals the Default story).
+    row.set_model_options(options, '', NATIVE_LABEL)
+    targets = _model_submenu_targets_all(row)
+    assert '' in targets                      # the pinned entry survives
+    assert row._model_action.get_state().get_string() == ''  # and is the active state
+
+
 def _read_fixture(*parts):
     import os
     base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')

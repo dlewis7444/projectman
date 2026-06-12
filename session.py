@@ -245,3 +245,39 @@ def should_quit_app(primary_window, closing_window):
     depth for the duplicate-window class.
     """
     return primary_window is closing_window or primary_window is None
+
+
+def paa_throb_decision(count, prev_count, unseen, window_open):
+    """Decide whether the PAA find-indicator should throb (reveal-3 item 2, G2).
+
+    Constitution C10 (indicators are level-truthful): the throb means "findings
+    await you", a LEVEL fact, but it was wired EDGE-triggered
+    (``count > prev_count``) AND ``prev_count`` seeded from the persisted ledger
+    — so pending findings that survive a restart, or that already exist when PAA
+    is enabled mid-session, NEVER armed the button. It showed the count and sat
+    inert (18-pending bench precondition).
+
+    The unseen-pending rule. Pure decision (precedent: ``should_quit_app`` /
+    ``plan_emergency_kill``):
+
+      * ``count``       — pending findings this emission delivers.
+      * ``prev_count``  — pending count from the prior emission.
+      * ``unseen``      — has the user NOT yet looked at the current findings
+                          this session? Starts True at window construction; set
+                          False when the PAA window opens.
+      * ``window_open`` — is the PAA card window currently open?
+
+    Returns ``(throb, unseen_after)``:
+
+      * ``throb`` is True iff the window is closed, there is something to see
+        (``count > 0``), and either the findings GREW (``count > prev_count`` —
+        genuine news) or they are still unseen (the standing-pending arming the
+        edge rule missed). A decrease (auto-resolve sweep) is never news.
+      * ``unseen_after`` re-arms to True when ``count > prev_count`` (new
+        findings are unseen again even after a prior look); otherwise it carries
+        ``unseen`` unchanged. Opening the window — which flips ``unseen`` False —
+        is the caller's job (``_on_show_paa_window``), not this function's.
+    """
+    unseen_after = True if count > prev_count else unseen
+    throb = window_open is False and count > 0 and (count > prev_count or unseen)
+    return throb, unseen_after

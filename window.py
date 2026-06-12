@@ -55,6 +55,11 @@ class AppWindow(Adw.ApplicationWindow):
         self._paa_ledger = paa_ledger
         self._paa_monitor = paa_monitor
         self._paa_prev_count = paa_ledger.pending_count if paa_ledger else 0
+        # reveal-3 item 2 (G2, C10): the throb is level-truthful, not edge-only.
+        # _paa_unseen starts True so standing/restart-surviving pending findings
+        # arm the indicator on the first emission; it flips False once the user
+        # opens the PAA window (they have now SEEN the current findings).
+        self._paa_unseen = True
         if paa_monitor:
             paa_monitor.connect('findings-changed', self._on_paa_findings_changed)
             paa_monitor.connect('scan-progress', self._on_paa_scan_progress)
@@ -817,6 +822,10 @@ class AppWindow(Adw.ApplicationWindow):
 
     def _on_show_paa_window(self, sidebar):
         self._sidebar.stop_paa_throb()
+        # G2 (C10): opening the window means the user has SEEN the current
+        # findings — they no longer count as unseen, so a later same-count
+        # emission must not re-throb (paa_throb_decision's unseen gate).
+        self._paa_unseen = False
         if self._paa_win is not None:
             self._paa_win.present()
             return
@@ -838,8 +847,16 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.set_paa_pending_count(pending_count)
 
     def _on_paa_findings_changed(self, monitor, pending_count):
+        # set_paa_pending_count handles the stop-on-zero path (sidebar.py).
         self._sidebar.set_paa_pending_count(pending_count)
-        if pending_count > self._paa_prev_count and self._paa_win is None:
+        # G2 (C10): the throb is decided by the level-truthful unseen-pending
+        # rule, not the old edge-only count>prev gate that standing/restart
+        # findings could never trip. Pure decision in session.py.
+        from session import paa_throb_decision
+        throb, self._paa_unseen = paa_throb_decision(
+            pending_count, self._paa_prev_count,
+            self._paa_unseen, self._paa_win is not None)
+        if throb:
             self._sidebar.start_paa_throb()
         self._paa_prev_count = pending_count
         if self._paa_win is not None:
@@ -1089,6 +1106,15 @@ class AppWindow(Adw.ApplicationWindow):
         except OSError:
             return
         self._sidebar.refresh()
+        # reveal-3 item 3 (G3, C3): drop the user straight into the new project
+        # instead of leaving them on a dead pane. create_project returns None, so
+        # derive the path the store's way (same derivation the B4 toast uses
+        # below) and activate through the CANONICAL path — the restore precedent
+        # (_on_project_activated, e.g. window.py restore at ~344/390). The B4
+        # creation toast STAYS: it names the resolved agent, the spawn makes it
+        # concrete.
+        path = os.path.join(self._store._projects_dir(), name)
+        self._on_project_activated(self._sidebar, path)
         # B4 (M-UX.15, C7-adjacent / S7): a fresh project silently inherited the
         # default agent — a "noob" who named it "claude-thing" got grok with no
         # word. Fire the M-UX.11 toast pattern naming the resolved agent (incl.

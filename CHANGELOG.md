@@ -39,6 +39,11 @@ All notable changes to ProjectMan will be documented in this file.
   one-shot "New project '&lt;name&gt;' — agent: &lt;Display&gt;" toast naming the
   resolved effective agent (including the missing-binary fallback), so a fresh
   project's agent is never a silent surprise. _(Experience Gate round-1 yield.)_
+- **Creating a project opens it straight away.** The `+` flow now activates the
+  new project through the normal open path the moment it's created — dropping you
+  into its agent instead of leaving you on an empty pane. The creation toast
+  (above) still fires, naming the agent that just spawned. _(David's withheld
+  round-3 finding #3.)_
 - **Grok `waiting` dot via phase aging.** Grok fires no hook event while its
   permission prompt is on screen (the wire goes silent — bench mini-probe), so
   the blue dot is now *inferred*: the bridge stamps a `phase`/`phase_ts` on
@@ -107,6 +112,28 @@ All notable changes to ProjectMan will be documented in this file.
   the grok bridge the sole status writer for grok sessions.
 
 ### Fixed
+- **The Model submenu no longer offers the same choice twice.** A claude project
+  with no model override showed BOTH "Default (Anthropic (native Claude))" and a
+  bare "Anthropic (native Claude)" — the native sentinel duplicated the Default
+  item's resolved story (the same could happen on a grok/opencode row whose
+  default resolves to a listed native model). The redundant entry is now
+  suppressed, so "follow the default" and an explicit pin read as distinct
+  choices again; a pin you actually took stays visible and checked.
+  _(David's withheld round-3 finding #1.)_
+- **Pending PAA findings no longer hide behind an inert button after a restart.**
+  The find-indicator throb was edge-triggered (it fired only when the count
+  *grew*) while its meaning is level-based ("findings await you") — so the 18
+  findings that survived a relaunch, or that already existed when PAA was enabled
+  mid-session, showed the count and never lit up. The indicator now arms whenever
+  there are unseen pending findings and the PAA window is closed, and goes quiet
+  once you open the window; genuine new findings still re-arm it.
+  _(David's withheld round-3 finding #2.)_
+- **Opening Settings no longer logs a Pango-markup warning.** The Provider
+  Definitions row's subtitle is a literal JSON-shape hint with a `<id>`
+  placeholder, but AdwActionRow parses subtitles as markup by default — so every
+  Settings open emitted a `Gtk-WARNING` (`Element "markup" closed but open
+  element is "id"`) and the subtitle rendered broken. The row now disables markup
+  parsing. _(David's withheld round-3 finding #6.)_
 - **Ending a session and starting a new one honors a pending agent change.** A
   restored session pinned the agent it was running so an incidental global default
   change couldn't swap it mid-flight — but that pin outlived the session: after

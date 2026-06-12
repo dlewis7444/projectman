@@ -516,17 +516,23 @@ def test_on_project_create_fires_exactly_one_creation_toast(tmp_path):
     # Point the store at the temp projects dir.
     s.projects_dir = str(projects)
     refreshed = []
+    activated = []
     fake = types.SimpleNamespace(
         _settings=s,
         _store=store,
         _sidebar=types.SimpleNamespace(refresh=lambda: refreshed.append(True)),
         _show_toast=lambda text, timeout=5: toasts.append(text),
+        # G3: the create handler now auto-activates the new project through the
+        # canonical path before toasting — record it so the toast assertion stays
+        # the focus of this B4 test.
+        _on_project_activated=lambda sb, path: activated.append(path),
     )
     # The real toast-text builder (exercised through the create handler).
     fake._project_created_toast_text = lambda name: AppWindow._project_created_toast_text(fake, name)
     AppWindow._on_project_create(fake, object(), 'fresh')
     assert (projects / 'fresh').is_dir()       # dir created
     assert refreshed == [True]                  # sidebar refreshed
+    assert activated == [str(projects / 'fresh')]  # G3: new project activated
     assert toasts == ["New project 'fresh' — agent: Grok Build"]
 
 
