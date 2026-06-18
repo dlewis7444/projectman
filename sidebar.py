@@ -7,7 +7,7 @@ from gi.repository import Gtk, Gio, GLib, GObject, Gdk, Pango
 
 import agents
 from model import ResourceReader
-from models import FOLLOW_DEFAULT, NATIVE_LABEL
+from models import FOLLOW_DEFAULT, NATIVE_LABEL, provider_label
 
 
 class Sidebar(Gtk.Box):
@@ -26,7 +26,6 @@ class Sidebar(Gtk.Box):
         'show-paa-window':      (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-haiku-check':  (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
-        'project-agent-change': (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
     }
 
     def __init__(self, store, history, watcher, version='', settings=None):
@@ -192,8 +191,6 @@ class Sidebar(Gtk.Box):
                         lambda r, new_name, p=proj.path: self.emit('project-rename', p, new_name))
             row.connect('project-model-change',
                         lambda r, mid, p=proj.path: self.emit('project-model-change', p, mid))
-            row.connect('project-agent-change',
-                        lambda r, aid, p=proj.path: self.emit('project-agent-change', p, aid))
             row.set_model_options(
                 self._model_options,
                 self._model_overrides.get(proj.path, FOLLOW_DEFAULT),
@@ -273,11 +270,11 @@ class Sidebar(Gtk.Box):
             row.update_ntfy_visibility(enabled)
 
     def set_settings(self, settings):
-        """Push updated settings so rows re-resolve their effective agent.
+        """Push updated settings so rows re-resolve their effective provider.
 
-        Called from window.apply_settings after an agent/model override change
-        so the per-row caps gating (A5) and session source (A1) follow the new
-        effective agent.
+        Called from window.apply_settings after a model override change so the
+        per-row caps gating (A5) and session source (A1) follow the new
+        effective provider.
         """
         self._settings = settings
         for row in self._rows.values():
@@ -436,7 +433,6 @@ class ProjectRow(Gtk.ListBoxRow):
         'project-haiku-check': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-rename':     (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
-        'project-agent-change': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self, project, history, watcher, settings=None):
@@ -577,9 +573,8 @@ class ProjectRow(Gtk.ListBoxRow):
             return True
 
     def set_settings(self, settings):
-        """Re-bind settings and re-apply caps gating (effective agent changed)."""
+        """Re-bind settings and re-apply caps gating (effective provider changed)."""
         self._settings = settings
-        self._populate_agent_submenu()
         self._apply_caps()
         self._rebuild_popover()
 
@@ -603,40 +598,43 @@ class ProjectRow(Gtk.ListBoxRow):
         self._update_subtitle()
 
     def _subtitle_text(self):
-        """Pure builder for the row subtitle string (B3 + C5). Returns the text
-        to show, or ``None`` when the row should stay clean (no subtitle).
+        """Pure builder for the row subtitle string. Returns the text to show,
+        or ``None`` when the row should stay clean (no subtitle).
 
-        Two shapes:
-          * NO live mismatch — the running agent is absent OR equals the
-            configured/effective agent: today's string, BYTE-IDENTICAL —
-            ``<AgentDisplay>`` (+ ``" · " + model`` when a model is pinned),
-            and ``None`` for a plain default agent with no model.
-          * LIVE mismatch — a child is running a DIFFERENT agent than the one
-            configured for the next session (a restored saved-agent-wins
-            session, A2): lead with what is ACTUALLY running, naming the next:
-            ``<RunningDisplay> (next: <ConfiguredDisplay>)`` (+ the model
-            suffix, preserved in both shapes). Always shown — the truth of a
-            live mismatch overrides the clean-default hide rule (C5).
+        Claude Code is the sole harness, so the harness part is always the
+        default and is hidden unless a provider is pinned. Two shapes:
+
+          * NO live mismatch — the running harness is absent OR equals the
+            configured one (always true now): ``None`` for a plain native row,
+            ``<HarnessDisplay> · <ProviderLabel>`` when a provider is pinned.
+          * LIVE mismatch — a child is running a DIFFERENT harness than the one
+            configured (unreachable with a single harness, but kept as a
+            defensive guard): lead with what is ACTUALLY running, naming the
+            next: ``<RunningDisplay> (next: <ConfiguredDisplay>)`` (+ the
+            provider suffix). Always shown.
         """
         if self._settings is None:
             return None
         agent_id = self._settings.effective_agent(self._project.path)
-        model = self._settings.effective_model(self._project.path)
+        provider = self._settings.effective_provider(self._project.path)
         running = self._running_agent
         mismatch = running is not None and running != agent_id
         if mismatch:
-            head = (f'{self._agent_display_name(running)} '
-                    f'(next: {self._agent_display_name(agent_id)})')
+            head = (f'{self._harness_display(running)} '
+                    f'(next: {self._harness_display(agent_id)})')
         else:
-            is_default_agent = (
-                agent_id == self._settings.agent_default == agents.DEFAULT_AGENT)
-            if is_default_agent and not model:
+            if not provider:
                 return None
-            head = self._agent_display_name(agent_id)
+            head = self._harness_display(agent_id)
         parts = [head]
-        if model:
-            parts.append(model)
+        if provider:
+            parts.append(provider_label(self._settings.providers, provider))
         return ' · '.join(parts)
+
+    @staticmethod
+    def _harness_display(agent_id):
+        adapter = agents.ADAPTERS.get(agent_id)
+        return adapter.display_name if adapter else agent_id
 
     def _update_subtitle(self):
         """Render the subtitle from the pure builder (B3 + C5).
@@ -693,8 +691,6 @@ class ProjectRow(Gtk.ListBoxRow):
         self._menu.append('New Session',        'row.new-session')
         self._menu.append('New Zellij Session', 'row.zellij')
         self._menu.append('Haiku Check',        'row.haiku-check')
-        self._agent_submenu = Gio.Menu()
-        self._menu.append_submenu('Agent', self._agent_submenu)
         self._model_submenu = Gio.Menu()
         self._menu.append_submenu('Model', self._model_submenu)
         self._menu.append('Rename',             'row.rename')
@@ -724,24 +720,15 @@ class ProjectRow(Gtk.ListBoxRow):
         self._ntfy_action.connect('activate', self._on_ntfy_activate)
         ag.add_action(self._ntfy_action)
 
-        # Per-project model selection. A single stateful 's' action lets GTK
-        # render the submenu as radio items with the active one checked.
+        # Per-project provider selection (the sidebar Model menu is a provider
+        # picker). A single stateful 's' action lets GTK render the submenu as
+        # radio items with the active one checked.
         self._model_action = Gio.SimpleAction.new_stateful(
             'set-model', GLib.VariantType.new('s'),
             GLib.Variant('s', FOLLOW_DEFAULT),
         )
         self._model_action.connect('activate', self._on_model_select)
         ag.add_action(self._model_action)
-
-        # Per-project agent selection (B3) — same stateful-radio pattern.
-        # The value is FOLLOW_DEFAULT, or an agent id ('claude'/'opencode').
-        self._agent_action = Gio.SimpleAction.new_stateful(
-            'set-agent', GLib.VariantType.new('s'),
-            GLib.Variant('s', FOLLOW_DEFAULT),
-        )
-        self._agent_action.connect('activate', self._on_agent_select)
-        ag.add_action(self._agent_action)
-        self._populate_agent_submenu()
 
         self.insert_action_group('row', ag)
         self._rebuild_popover()
@@ -782,135 +769,65 @@ class ProjectRow(Gtk.ListBoxRow):
         self._popover.set_has_arrow(False)
 
     def set_model_options(self, options, current, global_label):
-        """Populate the 'Model' submenu.
+        """Populate the 'Model' submenu (a per-project PROVIDER picker).
 
-        options: list of (model_id, label); model_id '' is native Claude (the
-                 ccr/providers list — used for claude and any agent with no
-                 native model-config surface).
-        current: the active selection — FOLLOW_DEFAULT, '' or 'provider/model'.
-        global_label: label of the global default, shown on the Default entry.
+        options: list of (provider_id, label); provider_id '' is
+                 ``Anthropic (native)``.
+        current: the active selection — ``FOLLOW_DEFAULT``, a provider_id, or
+                 ``''`` (pinned to native).
+        global_label: label of the global default provider, shown on the
+                 Default entry (fallback for settings-less/legacy rows).
 
-        FB-1a (P3.5e, C2/C4): when the row's EFFECTIVE agent is a native-config
-        agent (grok/opencode), the submenu lists THAT agent's native models
-        instead of the ccr list — grok's ``[model.*]`` keys / opencode's
-        ``provider/model`` ids, the exact strings the adapter passes to ``-m``.
-        Resolved through ``agent_configs`` (pure), keyed off the row's effective
-        agent so the menu rebuilds on an agent change via the existing refresh
-        path. claude's submenu is byte-identical to before.
-
-        P3.5f (C2, David's second reveal): the "Default (…)" label is now
-        PER-ROW — computed from THIS row's effective agent, not the single
-        global label the window pushes (which a claude-override row would wear
-        as the grok default's story). ``global_label`` is kept only as the
-        fallback for settings-less/legacy rows.
+        P3.5f (C2, David's second reveal): the "Default (…)" label is PER-ROW —
+        computed from THIS row's effective provider, not the single global label
+        the window pushes (which a per-project-override row would wear as the
+        global default's story). ``global_label`` is the fallback for
+        settings-less/legacy rows.
         """
-        options = self._effective_model_options(options)
         self._model_submenu.remove_all()
-        # reveal-3 item 1 (G1, C2/C4): a claude row with no override showed BOTH
-        # 'Default (Anthropic (native Claude))' AND a bare 'Anthropic (native
-        # Claude)' — the native sentinel (build_model_options index 0, id '')
-        # duplicates the Default item's resolved story. Same class hits a
-        # grok/opencode row whose default resolves to a listed native model. We
-        # compute the Default story ONCE and suppress any option that merely
-        # restates it. FOLLOW_DEFAULT (track the default) and an explicit pin
-        # stay distinct choices; we only drop a redundant pin the user hasn't
-        # taken — a LIVE pin (current == model_id) stays visible and checked.
+        # reveal-3 item 1 (G1, C2/C4): a row with no override and a native default
+        # showed BOTH 'Default (Anthropic (native))' AND a bare
+        # 'Anthropic (native)' — the native sentinel (index 0, id '') duplicates
+        # the Default item's resolved story. We compute the Default story ONCE
+        # and suppress any option that merely restates it. FOLLOW_DEFAULT (track
+        # the default) and an explicit pin stay distinct choices; we only drop a
+        # redundant pin the user hasn't taken — a LIVE pin (current == id) stays
+        # visible and checked.
         default_story = self._default_label(global_label)
         default_item = Gio.MenuItem.new(f'Default ({default_story})', None)
         default_item.set_action_and_target_value(
             'row.set-model', GLib.Variant('s', FOLLOW_DEFAULT))
         self._model_submenu.append_item(default_item)
-        for model_id, label in options:
-            if label == default_story and current != model_id:
+        for provider_id, label in options:
+            if label == default_story and current != provider_id:
                 continue
             item = Gio.MenuItem.new(label, None)
             item.set_action_and_target_value(
-                'row.set-model', GLib.Variant('s', model_id))
+                'row.set-model', GLib.Variant('s', provider_id))
             self._model_submenu.append_item(item)
         self._model_action.set_state(GLib.Variant('s', current))
         self._rebuild_popover()
 
-    def _effective_model_options(self, ccr_options):
-        """The model options to show for THIS row's effective agent (FB-1a).
-
-        For a native-config agent (grok/opencode) return its native models as
-        ``[(id, label)]`` (the id is the ``-m`` value: grok KEY / opencode
-        ``provider/model``); for claude or any agent with no native surface —
-        or if resolution fails for any reason — return the passed ccr options
-        unchanged (the menu path must never throw). Settings-less/legacy rows
-        keep the ccr list."""
-        if self._settings is None:
-            return ccr_options
-        try:
-            import agent_configs
-            agent_id = self._settings.effective_agent(self._project.path)
-            native = agent_configs.native_model_options(agent_id)
-            if native is None:
-                return ccr_options
-            ids, labels = native
-            return list(zip(ids, labels))
-        except Exception:
-            return ccr_options
-
     def _default_label(self, fallback):
-        """The "Default (…)" model-story label for THIS row's effective agent.
+        """The "Default (…)" provider-story label for THIS row's effective
+        provider.
 
-        P3.5f (C2): the window-computed global label describes the GLOBAL default
-        agent; a claude-override row must NOT wear the grok default's story.
-        Resolve per-row via ``agent_configs.default_model_label_for`` (effective
-        agent of this project). Settings-less/legacy rows — or any failure —
-        fall back to the global label, so the menu path never throws."""
+        P3.5f (C2): a per-project-override row must NOT wear the global
+        default's story. Resolve per-row via ``settings.effective_provider`` +
+        ``models.provider_label``. Settings-less/legacy rows — or any failure —
+        fall back to the global label, so the menu path never throws.
+        """
         if self._settings is None:
             return fallback
         try:
-            import agent_configs
-            return agent_configs.default_model_label_for(
-                self._settings, self._project.path)
+            pid = self._settings.effective_provider(self._project.path)
+            return provider_label(self._settings.providers, pid)
         except Exception:
             return fallback
 
     def _on_model_select(self, action, value):
         action.set_state(value)
         self.emit('project-model-change', value.get_string())
-
-    # --- Agent submenu (B3) ----------------------------------------------
-
-    def _populate_agent_submenu(self):
-        """Build the 'Agent' submenu: Follow default + one per registered
-        adapter, the active one checked (stateful-radio pattern, like Model).
-
-        The active selection is the per-project override (FOLLOW_DEFAULT when
-        none). The default entry shows the global default agent's display name.
-        """
-        self._agent_submenu.remove_all()
-        default_id = (self._settings.agent_default
-                      if self._settings is not None else agents.DEFAULT_AGENT)
-        default_label = self._agent_display_name(default_id)
-        default_item = Gio.MenuItem.new(f'Follow default ({default_label})', None)
-        default_item.set_action_and_target_value(
-            'row.set-agent', GLib.Variant('s', FOLLOW_DEFAULT))
-        self._agent_submenu.append_item(default_item)
-        for agent_id, adapter in agents.ADAPTERS.items():
-            item = Gio.MenuItem.new(adapter.display_name, None)
-            item.set_action_and_target_value(
-                'row.set-agent', GLib.Variant('s', agent_id))
-            self._agent_submenu.append_item(item)
-        # Current selection: the stored override, or FOLLOW_DEFAULT.
-        current = FOLLOW_DEFAULT
-        if self._settings is not None:
-            override = self._settings.agent_overrides.get(self._project.path)
-            if override:
-                current = override
-        self._agent_action.set_state(GLib.Variant('s', current))
-
-    @staticmethod
-    def _agent_display_name(agent_id):
-        adapter = agents.ADAPTERS.get(agent_id)
-        return adapter.display_name if adapter else agent_id
-
-    def _on_agent_select(self, action, value):
-        action.set_state(value)
-        self.emit('project-agent-change', value.get_string())
 
     def _on_right_click(self, gesture, n_press, x, y):
         rect = Gdk.Rectangle()

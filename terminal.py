@@ -351,7 +351,7 @@ class TerminalView(Gtk.Box):
         self._terminal.set_color_cursor_foreground(rgba(p['cursor_fg']))
 
     def spawned_model_signature(self):
-        """The 'provider/model' the current child was spawned with."""
+        """The provider id the current child was spawned with ('' = native)."""
         return self._spawned_model
 
     def spawned_agent_signature(self):
@@ -367,8 +367,8 @@ class TerminalView(Gtk.Box):
         surface it from the process-started handler.
         """
         # Must clear at spawn entry, not in _spawn() — the adapter's spawn_plan
-        # (which runs ccr.spawn_env) sets a fresh reason below; clearing here
-        # avoids a stale reason from a prior failed spawn leaking through.
+        # (which runs models.build_spawn_env) sets a fresh reason below; clearing
+        # here avoids a stale reason from a prior failed spawn leaking through.
         self._fallback_reason = None
         # FB-4 (C4/C6): an agent-change / new-session DIRECT spawn over a live
         # zellij project must tear down the zellij SERVER session first — the
@@ -470,9 +470,9 @@ class TerminalView(Gtk.Box):
             # created — attaching to an existing session inherits whatever the
             # server already has. Per-project models under zellij are therefore
             # best-effort; the default (non-multiplexed) path is fully supported.
-            # The adapter owns the env decision (A3/M3): for claude this is the
-            # ccr env; for opencode (and any model-as-argv agent) it is None.
-            # terminal.py no longer calls ccr or names ANTHROPIC_* keys.
+            # The adapter owns the env decision: for claude this is the
+            # custom-provider env (models.build_spawn_env); for the native path
+            # it is None. terminal.py no longer names ANTHROPIC_* keys directly.
             custom, self._fallback_reason = self._adapter.zellij_spawn_env(
                 self._settings, self._project
             )
@@ -529,6 +529,11 @@ class TerminalView(Gtk.Box):
         env_dict = dict(env) if env is not None else dict(os.environ)
         env_dict.setdefault('TERM', 'xterm-256color')
         env_dict.setdefault('COLORTERM', 'truecolor')
+        # Freeze PM-spawned Claude Code against auto-updates universally — a CC
+        # update could break third-party-model support mid-session. Applied
+        # here (setdefault) so NATIVE spawns (env is None → os.environ) freeze
+        # too, not only custom-provider spawns (build_spawn_env already sets it).
+        env_dict.setdefault('DISABLE_AUTOUPDATER', '1')
 
         pid = os.fork()
         if pid == 0:
@@ -556,7 +561,7 @@ class TerminalView(Gtk.Box):
         import time as _time
         self._spawn_monotonic = _time.monotonic()
         self._spawn_binary = argv_list[0] if argv_list else ''
-        self._spawned_model = self._settings.effective_model(self._project.path)
+        self._spawned_model = self._settings.effective_provider(self._project.path)
         # The agent id the live child was actually spawned with — lets window.py
         # detect when an agent override leaves a running session stale (B3),
         # parallel to _spawned_model. Uses the adapter that produced this spawn.

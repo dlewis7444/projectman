@@ -1,49 +1,61 @@
-"""Tests for the agent-aware settings fields + claude_binary migration (P1).
+"""Tests for the harness/binary settings + claude_binary migration.
 
-Back-compat is the load-bearing requirement: a current-format user
-settings.json (with ``claude_binary`` and no ``agents`` key) must load with
-behavior unchanged. After load, ``claude_binary`` is migrated into
-``agents['claude']['binary']`` but the old key stays honored when ``agents`` is
-absent, and ``resolved_claude_binary`` keeps returning the same value either
-way.
+Claude Code is the sole harness. The back-compat requirement that survives the
+multi-harness → Claude-Only pivot: a current-format user settings.json (with
+``claude_binary`` and no ``agents`` key) must load with behavior unchanged.
+After load, ``claude_binary`` is migrated into ``agents['claude']['binary']``
+but the old key stays honored when ``agents`` is absent, and
+``resolved_claude_binary`` keeps returning the same value either way.
 """
 import json
 
-from settings import Settings
+from settings import Settings, TIERS
 
 
-# ── new field defaults ───────────────────────────────────────────────────────
+# ── field defaults ───────────────────────────────────────────────────────────
 
-def test_agent_field_defaults():
+def test_field_defaults():
     s = Settings()
-    assert s.agent_default == 'claude'
-    assert s.agent_overrides == {}
     # agents defaults to empty; the migration path fills claude on load.
     assert isinstance(s.agents, dict)
+    # The old multi-harness fields are gone.
+    assert not hasattr(s, 'agent_default')
+    assert not hasattr(s, 'agent_overrides')
+    assert not hasattr(s, 'ccr_managed')
+    # The new model-axis fields exist.
+    assert s.providers == {}
+    assert s.model_default == ''
+    assert s.model_overrides == {}
+    assert s.tier_models == {}
 
 
-# ── effective_agent mirrors effective_model ──────────────────────────────────
+# ── effective_agent is a kept back-compat symbol, always claude ──────────────
 
-def test_effective_agent_default_when_no_overrides():
-    s = Settings()
-    assert s.effective_agent('/p/a') == 'claude'
-
-
-def test_effective_agent_global_default():
-    s = Settings(agent_default='opencode')
-    assert s.effective_agent('/p/a') == 'opencode'
+def test_effective_agent_always_claude():
+    assert Settings().effective_agent('/p/a') == 'claude'
+    assert Settings(providers={'p': {'models': ['m']}},
+                     model_default='p').effective_agent('/p/a') == 'claude'
 
 
-def test_effective_agent_per_project_override():
-    s = Settings(agent_default='claude', agent_overrides={'/p/a': 'opencode'})
-    assert s.effective_agent('/p/a') == 'opencode'
-    assert s.effective_agent('/p/b') == 'claude'
+# ── tier_models + provider round-trip ────────────────────────────────────────
+
+def test_tier_models_roundtrip(tmp_path):
+    path = str(tmp_path / 'settings.json')
+    s = Settings(providers={'ollama': {'name': 'O', 'base_url': 'http://x',
+                                         'api_key': 'k', 'models': ['a', 'b']}},
+                 model_default='ollama',
+                 tier_models={'opus': 'b', 'sonnet': 'a', 'haiku': '', 'subagent': ''})
+    s.save(path)
+    s2 = Settings.load(path)
+    assert s2.tier_models == {'opus': 'b', 'sonnet': 'a', 'haiku': '', 'subagent': ''}
 
 
-def test_effective_agent_empty_override_falls_back_to_default():
-    """An override stored as '' is treated as 'use the default', not 'no agent'."""
-    s = Settings(agent_default='claude', agent_overrides={'/p/a': ''})
-    assert s.effective_agent('/p/a') == 'claude'
+def test_tier_models_only_canonical_keys_persisted(tmp_path):
+    path = str(tmp_path / 'settings.json')
+    s = Settings(tier_models={'opus': 'x', 'sonnet': '', 'haiku': '', 'subagent': ''})
+    s.save(path)
+    s2 = Settings.load(path)
+    assert set(s2.tier_models.keys()) <= set(TIERS)
 
 
 # ── claude_binary migration: old key still honored when agents absent ─────────
@@ -122,34 +134,9 @@ def test_save_then_load_roundtrips_migrated_form(tmp_path):
     assert s2.agents.get('claude', {}).get('binary') == '/opt/claude'
 
 
-def test_agent_overrides_roundtrip(tmp_path):
-    path = str(tmp_path / 'settings.json')
-    s = Settings(agent_default='claude', agent_overrides={'/p/a': 'opencode'})
-    s.save(path)
-    s2 = Settings.load(path)
-    assert s2.agent_default == 'claude'
-    assert s2.agent_overrides == {'/p/a': 'opencode'}
-
-
-def test_agent_overrides_roundtrip_grok(tmp_path):
-    """T-B4: a per-project grok override + a grok binary entry survive a
-    save/load round-trip (the third agent is no different from the others)."""
-    path = str(tmp_path / 'settings.json')
-    s = Settings(agent_default='grok',
-                 agent_overrides={'/p/g': 'grok'},
-                 agents={'grok': {'binary': '/opt/grok/grok'}})
-    s.save(path)
-    s2 = Settings.load(path)
-    assert s2.agent_default == 'grok'
-    assert s2.agent_overrides == {'/p/g': 'grok'}
-    assert s2.agents.get('grok', {}).get('binary') == '/opt/grok/grok'
-    assert s2.effective_agent('/p/g') == 'grok'
-
-
-def test_existing_provider_and_ccr_fields_still_default(tmp_path):
-    """Adding agent fields must not disturb the existing model/ccr defaults."""
+def test_model_axis_defaults_undisturbed_by_binary_migration():
+    """Adding agents/binary fields must not disturb the model-axis defaults."""
     s = Settings()
     assert s.providers == {}
     assert s.model_default == ''
-    assert s.ccr_host == '127.0.0.1'
-    assert s.ccr_port == 3456
+    assert s.tier_models == {}

@@ -19,8 +19,8 @@ def _run_haiku(prompt, settings, timeout=_HAIKU_TIMEOUT):
     tokens_used = input_tokens + output_tokens (excludes cache)."""
     claude_cmd = settings.resolved_claude_binary
     # PAA intentionally uses native Anthropic: this subprocess inherits PM's
-    # own os.environ (no ANTHROPIC_BASE_URL), so it is never routed through
-    # ccr. The model-agnostic feature applies only to project terminals.
+    # own os.environ (no ANTHROPIC_BASE_URL), so it is never routed through a
+    # custom provider. The model axis applies only to project terminals.
     # Run from PAA's own directory to avoid polluting real project sessions
     paa_dir = os.path.join(settings.resolved_projects_dir, '.project-admin-agent')
     os.makedirs(paa_dir, exist_ok=True)

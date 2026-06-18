@@ -1,7 +1,13 @@
 """Commit 2 — FAILURE SURFACES (P3.5 items 7-11). Window/terminal/PAA decisions
 tested UNBOUND against SimpleNamespace recorders (the A2/A5/lifecycle pattern).
-The C7 triple-whammy, the C2/C4/C6 billing leak, the C6 zellij no-op, and the
-agent-change feedback.
+The C7 triple-whammy, the C2/C4/C6 billing leak, and the C6 zellij no-op.
+
+The 2026-06 Claude-Only + first-class model axis pivot removed the per-project
+Agent submenu and its handler (_on_project_agent_change), the agent_default/
+agent_overrides settings, and the multi-harness adapters. The agent-change
+feedback tests and the P3.5c restore-stickiness suite that exercised that
+removed seam were deleted with it. The spawn-failure and project-creation
+toast suites are retained and retargeted at the sole harness (claude).
 
 Binding tests:
   M-UX.10a  spawn-fail(127) within window → toast text has binary + hint;
@@ -12,7 +18,7 @@ Binding tests:
   M-UX.4    scan disabled → ZERO run_ai_checks calls (spy) + toast; enabled →
             result surfaced
   M-UX.3    New Zellij Session with multiplexer≠zellij → toast, no spawn
-  M-UX.11   agent submenu selection → one-shot "Agent for <project>: <name>"
+  B4        project creation toast names the resolved harness ("harness:")
 """
 import time
 import types
@@ -102,24 +108,24 @@ def _win(settings=None, toasts=None, sidebar=None):
 
 
 def test_spawn_failure_toast_text_names_binary_display_and_hint():
-    """BINDING T-a (text): grok miss → '<binary> not found — Grok Build isn't
-    installed. <curl hint>'."""
+    """BINDING T-a (text): claude miss → '<binary> not found — Claude Code
+    isn't installed. <install hint>'."""
     from window import AppWindow
-    fake = _win(Settings(agent_default='grok'))
-    text = AppWindow._spawn_failure_toast_text(fake, 'grok', 'grok')
-    assert 'grok not found' in text
-    assert "Grok Build isn't installed" in text
-    assert 'curl -fsSL https://x.ai/cli/install.sh | bash' in text
+    fake = _win(Settings())
+    text = AppWindow._spawn_failure_toast_text(fake, 'claude', 'claude')
+    assert 'claude not found' in text
+    assert "Claude Code isn't installed" in text
+    assert 'claude.ai/code' in text
 
 
 def test_spawn_failure_toast_prefers_adapter_binary_over_bash_wrapper():
     """Under the continue wrapper argv[0] is 'bash'; the toast must still name
     the AGENT's binary, not bash."""
     from window import AppWindow
-    fake = _win(Settings(agent_default='grok'))
-    text = AppWindow._spawn_failure_toast_text(fake, 'grok', 'bash')
+    fake = _win(Settings())
+    text = AppWindow._spawn_failure_toast_text(fake, 'claude', 'bash')
     assert 'bash not found' not in text
-    assert 'grok not found' in text
+    assert 'claude not found' in text
 
 
 def test_spawn_failure_toast_claude_uses_resolved_binary():
@@ -136,12 +142,12 @@ def test_on_spawn_failed_fires_one_toast_then_dedups():
     toast; the row is NOT removed here (process-exited owns 'inactive')."""
     from window import AppWindow
     toasts = []
-    fake = _win(Settings(agent_default='grok'), toasts)
+    fake = _win(Settings(), toasts)
     fake._spawn_failure_toast_text = lambda aid, rb: AppWindow._spawn_failure_toast_text(fake, aid, rb)
-    AppWindow._on_spawn_failed(fake, '/p', 'grok', 'grok')
-    AppWindow._on_spawn_failed(fake, '/p', 'grok', 'grok')  # repeat → dedup
+    AppWindow._on_spawn_failed(fake, '/p', 'claude', 'claude')
+    AppWindow._on_spawn_failed(fake, '/p', 'claude', 'claude')  # repeat → dedup
     assert len(toasts) == 1
-    assert "Grok Build isn't installed" in str(toasts[0].get_title())
+    assert "Claude Code isn't installed" in str(toasts[0].get_title())
     # No set_project_state / row REMOVAL lives in this handler — process-exited
     # owns the 'inactive' state. (The handler does drop the filter; see the T5
     # P3.5d test below.)
@@ -215,9 +221,9 @@ def test_t5_spawn_failure_drops_active_only_filter():
     and FAILS this."""
     from window import AppWindow
     sb = _Sidebar()
-    fake = _win(Settings(agent_default='grok'), sidebar=sb)
+    fake = _win(Settings(), sidebar=sb)
     fake._spawn_failure_toast_text = lambda aid, rb: AppWindow._spawn_failure_toast_text(fake, aid, rb)
-    AppWindow._on_spawn_failed(fake, '/proj', 'grok', 'grok')
+    AppWindow._on_spawn_failed(fake, '/proj', 'claude', 'claude')
     assert sb.active_only_calls == [False]      # the filter was dropped
 
 
@@ -227,10 +233,10 @@ def test_t5_spawn_failure_drops_filter_every_time_even_when_deduped():
     from window import AppWindow
     toasts = []
     sb = _Sidebar()
-    fake = _win(Settings(agent_default='grok'), toasts, sidebar=sb)
+    fake = _win(Settings(), toasts, sidebar=sb)
     fake._spawn_failure_toast_text = lambda aid, rb: AppWindow._spawn_failure_toast_text(fake, aid, rb)
-    AppWindow._on_spawn_failed(fake, '/proj', 'grok', 'grok')
-    AppWindow._on_spawn_failed(fake, '/proj', 'grok', 'grok')  # deduped toast
+    AppWindow._on_spawn_failed(fake, '/proj', 'claude', 'claude')
+    AppWindow._on_spawn_failed(fake, '/proj', 'claude', 'claude')  # deduped toast
     assert len(toasts) == 1                     # toast one-shot
     assert sb.active_only_calls == [False, False]   # filter dropped both times
 
@@ -403,14 +409,21 @@ def test_install_sh_static_content():
     # version banner at start
     assert 'info "Installing $PM_BANNER"' in src
     assert 'PM_VERSION=' in src and 'PM_COMMIT=' in src
-    # the removed unused vars
+    # the removed unused vars / multi-harness summary blocks are GONE
     assert 'GROK_HOOK_JSON_DEST' not in src
     assert 'GROK_HOOK_SCRIPT_DEST' not in src
-    # coherent per-agent hook story (no warn+success contradiction)
+    assert 'opencode' not in src
+    assert 'grok' not in src
+    assert 'bridge-install' not in src
+    # the multi-harness "(claude is optional; PM also drives opencode and grok)"
+    # line is gone — claude is the sole harness now
+    assert 'claude is optional' not in src
+    # coherent per-harness hook story (no warn+success contradiction)
     assert 'CLAUDE_PRESENT' in src
     assert 'staged' in src
-    # outsider-friendly compat message
-    assert 'grok also reads Claude-style hooks' in src
+    # the Claude hook registration block is still present
+    assert 'register_claude_hooks' in src
+    assert 'HOOK_STATUS' in src
 
 
 def test_install_sh_version_extraction_snippet():
@@ -426,43 +439,16 @@ def test_install_sh_version_extraction_snippet():
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# M-UX.11 — agent-change feedback toast (window, unbound)
+# M-UX.11 — the per-project Agent submenu is GONE (2026-06 Claude-Only pivot).
+# The agent-change tests (test_agent_change_fires_feedback_toast,
+# test_agent_change_follow_default_clears_override) and the P3.5c restore-
+# stickiness suite exercised _on_project_agent_change + agent_overrides +
+# clear_explicit_agent, all tied to that removed submenu; deleted with it.
 # ════════════════════════════════════════════════════════════════════════════
-
-def test_agent_change_fires_feedback_toast():
-    """BINDING (item 11): selecting an agent for a project → one-shot
-    'Agent for <project>: <display name>'."""
-    from window import AppWindow
-    from models import FOLLOW_DEFAULT
-    toasts = []
-    s = Settings(agent_overrides={})
-    fake = types.SimpleNamespace(_settings=s, _terminals={})
-    fake._toast_overlay = types.SimpleNamespace(add_toast=lambda t: toasts.append(t))
-    fake._show_toast = lambda text, timeout=5: toasts.append(text)
-    fake.apply_settings = lambda s: None
-    fake._maybe_prompt_restart = lambda p: None
-    fake._find_project = lambda p: types.SimpleNamespace(name='myproj', path='/proj')
-    AppWindow._on_project_agent_change(fake, object(), '/proj', 'grok')
-    assert any('myproj' in str(t) and 'Grok Build' in str(t) for t in toasts)
-    assert s.agent_overrides == {'/proj': 'grok'}
-
-
-def test_agent_change_follow_default_clears_override():
-    from window import AppWindow
-    from models import FOLLOW_DEFAULT
-    toasts = []
-    s = Settings(agent_overrides={'/proj': 'grok'})
-    fake = types.SimpleNamespace(_settings=s, _terminals={})
-    fake._show_toast = lambda text, timeout=5: toasts.append(text)
-    fake.apply_settings = lambda s: None
-    fake._maybe_prompt_restart = lambda p: None
-    fake._find_project = lambda p: types.SimpleNamespace(name='myproj', path='/proj')
-    AppWindow._on_project_agent_change(fake, object(), '/proj', FOLLOW_DEFAULT)
-    assert s.agent_overrides == {}  # override cleared
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# B4 — M-UX.15: project creation toast names the resolved agent (window, unbound)
+# B4 — M-UX.15: project creation toast names the resolved harness (window, unbound)
 # ════════════════════════════════════════════════════════════════════════════
 
 def _store_for(projects_dir):
@@ -472,35 +458,36 @@ def _store_for(projects_dir):
 
 def test_project_created_toast_follows_default(tmp_path):
     """BINDING (B4): a new project with no override → toast names the global
-    default agent's display name, exactly one toast."""
+    default harness's display name, exactly one toast."""
     from window import AppWindow
-    s = Settings(agent_default='grok')
+    s = Settings()
     fake = types.SimpleNamespace(_settings=s, _store=_store_for(str(tmp_path)))
     text = AppWindow._project_created_toast_text(fake, 'shiny')
-    assert text == "New project 'shiny' — agent: Grok Build"
+    assert text == "New project 'shiny' — harness: Claude Code"
 
 
 def test_project_created_toast_claude_default(tmp_path):
     from window import AppWindow
-    s = Settings(agent_default='claude')
+    s = Settings()
     fake = types.SimpleNamespace(_settings=s, _store=_store_for(str(tmp_path)))
     text = AppWindow._project_created_toast_text(fake, 'thing')
-    assert text == "New project 'thing' — agent: Claude Code"
+    assert text == "New project 'thing' — harness: Claude Code"
 
 
-def test_project_created_toast_resolves_fallback_for_unknown_default(tmp_path):
-    """BINDING (B4 — 'incl. fallback'): an unregistered default agent resolves
-    through resolve_adapter to the ACTUAL fallback's display name, never the
-    dead id."""
+def test_project_created_toast_names_the_only_harness(tmp_path):
+    """BINDING (B4): Claude Code is the sole harness, so the created toast
+    always resolves to "Claude Code" regardless of any stale id carried in
+    settings (effective_agent always returns 'claude'). The toast fires and
+    names the harness — coverage retained where the old "unknown default"
+    fallback test lived."""
     from window import AppWindow
-    s = Settings(agent_default='ghost-agent')
+    # A Settings with a stale provider id in model_default does NOT change the
+    # harness — effective_agent ignores it and returns 'claude'.
+    s = Settings(model_default='ghost-provider')
     fake = types.SimpleNamespace(_settings=s, _store=_store_for(str(tmp_path)))
     text = AppWindow._project_created_toast_text(fake, 'p')
-    assert 'ghost-agent' not in text
-    assert text.startswith("New project 'p' — agent: ")
-    # The fallback is a real registered adapter display name.
-    assert text.split('agent: ', 1)[1] in {
-        agents.ADAPTERS[a].display_name for a in agents.ADAPTERS}
+    assert text == "New project 'p' — harness: Claude Code"
+    assert 'ghost-provider' not in text
 
 
 def test_on_project_create_fires_exactly_one_creation_toast(tmp_path):
@@ -509,7 +496,7 @@ def test_on_project_create_fires_exactly_one_creation_toast(tmp_path):
     from window import AppWindow
     projects = tmp_path / 'projects'
     projects.mkdir()
-    s = Settings(agent_default='grok')
+    s = Settings()
     toasts = []
     from model import ProjectStore
     store = ProjectStore(s)
@@ -533,7 +520,7 @@ def test_on_project_create_fires_exactly_one_creation_toast(tmp_path):
     assert (projects / 'fresh').is_dir()       # dir created
     assert refreshed == [True]                  # sidebar refreshed
     assert activated == [str(projects / 'fresh')]  # G3: new project activated
-    assert toasts == ["New project 'fresh' — agent: Grok Build"]
+    assert toasts == ["New project 'fresh' — harness: Claude Code"]
 
 
 def test_on_project_create_oserror_emits_no_toast(tmp_path):
@@ -557,143 +544,3 @@ def test_on_project_create_oserror_emits_no_toast(tmp_path):
     )
     AppWindow._on_project_create(fake, object(), 'nope')
     assert toasts == []
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# P3.5c (S8 ship-blocker) — an EXPLICIT per-project agent pick must defeat the
-# A2 restore-stickiness, WITHOUT breaking the A2 protection against incidental
-# global/default changes. Unbound real methods against faithful fakes (house
-# pattern): the terminal stub drives the REAL TerminalView.apply_settings /
-# clear_explicit_agent (GTK side stubbed) so the adapter RE-RESOLUTION is genuine
-# production code, and the REAL AppWindow._on_project_agent_change drives the wire.
-# ════════════════════════════════════════════════════════════════════════════
-
-def _restored_grok_terminal(settings, path='/proj'):
-    """A faithful TerminalView stub for a RESTORED grok session.
-
-    Carries sticky ``_explicit_agent='grok'`` (A2) + a live child. Exposes the
-    REAL ``apply_settings`` and ``clear_explicit_agent`` (bound below), with the
-    GTK-touching helpers stubbed so the adapter re-resolution runs unchanged.
-    """
-    import agents
-    from terminal import TerminalView
-    term = types.SimpleNamespace(
-        _explicit_agent='grok',
-        _project=types.SimpleNamespace(path=path),
-        _settings=settings,
-        _adapter=agents.get_adapter('grok', settings),
-        _child_pid=4242,                    # a live child (restart prompt arms)
-        _spawned_agent='grok',              # the live child's agent (C8)
-        _font_size=settings.font_size,
-        # GTK side — stubbed no-ops so the real apply_settings body runs.
-        _terminal=types.SimpleNamespace(
-            set_scrollback_lines=lambda n: None, set_audible_bell=lambda b: None),
-        _apply_font=lambda: None,
-        _apply_colors=lambda: None,
-    )
-    # Bind the REAL methods so the test exercises production logic.
-    term.apply_settings = lambda s: TerminalView.apply_settings(term, s)
-    term.clear_explicit_agent = lambda: TerminalView.clear_explicit_agent(term)
-    term.spawned_agent_signature = lambda: term._spawned_agent
-    return term
-
-
-def _window_fake(settings, terminals):
-    """An AppWindow stub wired so _on_project_agent_change runs end-to-end."""
-    fake = types.SimpleNamespace(_settings=settings, _terminals=terminals)
-    fake._show_toast = lambda text, timeout=5: None
-    fake._find_project = lambda p: types.SimpleNamespace(
-        name='myproj', path='/proj')
-    fake._maybe_prompt_restart = lambda p: None
-    # The REAL apply_settings touches sidebar; use the load-bearing half only:
-    # push settings into each terminal (which re-resolves its adapter).
-    def _apply(s):
-        fake._settings = s
-        for tv in terminals.values():
-            tv.apply_settings(s)
-    fake.apply_settings = _apply
-    return fake
-
-
-def test_p35c_t1_explicit_pick_defeats_restore_stickiness():
-    """T1 (the David repro): a restored grok terminal; the user picks 'claude'
-    from the per-project Agent submenu → after the handler, the terminal's
-    resolved adapter is claude (and a spawn plan built now carries claude argv).
-    On revert (no clear_explicit_agent call), the adapter stays grok → FAILS."""
-    from window import AppWindow
-    s = Settings(agent_default='claude')
-    term = _restored_grok_terminal(s)
-    fake = _window_fake(s, {'/proj': term})
-
-    AppWindow._on_project_agent_change(fake, object(), '/proj', 'claude')
-
-    assert term._adapter.id == 'claude'             # stickiness defeated
-    assert term._explicit_agent is None             # override cleared
-    # The next spawn carries CLAUDE argv, not grok.
-    plan = term._adapter.spawn_plan(s, term._project, 'fresh')
-    assert 'claude' in plan.argv[0]
-    assert 'grok' not in plan.argv[0]
-
-
-def test_p35c_t2_global_default_change_stays_sticky_A2_pin():
-    """T2 (A2 regression pin): the SAME restored grok terminal; change
-    agent_default and run ONLY apply_settings (NO submenu pick) → the adapter
-    stays grok (restore-stickiness intact). If the fix clears stickiness on
-    global changes too, this FAILS."""
-    s = Settings(agent_default='claude')
-    term = _restored_grok_terminal(s)
-
-    # A global default change with NO explicit per-project pick.
-    s.agent_default = 'opencode'
-    term.apply_settings(s)
-
-    assert term._adapter.id == 'grok'               # A2 stickiness intact
-    assert term._explicit_agent == 'grok'           # untouched
-
-
-def test_p35c_t3_follow_default_pick_clears_stickiness():
-    """T3: an explicit FOLLOW_DEFAULT pick (the user chose to follow the global
-    default) also clears the restore-stickiness → adapter == agent_default."""
-    from window import AppWindow
-    from models import FOLLOW_DEFAULT
-    s = Settings(agent_default='opencode', agent_overrides={'/proj': 'grok'})
-    term = _restored_grok_terminal(s)
-    fake = _window_fake(s, {'/proj': term})
-
-    AppWindow._on_project_agent_change(fake, object(), '/proj', FOLLOW_DEFAULT)
-
-    assert s.agent_overrides == {}                  # override removed
-    assert term._explicit_agent is None             # stickiness cleared
-    assert term._adapter.id == 'opencode'           # now follows the default
-
-
-def test_p35c_t4_no_terminal_for_path_completes_cleanly():
-    """T4: no terminal exists for the path → the handler completes, the override
-    is written, and nothing raises (clear_explicit_agent is never reached)."""
-    from window import AppWindow
-    s = Settings(agent_default='claude')
-    fake = _window_fake(s, {})                       # no terminals at all
-
-    AppWindow._on_project_agent_change(fake, object(), '/proj', 'grok')
-
-    assert s.agent_overrides == {'/proj': 'grok'}   # override still written
-
-
-def test_p35c_t5_no_residual_agent_staleness_after_respawn():
-    """T5 (C8 end-state): after T1's handler, the spawned-agent-vs-effective
-    disagreement is GONE once the restart's respawn stamps the new agent — the
-    restart prompt's staleness check would not fire a SECOND time."""
-    from window import AppWindow
-    s = Settings(agent_default='claude')
-    term = _restored_grok_terminal(s)
-    fake = _window_fake(s, {'/proj': term})
-
-    AppWindow._on_project_agent_change(fake, object(), '/proj', 'claude')
-
-    # Simulate the restart-prompt's "Restart Now" respawn: the child is stamped
-    # with the now-resolved adapter id (terminal._spawn does this at spawn time).
-    term._spawned_agent = term._adapter.id
-
-    effective = s.effective_agent('/proj')
-    assert term.spawned_agent_signature() == effective   # no disagreement
-    assert effective == 'claude'

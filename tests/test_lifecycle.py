@@ -72,8 +72,8 @@ def test_plan_emergency_kill_zellij_with_no_child_skipped():
 
 def test_emergency_shutdown_saves_before_kill_and_skips_zellij():
     """T2 — save_session is recorded BEFORE any _kill_child; the zellij
-    terminal's _kill_child is NEVER called; ccr stop runs last; the killed
-    direct paths are returned."""
+    terminal's _kill_child is NEVER called; the killed direct paths are
+    returned."""
     calls = []
     terminals = {
         '/direct': _term(111, is_zellij=False, calls=calls, path='/direct'),
@@ -82,13 +82,12 @@ def test_emergency_shutdown_saves_before_kill_and_skips_zellij():
     }
     fake = types.SimpleNamespace(_terminals=terminals)
     fake._save_session = lambda: calls.append(('save', None))
-    fake._stop_managed_ccr = lambda: calls.append(('ccr_stop', None))
 
     killed = AppWindow.emergency_shutdown(fake)
 
     assert killed == ['/direct']
-    # save first, exactly one kill (the direct one), ccr stop last.
-    assert calls == [('save', None), ('kill', '/direct'), ('ccr_stop', None)]
+    # save first, exactly one kill (the direct one).
+    assert calls == [('save', None), ('kill', '/direct')]
     # zellij _kill_child never fired.
     assert ('kill', '/zellij') not in calls
     # save strictly precedes every kill.
@@ -161,17 +160,13 @@ def test_should_quit_app_decision_table():
 # ── T6: _quit gates app.quit on primary-window identity ───────────────────────
 
 def _quit_fake(app):
-    """Fake AppWindow self for _quit: ccr_managed=False so the real
-    _stop_managed_ccr guard is exercised as a genuine no-op; destroy recorded;
-    get_application returns the given fake app."""
+    """Fake AppWindow self for _quit: destroy recorded; get_application returns
+    the given fake app. (_quit no longer stops a managed service — the ccr
+    teardown was removed in the Claude-Only pivot.)"""
     calls = []
-    fake = types.SimpleNamespace(
-        _settings=types.SimpleNamespace(ccr_managed=False),
-    )
+    fake = types.SimpleNamespace()
     fake.destroy = lambda: calls.append('destroy')
     fake.get_application = lambda: app
-    # Bind the real helper so the ccr guard runs (no-op under ccr_managed=False).
-    fake._stop_managed_ccr = lambda: AppWindow._stop_managed_ccr(fake)
     return fake, calls
 
 

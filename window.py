@@ -122,7 +122,6 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.connect('project-ntfy-toggle', self._on_ntfy_toggle)
         self._sidebar.connect('project-haiku-check', self._on_project_haiku_check)
         self._sidebar.connect('project-model-change', self._on_project_model_change)
-        self._sidebar.connect('project-agent-change', self._on_project_agent_change)
         self._sidebar.connect('show-archive-window', self._on_show_archive_window)
         self._sidebar.connect('show-settings',       self._on_open_settings)
         self._sidebar.connect('project-create', self._on_project_create)
@@ -141,17 +140,18 @@ class AppWindow(Adw.ApplicationWindow):
         self._paned.set_end_child(self._stack)
 
         # ToastOverlay wraps the whole content area so fallback notices for the
-        # ccr dead-port guard float above the terminal without blocking it.
+        # provider-unavailable guard float above the terminal without blocking it.
         self._toast_overlay = Adw.ToastOverlay()
         self._toast_overlay.set_child(self._paned)
         toolbar_view.set_content(self._toast_overlay)
         self.set_content(toolbar_view)
 
-        # ccr toast aggregation state: pending (project_name, reason) events
-        # batched for ~2s before display; at most ONE ccr toast shown at a time.
-        self._ccr_pending: list = []    # buffered (name, reason) pairs
-        self._ccr_toast_timer = None    # GLib.timeout_add source id | None
-        self._ccr_toast: Adw.Toast | None = None  # currently displayed toast
+        # Provider-fallback toast aggregation state: pending (project_name,
+        # reason) events batched for ~2s before display; at most ONE provider
+        # toast shown at a time.
+        self._provider_pending: list = []    # buffered (name, reason) pairs
+        self._provider_toast_timer = None    # GLib.timeout_add source id | None
+        self._provider_toast: Adw.Toast | None = None  # currently displayed toast
 
         watcher.connect('status-changed', self._on_status_changed)
         self.connect('close-request', self._on_close_request)
@@ -242,20 +242,6 @@ class AppWindow(Adw.ApplicationWindow):
         self._save_session()      # snapshot before SIGTERM
         ShutdownWindow(parent=self, running=running, on_complete=self._quit)
 
-    def _stop_managed_ccr(self):
-        """Stop the ccr service we manage so it doesn't outlive ProjectMan.
-
-        If the user runs ccr independently (ccr_managed off), leave it be.
-        Shared by the interactive quit path and the emergency (signal) path so
-        the gate logic lives in exactly one place.
-        """
-        try:
-            import ccr
-            if self._settings.ccr_managed and ccr.available(self._settings):
-                ccr.stop(self._settings)
-        except Exception:
-            pass
-
     def _quit(self):
         """Destroy this window; quit the app only if it is the primary one.
 
@@ -264,7 +250,6 @@ class AppWindow(Adw.ApplicationWindow):
         the primary window, clear ``app._window`` BEFORE quitting so a racing
         re-activation cannot present a destroyed window.
         """
-        self._stop_managed_ccr()
         app = self.get_application()
         quit_app = should_quit_app(getattr(app, '_window', None), self)
         if quit_app and app is not None:
@@ -276,13 +261,12 @@ class AppWindow(Adw.ApplicationWindow):
     def emergency_shutdown(self):
         """Non-interactive fast-path teardown for SIGTERM/SIGHUP.
 
-        NO dialogs, NO ShutdownWindow. Ordering contract: save → kill → ccr.
+        NO dialogs, NO ShutdownWindow. Ordering contract: save → kill.
         1. Save the session FIRST so the snapshot lands even if a later kill
            hangs.
         2. Kill the live DIRECT-spawn children (process groups, via the
            terminal's own ``_kill_child``). Zellij terminals are NEVER killed —
            their sessions persist by design.
-        3. Stop the ccr service we manage (same guard as the quit path).
         Returns the list of killed paths (for the signal handler / logging).
         Never prompts, never waits on children.
         """
@@ -290,7 +274,6 @@ class AppWindow(Adw.ApplicationWindow):
         killed = plan_emergency_kill(self._terminals)
         for path in killed:
             self._terminals[path]._kill_child()
-        self._stop_managed_ccr()
         return killed
 
     def _save_session(self):
@@ -473,7 +456,7 @@ class AppWindow(Adw.ApplicationWindow):
         """Fire a one-shot toast (M-UX.3/10/11 share this).
 
         Plain wrapper over the overlay so failure-surface handlers don't each
-        reimplement Toast plumbing; the ccr fallback path keeps its own
+        reimplement Toast plumbing; the provider fallback path keeps its own
         aggregating helper (it batches + dedups, this does not)."""
         toast = Adw.Toast.new(text)
         toast.set_timeout(timeout)
@@ -528,7 +511,7 @@ class AppWindow(Adw.ApplicationWindow):
             return
         self._warned_spawn_fail.add(key)
         # FB-10 (RB-1, H2): the spawn-failure toast is PERSISTENT (timeout=0, like
-        # the ccr fallback toast). RB-1's repro proved the mechanism fired — but
+        # the provider fallback toast). RB-1's repro proved the mechanism fired — but
         # at timeout=5 it auto-dismissed before an unfocused user looked, reading
         # as "no toast". A missing-binary failure (C7) needs a recovery hint that
         # waits to be read. Dedup (_warned_spawn_fail) is unchanged.
@@ -557,62 +540,61 @@ class AppWindow(Adw.ApplicationWindow):
         if path == self._active_path:
             self._sidebar.set_active_only(False)
 
-    def _show_ccr_fallback_toast(self, project_name, reason):
+    def _show_provider_fallback_toast(self, project_name, reason):
         """Enqueue a fallback notice for aggregation; flush after a ~2s window.
 
         Multiple projects failing within the same restore batch fire within
         milliseconds of each other. Batching them for 2s lets the aggregator
         collapse N identical-reason events into one toast instead of N toasts
-        dismissed one-by-one (UX). There is at most ONE ccr toast in the
+        dismissed one-by-one (UX). There is at most ONE provider toast in the
         overlay at any time; a new aggregate dismisses any still-displayed one
         and re-adds rather than queueing (persistent timeout(0), spec §6).
         """
-        self._ccr_pending.append((project_name, reason))
+        self._provider_pending.append((project_name, reason))
         # Arm (or re-arm) the 2s flush timer; each new event resets the window
         # so closely spaced starts all land in the same batch.
-        if self._ccr_toast_timer is not None:
-            GLib.source_remove(self._ccr_toast_timer)
-        self._ccr_toast_timer = GLib.timeout_add(2000, self._flush_ccr_toast)
+        if self._provider_toast_timer is not None:
+            GLib.source_remove(self._provider_toast_timer)
+        self._provider_toast_timer = GLib.timeout_add(2000, self._flush_provider_toast)
 
-    def _flush_ccr_toast(self):
-        """Collapse pending ccr fallback events and show one toast."""
-        import ccr as _ccr
-        self._ccr_toast_timer = None
-        events = list(self._ccr_pending)
-        self._ccr_pending.clear()
+    def _flush_provider_toast(self):
+        """Collapse pending provider fallback events and show one toast."""
+        from models import aggregate_fallback_notices
+        self._provider_toast_timer = None
+        events = list(self._provider_pending)
+        self._provider_pending.clear()
         if not events:
             return GLib.SOURCE_REMOVE
-        text = _ccr.aggregate_fallback_notices(events)
+        text = aggregate_fallback_notices(events)
         # aggregate_fallback_notices returns str or list[str]; for the window
         # we always show a single toast — join multiple reasons with a separator.
         if isinstance(text, list):
             text = ' | '.join(text)
         if not text:
             return GLib.SOURCE_REMOVE
-        # Dismiss any still-displayed ccr toast before adding the new one so
+        # Dismiss any still-displayed provider toast before adding the new one so
         # it replaces rather than queues.
-        if self._ccr_toast is not None:
-            self._ccr_toast.dismiss()
-            self._ccr_toast = None
+        if self._provider_toast is not None:
+            self._provider_toast.dismiss()
+            self._provider_toast = None
         toast = Adw.Toast.new(text)
         toast.set_timeout(0)   # persistent until the user dismisses (spec §6)
-        toast.connect('dismissed', self._on_ccr_toast_dismissed)
-        self._ccr_toast = toast
+        toast.connect('dismissed', self._on_provider_toast_dismissed)
+        self._provider_toast = toast
         self._toast_overlay.add_toast(toast)
         return GLib.SOURCE_REMOVE
 
-    def _on_ccr_toast_dismissed(self, _toast):
+    def _on_provider_toast_dismissed(self, _toast):
         """Clear the live-toast reference when the user dismisses it."""
-        self._ccr_toast = None
+        self._provider_toast = None
 
     def _maybe_warn_unknown_agent(self, agent_id):
-        """One-shot toast when a NAMED agent isn't available (A6/m3, M-P3.2).
+        """One-shot toast when a NAMED harness isn't available.
 
         ``resolve_adapter`` returns a non-None ``missing`` only when a non-empty
-        id has no registered adapter; the spawn still proceeds on the fallback.
-        The fallback is NOT hardcoded to claude (M-P3.2): it follows
-        ``settings.agent_default`` then first-available, so the toast names the
-        adapter that will ACTUALLY run rather than always saying "Claude Code".
+        id isn't the registered harness ('claude'); the spawn still proceeds on
+        the fallback (always claude now). The toast names the harness that will
+        ACTUALLY run rather than saying nothing.
         The warning is shown once per distinct missing id (``_warned_agents``)
         so a multi-project restore naming the same dead agent doesn't toast N
         times.
@@ -623,7 +605,7 @@ class AppWindow(Adw.ApplicationWindow):
             return
         self._warned_agents.add(missing)
         toast = Adw.Toast.new(
-            f"agent '{missing}' not available — using {adapter.display_name}"
+            f"harness '{missing}' not available — using {adapter.display_name}"
         )
         toast.set_timeout(5)
         self._toast_overlay.add_toast(toast)
@@ -670,9 +652,9 @@ class AppWindow(Adw.ApplicationWindow):
                 # what keeps a failed-spawn row visible (a spawn that never starts
                 # never flips the filter, so the 'inactive' row isn't hidden).
                 self._sidebar.set_active_only(True)
-                # Surface ccr fallback notice if this spawn fell back to native.
+                # Surface provider fallback notice if this spawn fell back to native.
                 if t._fallback_reason:
-                    self._show_ccr_fallback_toast(n, t._fallback_reason)
+                    self._show_provider_fallback_toast(n, t._fallback_reason)
 
             def _on_exited(t, s, p=project.path):
                 self._sidebar.set_project_state(p, 'inactive', is_zellij=False)
@@ -941,26 +923,22 @@ class AppWindow(Adw.ApplicationWindow):
         self._refresh_sidebar_models()
 
     def _refresh_sidebar_models(self):
-        """Push the current provider/model options into the sidebar menus."""
-        from models import build_model_options
-        import agent_configs
-        ids, labels = build_model_options(self._settings.providers)
+        """Push the current provider options into the sidebar menus."""
+        from models import build_provider_options, provider_label
+        ids, labels = build_provider_options(self._settings.providers)
         options = list(zip(ids, labels))
-        # M-UX.1 (C2): the Model submenu's "Default (…)" item must name what
-        # actually decides the model for the EFFECTIVE default agent — grok /
-        # opencode read their own config (the row used to claim "Anthropic
-        # (native Claude)" while grok ran Qwen). default_model_label returns
-        # claude's native/ccr label unchanged when claude is the default.
-        # P3.5f (David's second reveal): each ROW now derives its OWN label from
-        # its effective agent (a claude-override row must not wear the global
-        # grok default's story). This global label is passed only as the
-        # fallback for settings-less/legacy rows.
-        global_label = agent_configs.default_model_label(self._settings)
+        # The "Default (…)" item names the active provider's label. Each row
+        # derives its own story from its effective provider (a per-project
+        # override to a different provider must not wear the global default's
+        # story); this global label is the fallback for settings-less/legacy
+        # rows.
+        global_label = provider_label(
+            self._settings.providers, self._settings.model_default)
         self._sidebar.set_model_options(
             options, self._settings.model_overrides, global_label)
 
     def _on_project_model_change(self, sidebar, path, value):
-        """A per-project model was picked from the sidebar context menu."""
+        """A per-project provider was picked from the sidebar context menu."""
         from models import FOLLOW_DEFAULT
         overrides = dict(self._settings.model_overrides)
         if value == FOLLOW_DEFAULT:
@@ -969,74 +947,34 @@ class AppWindow(Adw.ApplicationWindow):
             overrides[path] = value
         self._settings.model_overrides = overrides
         self._settings.save()
-        try:
-            import ccr
-            ccr.sync(self._settings)
-        except Exception as e:
-            print(f'ProjectMan: ccr sync failed: {e}', file=sys.stderr)
         self._refresh_sidebar_models()
         self._maybe_prompt_restart(path)
 
-    def _on_project_agent_change(self, sidebar, path, value):
-        """A per-project agent was picked from the sidebar 'Agent' submenu (B3).
-
-        Writes ``agent_overrides`` (FOLLOW_DEFAULT clears it), persists, refreshes
-        the sidebar so the subtitle/badge + radio state follow, and offers to
-        restart a live session whose running agent now differs.
-        """
-        from models import FOLLOW_DEFAULT
-        import agents
-        overrides = dict(self._settings.agent_overrides)
-        if value == FOLLOW_DEFAULT:
-            overrides.pop(path, None)
-        else:
-            overrides[path] = value
-        self._settings.agent_overrides = overrides
-        self._settings.save()
-        # S8 ship-blocker: an EXPLICIT per-project pick must defeat the A2
-        # restore-stickiness. A restored session's TerminalView carries a sticky
-        # ``_explicit_agent`` that ``apply_settings`` honors over settings — so
-        # without this, the restart prompt would re-spawn the OLD agent. Clear it
-        # BEFORE apply_settings so the adapter re-resolves to the new effective
-        # agent. Covers BOTH a named pick AND FOLLOW_DEFAULT (the user explicitly
-        # chose to follow the default). No terminal for the path → nothing to do.
-        tv = self._terminals.get(path)
-        if tv is not None:
-            tv.clear_explicit_agent()
-        # Push the change through apply_settings so terminals + sidebar rows
-        # re-resolve the effective agent (subtitle, caps gating, radio state).
-        self.apply_settings(self._settings)
-        # M-UX.11 (S8): the selection feedback was too subtle. Fire a one-shot
-        # toast naming the project + the now-effective agent's display name.
-        project = self._find_project(path)
-        name = project.name if project else os.path.basename(path)
-        effective_id = self._settings.effective_agent(path)
-        adapter = agents.ADAPTERS.get(effective_id)
-        display = adapter.display_name if adapter is not None else effective_id
-        self._show_toast(f'Agent for {name}: {display}')
-        self._maybe_prompt_restart(path)
-
     def _maybe_prompt_restart(self, path):
-        """If a live session's agent OR model just changed, offer to restart it.
+        """If a live session's model (provider) just changed, offer to restart it.
 
-        Both the agent and the model are fixed at spawn time, so a running
-        session keeps its old agent/model until re-spawned. Never auto-kill —
-        that would lose context. The dialog wording adapts to which of the two
-        (or both) changed (B3 generalization of the Model-only prompt).
+        The provider/tier assignment is fixed at spawn time, so a running
+        session keeps its old provider until re-spawned. Never auto-kill —
+        that would lose context.
+
+        The ``agent_stale`` branch is kept defensively but is now unreachable:
+        Claude Code is the sole harness, so ``spawned_agent_signature`` always
+        equals ``effective_agent`` ('claude'). It stays as a guard in case a
+        future second harness is reintroduced.
         """
         tv = self._terminals.get(path)
         if tv is None or tv._child_pid is None:
             return
-        model_stale = tv.spawned_model_signature() != self._settings.effective_model(path)
+        model_stale = tv.spawned_model_signature() != self._settings.effective_provider(path)
         agent_stale = tv.spawned_agent_signature() != self._settings.effective_agent(path)
         if not model_stale and not agent_stale:
             return
         project = self._find_project(path)
         name = project.name if project else os.path.basename(path)
         if agent_stale and model_stale:
-            title, what = 'Agent Changed', 'agent and model'
+            title, what = 'Harness Changed', 'harness and model'
         elif agent_stale:
-            title, what = 'Agent Changed', 'agent'
+            title, what = 'Harness Changed', 'harness'
         else:
             title, what = 'Model Changed', 'model'
         dialog = Adw.AlertDialog.new(
@@ -1123,10 +1061,10 @@ class AppWindow(Adw.ApplicationWindow):
         self._show_toast(self._project_created_toast_text(name))
 
     def _project_created_toast_text(self, name):
-        """The B4 creation toast: "New project '<name>' — agent: <Display>".
+        """The B4 creation toast: "New project '<name>' — harness: <Display>".
 
-        Resolves the EFFECTIVE agent for the new (override-free) project — which
-        is the global default — through ``resolve_adapter`` so the named agent is
+        Resolves the EFFECTIVE harness for the new (override-free) project — which
+        is the global default — through ``resolve_adapter`` so the named harness is
         the one that will ACTUALLY run (the fallback, not the requested id, when
         the default's binary is missing). Pure string builder; unbound-testable.
         """
@@ -1135,7 +1073,7 @@ class AppWindow(Adw.ApplicationWindow):
         effective_id = self._settings.effective_agent(path)
         adapter, _missing = agents.resolve_adapter(effective_id, self._settings)
         display = adapter.display_name if adapter is not None else effective_id
-        return f"New project '{name}' — agent: {display}"
+        return f"New project '{name}' — harness: {display}"
 
     def _on_project_rename(self, sidebar, old_path, new_name):
         project = self._find_project(old_path)

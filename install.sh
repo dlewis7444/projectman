@@ -7,13 +7,6 @@ INSTALL_DIR="$HOME/.local/share/projectman"
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$HOME/.local/share/applications"
 HOOK_DEST="$HOME/.claude/projectman/hook.js"
-OPENCODE_PLUGIN_DIR="$HOME/.config/opencode/plugins"
-OPENCODE_PLUGIN_DEST="$OPENCODE_PLUGIN_DIR/projectman.js"
-GROK_HOOKS_DIR="$HOME/.grok/hooks"
-# (The grok bridge file destinations live in the shared manifest in agents.py —
-# install.sh no longer duplicates them here; the unused GROK_*_DEST vars were
-# removed, SC2034.)
-GROK_CONFIG_TOML="$HOME/.grok/config.toml"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── colours ────────────────────────────────────────────────────────────────────
@@ -34,8 +27,6 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     echo ""
     echo "  Uninstalled."
     echo "  The hook script at $HOOK_DEST was left in place."
-    echo "  The opencode status bridge at $OPENCODE_PLUGIN_DEST was left in place."
-    echo "  The grok status bridge in $GROK_HOOKS_DIR was left in place."
     echo "  The data directory ~/.ProjectMan/ was left in place."
     exit 0
 fi
@@ -113,9 +104,9 @@ if ! command -v dbus-launch &>/dev/null; then
     echo "  Arch:            sudo pacman -S dbus"
 fi
 
-# claude is OPTIONAL (ProjectMan drives claude/opencode/grok — install whichever
-# you use). Just record its presence so the hook summary below tells a coherent
-# story instead of a warn-now / "registered!"-later contradiction (S1).
+# claude is OPTIONAL (ProjectMan drives Claude Code — install it if you use it).
+# Just record its presence so the hook summary below tells a coherent story
+# instead of a warn-now / "registered!"-later contradiction (S1).
 CLAUDE_PRESENT=true
 command -v claude &>/dev/null || CLAUDE_PRESENT=false
 
@@ -128,9 +119,6 @@ cp -r "$SCRIPT_DIR/paa"    "$INSTALL_DIR/"
 cp -r "$SCRIPT_DIR/themes" "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/images/ProjectMan.jpg" "$INSTALL_DIR/"
 cp -r "$SCRIPT_DIR/icons" "$INSTALL_DIR/"
-# Bundle the agent status bridges so the Settings → Agents "Install bridge"
-# button can find them in the installed tree (install.sh installs them too).
-cp -r "$SCRIPT_DIR/bridges" "$INSTALL_DIR/"
 
 # ── wrapper script ─────────────────────────────────────────────────────────────
 info "Creating $BIN_DIR/projectman ..."
@@ -255,72 +243,6 @@ register_claude_hooks() {
 info "Checking Claude Code hook registration ..."
 register_claude_hooks
 
-# ── agent status bridges (shared manifest, F12a) ────────────────────────────────
-# Both bridge installs delegate to agents.install_agent_bridge — the SAME
-# manifest-driven machinery the Settings → Agents "Install bridge" button uses,
-# so install.sh and the GUI can never drift on what files constitute a bridge.
-# For grok that is the hook JSON (with its commands rewritten at install time
-# to the absolute script path, F12b — no reliance on grok expanding `~`) PLUS
-# the executable python3 status script; for opencode the single plugin file.
-# Idempotent; the agent need not be installed for this to be harmless.
-install_bridge_via_manifest() {
-    # $1 = agent id. Prints installed|already|<other> from the shared machinery.
-    PM_SRC="$SCRIPT_DIR" PM_AGENT="$1" python3 -c '
-import os, sys
-sys.path.insert(0, os.environ["PM_SRC"])
-import agents
-print(agents.install_agent_bridge(os.environ["PM_SRC"], os.environ["PM_AGENT"]))
-' 2>/dev/null
-}
-
-OPENCODE_BRIDGE_STATUS="skipped"  # one of: installed, already, skipped
-install_opencode_bridge() {
-    local result
-    result=$(install_bridge_via_manifest opencode) || result=""
-    case "$result" in
-        installed) OPENCODE_BRIDGE_STATUS="installed" ;;
-        already)   OPENCODE_BRIDGE_STATUS="already" ;;
-        *)         OPENCODE_BRIDGE_STATUS="skipped" ;;
-    esac
-}
-
-info "Installing opencode status bridge ..."
-install_opencode_bridge
-
-# ── grok status bridge ──────────────────────────────────────────────────────────
-# The bridge files land via the shared manifest above; additionally disable
-# grok's claude-compat hooks so Claude's hook.js does NOT double-fire on grok
-# events (F4 — our grok bridge becomes the sole status writer for grok
-# sessions).
-GROK_BRIDGE_STATUS="skipped"   # one of: installed, already, skipped
-GROK_COMPAT_STATUS="skipped"   # one of: installed, already, skipped
-install_grok_bridge() {
-    local result
-    result=$(install_bridge_via_manifest grok) || result=""
-    case "$result" in
-        installed) GROK_BRIDGE_STATUS="installed" ;;
-        already)   GROK_BRIDGE_STATUS="already" ;;
-        *)         GROK_BRIDGE_STATUS="skipped" ;;
-    esac
-
-    # Idempotent TOML edit: [compat.claude] hooks = false, create-if-missing,
-    # preserving every existing user key/section (delegated to the pure,
-    # unit-tested merger so install.sh carries no TOML logic of its own).
-    local toml_result
-    if toml_result=$(python3 "$SCRIPT_DIR/bridges/grok/compat_toml.py" "$GROK_CONFIG_TOML" 2>/dev/null); then
-        case "$toml_result" in
-            installed) GROK_COMPAT_STATUS="installed" ;;
-            already)   GROK_COMPAT_STATUS="already" ;;
-            *)         GROK_COMPAT_STATUS="skipped" ;;
-        esac
-    else
-        GROK_COMPAT_STATUS="skipped"
-    fi
-}
-
-info "Installing grok status bridge ..."
-install_grok_bridge
-
 # ── done ───────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}ProjectMan installed.${NC}"
@@ -338,7 +260,6 @@ if [[ "$CLAUDE_PRESENT" == "false" ]]; then
         registered|already)
             echo "  Claude Code not found — its status hooks are staged in"
             echo "  $CLAUDE_SETTINGS and will activate if you install claude."
-            echo "  (ProjectMan also drives opencode and grok; claude is optional.)"
             ;;
         skipped|manual|*)
             echo "  Claude Code not found, and its hooks weren't staged. If you"
@@ -360,37 +281,6 @@ else
             ;;
     esac
 fi
-case "$OPENCODE_BRIDGE_STATUS" in
-    installed)
-        echo "  opencode status bridge installed to $OPENCODE_PLUGIN_DEST."
-        echo "  Restart any running opencode sessions for it to take effect."
-        ;;
-    already)
-        echo "  opencode status bridge already up to date at $OPENCODE_PLUGIN_DEST."
-        ;;
-esac
-case "$GROK_BRIDGE_STATUS" in
-    installed)
-        echo "  Grok Build status bridge installed to $GROK_HOOKS_DIR/."
-        echo "  Restart any running grok sessions for it to take effect."
-        ;;
-    already)
-        echo "  Grok Build status bridge already up to date in $GROK_HOOKS_DIR/."
-        ;;
-esac
-# M-UX.9 (S3): the compat note rewritten for someone who has never seen grok's
-# config — explain WHAT the overlap is and WHY we disable it, not just the key.
-case "$GROK_COMPAT_STATUS" in
-    installed)
-        echo "  grok also reads Claude-style hooks, so without this they'd BOTH"
-        echo "  fire on a grok turn. Set [compat.claude] hooks = false in"
-        echo "  $GROK_CONFIG_TOML so the grok status dot fires exactly once."
-        ;;
-    already)
-        echo "  grok's Claude-hook overlap is already disabled in $GROK_CONFIG_TOML"
-        echo "  ([compat.claude] hooks = false), so its status dot fires once."
-        ;;
-esac
 echo ""
 
 # warn if ~/.local/bin is not on PATH

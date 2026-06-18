@@ -1,8 +1,8 @@
-"""Golden characterization tests for the P1 AgentAdapter seam.
+"""Golden characterization tests for the AgentAdapter seam.
 
-These tests pin the OBSERVABLE behavior of the current Claude-coupled spawn
-path *before* the refactor, then assert the new ``agents.py`` seam reproduces
-it byte-for-byte. They are headless (no GTK import) and spawn no processes.
+These tests pin the OBSERVABLE behavior of the Claude-coupled spawn path, then
+assert the ``agents.py`` seam reproduces it byte-for-byte. They are headless
+(no GTK import) and spawn no processes.
 
 Two layers, intentionally:
 
@@ -11,14 +11,14 @@ Two layers, intentionally:
     byte-patterns, so the golden literals are provably captured from current
     code, not transcribed by hand. These pass against the unrefactored tree.
 
-  * ``*Parity`` classes assert the new ``agents.py`` API yields the same
+  * ``*Parity`` classes assert the ``agents.py`` API yields the same
     golden literals. These fail until ``agents.py`` exists, then pass — the
     proof that the seam is behavior-preserving.
 
-The env half of the spawn contract (ccr injection) is already pinned by
-``tests/test_ccr.py`` against ``ccr.spawn_env``; ``ClaudeAdapter.spawn_plan``
-delegates to it, so the parity tests here exercise that delegation rather than
-re-deriving the env values.
+The env half of the spawn contract (custom-provider model injection) lives in
+``models.build_spawn_env``; ``ClaudeAdapter.spawn_plan`` and
+``zellij_spawn_env`` delegate to it, so the parity tests here exercise that
+delegation rather than re-deriving the env values.
 """
 import os
 import shlex
@@ -185,7 +185,8 @@ class TestBuildContinueWrapperParity:
 
 
 class TestClaudeAdapterSpawnPlanParity:
-    """``ClaudeAdapter.spawn_plan`` folds the current argv logic + ccr env."""
+    """``ClaudeAdapter.spawn_plan`` folds the current argv logic + the
+    ``models.build_spawn_env`` env half."""
 
     @staticmethod
     def _settings(binary='', **kw):
@@ -230,59 +231,49 @@ class TestClaudeAdapterSpawnPlanParity:
                             session_id='abc123')
         assert plan.argv == GOLDEN_RESUME_CUSTOM
 
-    # --- env parity: delegates to ccr.spawn_env (already golden in test_ccr) ---
+    # --- env parity: delegates to models.build_spawn_env ---
 
-    def _custom_model_settings(self, **kw):
-        from settings import Settings
-        base = dict(
-            providers={'ollama': {
-                'name': 'Ollama', 'base_url': 'http://host:11434/v1',
-                'api_key': 'k', 'models': {'qwen': {'name': 'Qwen'}}}},
-            model_default='ollama/qwen', ccr_host='127.0.0.1', ccr_port=3456,
-            ccr_api_key='secret',
-        )
-        base.update(kw)
-        return Settings(**base)
-
-    def test_native_model_env_is_none(self, monkeypatch):
-        """Native-model project: ccr never consulted; env None, no fallback."""
+    def test_native_model_env_is_none(self):
+        """Native-provider project: no env injection; env None, no fallback."""
         import agents
         a = agents.get_adapter('claude')
         plan = a.spawn_plan(self._settings(), self._project(), 'continue')
         assert plan.env is None
         assert plan.fallback_reason is None
 
-    def test_custom_model_ccr_up_injects_env(self, monkeypatch):
-        """ccr up → env carries the four Anthropic vars, comma model form.
+    def test_custom_provider_up_injects_env(self):
+        """Custom provider with a base_url → env dict carries the Anthropic
+        vars and the four resolved tier model vars (the ollama-style shape).
 
-        ccr probe injection is now a Claude-INTERNAL ctor param (A4/m1), not a
-        protocol argument: ``spawn_plan``'s signature is uniform across adapters
-        ``(settings, project, mode, session_id=None)``. Tests build a
-        ClaudeAdapter with ``ccr_kwargs={'probe': ...}`` to stay instant.
+        ``spawn_plan`` delegates env to ``models.build_spawn_env`` (the
+        post-pivot env path). The provider's first model ('qwen') resolves as
+        every tier's pinned model when no explicit tier assignment is set.
         """
-        import ccr
         import agents
-        monkeypatch.setattr(ccr, 'available', lambda _s: True)
-        # Inject a probe that reports ccr running so no real socket/sleep happens.
-        a = agents.ClaudeAdapter(ccr_kwargs={'probe': lambda _s: True})
-        s = self._custom_model_settings()
+        a = agents.get_adapter('claude')
+        s = _custom_provider_settings()
         plan = a.spawn_plan(s, self._project('/projects/myproj'), 'continue')
         assert plan.fallback_reason is None
         assert plan.env is not None
-        assert plan.env['ANTHROPIC_BASE_URL'] == 'http://127.0.0.1:3456'
-        assert plan.env['ANTHROPIC_AUTH_TOKEN'] == 'secret'
-        assert plan.env['ANTHROPIC_API_KEY'] == 'secret'
-        assert plan.env['ANTHROPIC_MODEL'] == 'ollama,qwen'
+        assert plan.env['ANTHROPIC_BASE_URL'] == 'http://host:11434/v1'
+        assert plan.env['ANTHROPIC_AUTH_TOKEN'] == 'k'
+        assert plan.env['ANTHROPIC_API_KEY'] == ''   # the anti-3rd-party-block shape
+        assert plan.env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'qwen'
+        assert plan.env['ANTHROPIC_DEFAULT_SONNET_MODEL'] == 'qwen'
+        assert plan.env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] == 'qwen'
+        assert plan.env['CLAUDE_CODE_SUBAGENT_MODEL'] == 'qwen'
+        assert plan.env['CLAUDE_CODE_ATTRIBUTION_HEADER'] == '0'
+        assert plan.env['OLLAMA_HOST'] == 'http://host:11434/v1'
+        assert plan.env['DISABLE_AUTOUPDATER'] == '1'
         # argv unaffected by env path
         assert plan.argv == GOLDEN_CONTINUE_NATIVE
 
-    def test_custom_model_ccr_missing_falls_back_native(self, monkeypatch):
-        """ccr binary absent → env None, fallback_reason explains the fallback."""
-        import ccr
+    def test_custom_provider_missing_falls_back_native(self):
+        """Custom provider with no base_url → env None, fallback_reason
+        explains the native fallback (surfaced as a provider-unavailable toast)."""
         import agents
-        monkeypatch.setattr(ccr, 'available', lambda _s: False)
         a = agents.get_adapter('claude')
-        s = self._custom_model_settings()
+        s = _custom_provider_settings(base_url='')
         plan = a.spawn_plan(s, self._project('/projects/myproj'), 'continue')
         assert plan.env is None
         assert isinstance(plan.fallback_reason, str) and plan.fallback_reason
@@ -478,85 +469,99 @@ def _project(path='/projects/p'):
     return types.SimpleNamespace(name=os.path.basename(path), path=path)
 
 
-def _custom_model_settings(**kw):
+def _provider(pid='ollama', **fields):
+    """A one-provider dict with sensible defaults; ``fields`` override any
+    provider attribute (e.g. ``base_url=''`` to model a broken provider)."""
+    prov = {
+        'name': 'Ollama',
+        'base_url': 'http://host:11434/v1',
+        'api_key': 'k',
+        'models': ['qwen'],   # list of free-text model ids (post-pivot shape)
+    }
+    prov.update(fields)
+    return {pid: prov}
+
+
+def _custom_provider_settings(pid='ollama', **prov_fields):
+    """Settings with one custom provider active (``model_default=pid``)."""
     from settings import Settings
-    base = dict(
-        providers={'ollama': {
-            'name': 'Ollama', 'base_url': 'http://host:11434/v1',
-            'api_key': 'k', 'models': {'qwen': {'name': 'Qwen'}}}},
-        model_default='ollama/qwen', ccr_host='127.0.0.1', ccr_port=3456,
-        ccr_api_key='secret',
-    )
-    base.update(kw)
-    return Settings(**base)
+    return Settings(providers=_provider(pid, **prov_fields), model_default=pid)
 
 
 class TestSpawnPlanUniformSignature:
-    """A4/m1: ``spawn_plan(settings, project, mode, session_id=None)`` — no ccr
-    test-injection on the protocol signature; it is a Claude-internal ctor param.
+    """The spawn contract signature is uniform:
+    ``(settings, project, mode, session_id=None)``.
+
+    ClaudeAdapter takes NO constructor args — the old ``ccr_kwargs`` back-door
+    is gone (env now flows through ``models.build_spawn_env``).
     """
 
-    def test_spawn_plan_signature_has_no_ccr_kwargs(self):
+    def test_spawn_plan_signature(self):
         import inspect
         import agents
         params = list(inspect.signature(agents.ClaudeAdapter.spawn_plan).parameters)
         assert params == ['self', 'settings', 'project', 'mode', 'session_id']
 
-    def test_ccr_injection_via_ctor_not_call(self, monkeypatch):
-        """A probe injected at construction reaches ccr.spawn_env; the call site
-        passes only the uniform args."""
-        import ccr
+    def test_claude_adapter_takes_no_args(self):
+        """``ClaudeAdapter.__init__`` takes only ``self``; instantiable bare."""
+        import inspect
         import agents
-        monkeypatch.setattr(ccr, 'available', lambda _s: True)
-        a = agents.ClaudeAdapter(ccr_kwargs={'probe': lambda _s: True})
-        plan = a.spawn_plan(_custom_model_settings(), _project('/projects/m'), 'continue')
-        assert plan.env is not None
-        assert plan.env['ANTHROPIC_MODEL'] == 'ollama,qwen'
-        assert plan.fallback_reason is None
+        params = list(inspect.signature(agents.ClaudeAdapter.__init__).parameters)
+        assert params == ['self']
+        a = agents.ClaudeAdapter()
+        assert a.id == 'claude'
 
-    def test_default_adapter_has_empty_ccr_kwargs(self):
-        """The registry's claude adapter uses the real socket probe (no inject)."""
+    def test_registry_adapter_is_plain_claude(self):
+        """The registered default adapter is a plain ``ClaudeAdapter``."""
         import agents
-        assert agents.get_adapter('claude')._ccr_kwargs == {}
+        a = agents.get_adapter('claude')
+        assert isinstance(a, agents.ClaudeAdapter)
 
 
 class TestZellijSpawnEnvUnderAdapter:
-    """A3/M3: ``zellij_spawn_env`` moves the ccr env decision behind the adapter.
+    """``zellij_spawn_env`` delegates to ``models.build_spawn_env``.
 
     terminal.py must consult only this method (no _claude_env, no hardcoded
-    ANTHROPIC key list) — guarded by a source check below.
+    ANTHROPIC key list) — guarded by a source check below. The env decision is
+    the adapter's alone; the four tier vars + ANTHROPIC_BASE_URL etc. come from
+    ``build_spawn_env``, not from terminal.py.
     """
 
-    def test_native_model_returns_none_env(self, monkeypatch):
-        import ccr
+    def test_native_model_returns_none_env(self):
+        """Native provider (``model_default=''``) → no injection; ``(None, None)``."""
         import agents
-        monkeypatch.setattr(ccr, 'available', lambda _s: True)
-        a = agents.ClaudeAdapter(ccr_kwargs={'probe': lambda _s: True})
+        a = agents.ClaudeAdapter()
         env, reason = a.zellij_spawn_env(_settings(), _project())
         assert env is None
         assert reason is None
 
-    def test_custom_model_ccr_up_returns_full_env(self, monkeypatch):
-        """ccr reachable → full env dict (inherited environ + ANTHROPIC vars)."""
-        import ccr
+    def test_custom_provider_up_returns_full_env(self):
+        """Custom provider with base_url → full env dict (inherited environ +
+        the Anthropic vars + four resolved tier models)."""
         import agents
-        monkeypatch.setattr(ccr, 'available', lambda _s: True)
-        a = agents.ClaudeAdapter(ccr_kwargs={'probe': lambda _s: True})
-        env, reason = a.zellij_spawn_env(_custom_model_settings(), _project('/projects/m'))
+        a = agents.ClaudeAdapter()
+        env, reason = a.zellij_spawn_env(
+            _custom_provider_settings(), _project('/projects/m'))
         assert reason is None
         assert env is not None
-        assert env['ANTHROPIC_BASE_URL'] == 'http://127.0.0.1:3456'
-        assert env['ANTHROPIC_AUTH_TOKEN'] == 'secret'
-        assert env['ANTHROPIC_MODEL'] == 'ollama,qwen'
+        assert env['ANTHROPIC_BASE_URL'] == 'http://host:11434/v1'
+        assert env['ANTHROPIC_AUTH_TOKEN'] == 'k'
+        assert env['ANTHROPIC_API_KEY'] == ''
+        assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'qwen'
+        assert env['CLAUDE_CODE_SUBAGENT_MODEL'] == 'qwen'
+        assert env['CLAUDE_CODE_ATTRIBUTION_HEADER'] == '0'
+        assert env['OLLAMA_HOST'] == 'http://host:11434/v1'
+        assert env['DISABLE_AUTOUPDATER'] == '1'
         # Full env (inherits the parent environment) — PATH etc. preserved.
         assert 'PATH' in env
 
-    def test_custom_model_ccr_missing_returns_reason(self, monkeypatch):
-        import ccr
+    def test_custom_provider_missing_base_url_returns_reason(self):
+        """Custom provider without a base_url → ``(None, reason)``; the spawn
+        falls back to native and the UI surfaces ``reason`` as a toast."""
         import agents
-        monkeypatch.setattr(ccr, 'available', lambda _s: False)
         a = agents.ClaudeAdapter()
-        env, reason = a.zellij_spawn_env(_custom_model_settings(), _project('/projects/m'))
+        env, reason = a.zellij_spawn_env(
+            _custom_provider_settings(base_url=''), _project('/projects/m'))
         assert env is None
         assert isinstance(reason, str) and reason
 
@@ -572,8 +577,12 @@ class TestZellijSpawnEnvUnderAdapter:
 
 
 class TestResolveAdapterNamedMiss:
-    """A6/m3: ``resolve_adapter`` distinguishes default-resolution from
-    named-but-missing so window.py can warn on the named-miss path."""
+    """``resolve_adapter`` distinguishes default-resolution from
+    named-but-missing so window.py can warn on the named-miss path.
+
+    With a single-harness registry the returned adapter is always Claude; only
+    the diagnostic differs from ``get_adapter``.
+    """
 
     def test_known_agent_no_miss(self):
         import agents
@@ -591,6 +600,8 @@ class TestResolveAdapterNamedMiss:
             assert miss is None
 
     def test_unknown_named_agent_reports_miss(self):
+        """A non-empty unknown id → adapter is claude (safe fallback), but the
+        id is reported as the miss so the UI can warn."""
         import agents
         adapter, miss = agents.resolve_adapter('codex')
         assert adapter.id == 'claude'   # safe fallback, still usable
@@ -643,113 +654,12 @@ class TestCapsGatingContract:
 # P3 Part A — mandate hardening. Each block pins one fresh-review mandate.
 # ===========================================================================
 
-# --- A1 / M-P3.2: unknown-agent fallback must never hardcode claude ----------
-
-@pytest.fixture
-def _registry_snapshot():
-    """Save/restore ``agents.ADAPTERS`` so a test can model a different fleet
-    (e.g. claude removed) without leaking into the rest of the suite."""
-    import agents
-    saved = dict(agents.ADAPTERS)
-    yield agents.ADAPTERS
-    agents.ADAPTERS.clear()
-    agents.ADAPTERS.update(saved)
-
-
-class TestUnknownAgentFallbackNotHardcodedClaude:
-    """M-P3.2: a named-but-missing agent falls back to ``agent_default`` first,
-    then first-available — NEVER a hardcoded claude. The toast/diagnostic and
-    the spawn path must both name the agent that will ACTUALLY run, so the
-    Claude-less promise holds even with a stale/bogus override."""
-
-    def test_a1a_default_opencode_bogus_override_resolves_opencode(self):
-        """T-A1a: agent_default=opencode + override='bogus' → the resolved
-        adapter is opencode (the spawn path too), and the diagnostic names
-        opencode — not claude."""
-        import agents
-        from settings import Settings
-        s = Settings(agent_default='opencode',
-                     agent_overrides={'/p': 'bogus'})
-        effective = s.effective_agent('/p')
-        assert effective == 'bogus'
-        adapter, missing = agents.resolve_adapter(effective, s)
-        assert adapter.id == 'opencode'          # the ACTUAL fallback
-        assert adapter.display_name == 'opencode'  # the toast names opencode
-        assert missing == 'bogus'                # the dead id, for the warning
-        # The spawn path (get_adapter, what TerminalView resolves) agrees:
-        assert agents.get_adapter(effective, s).id == 'opencode'
-
-    def test_a1b_both_bogus_uses_first_available_not_claude(self,
-                                                            _registry_snapshot):
-        """T-A1b: agent_default ALSO bogus → first-available registered adapter.
-        Proven against a claude-LESS fleet so 'first-available' is provably the
-        mechanism, not 'happens to be claude'."""
-        import agents
-        from settings import Settings
-        # Model a fleet with claude removed entirely; opencode is first.
-        opencode = _registry_snapshot['opencode']
-        _registry_snapshot.clear()
-        _registry_snapshot['opencode'] = opencode
-        s = Settings(agent_default='alsobogus',
-                     agent_overrides={'/p': 'bogus'})
-        adapter, missing = agents.resolve_adapter(s.effective_agent('/p'), s)
-        assert adapter.id == 'opencode'   # first-available, NOT claude
-        assert missing == 'bogus'
-        assert agents.get_adapter('bogus', s).id == 'opencode'
-
-    def test_a1b_registered_default_wins_over_first_available(self,
-                                                              _registry_snapshot):
-        """A registered ``agent_default`` beats first-available even when it is
-        NOT the first key — the order is default-first, then first-available."""
-        import agents
-        from settings import Settings
-        # Re-order so opencode is first and claude second.
-        claude = _registry_snapshot['claude']
-        opencode = _registry_snapshot['opencode']
-        _registry_snapshot.clear()
-        _registry_snapshot['opencode'] = opencode
-        _registry_snapshot['claude'] = claude
-        s = Settings(agent_default='claude')
-        adapter, _ = agents.resolve_adapter('bogus', s)
-        assert adapter.id == 'claude'   # default wins over the first key
-
-    def test_a1c_default_claude_unchanged(self):
-        """T-A1c regression: an all-claude fleet still resolves to claude with
-        no diagnostic — the common path is untouched."""
-        import agents
-        from settings import Settings
-        s = Settings(agent_default='claude')
-        adapter, missing = agents.resolve_adapter(s.effective_agent('/p'), s)
-        assert adapter.id == 'claude'
-        assert missing is None
-        assert agents.get_adapter('claude', s).id == 'claude'
-
-    def test_a1c_get_adapter_no_settings_still_hides_miss_as_claude(self):
-        """The legacy single-arg ``get_adapter`` contract is preserved: with no
-        settings a miss falls back to claude (spawn path never breaks)."""
-        import agents
-        assert agents.get_adapter('codex').id == 'claude'
-
-    def test_a1_fallback_adapter_helper_order(self, _registry_snapshot):
-        """The helper itself: registered default wins; else first-available;
-        a blank/unregistered default falls through to first-available."""
-        import agents
-        from settings import Settings
-        # Registered default wins.
-        assert agents.fallback_adapter(
-            Settings(agent_default='opencode')).id == 'opencode'
-        # Unregistered default → first-available (claude, shipped order).
-        assert agents.fallback_adapter(
-            Settings(agent_default='nope')).id == 'claude'
-        # No settings at all → first-available.
-        assert agents.fallback_adapter(None).id == 'claude'
-
-
 # --- A2 / M-P3.3: continue-fallback policy is adapter-owned ------------------
 
 class _FakeNoFallbackAdapter:
     """A minimal adapter that declares continue does NOT fall back to fresh —
     the codex/grok-shaped case the wrapper used to assume away."""
+
     id = 'fake-nofb'
     display_name = 'Fake (no continue fallback)'
 
@@ -776,7 +686,7 @@ class _FakeNoFallbackAdapter:
 class TestContinueFallbackPolicyIsAdapterOwned:
     """M-P3.3: the continue→fresh fallback is the ADAPTER's declared policy
     (``caps.continue_falls_back_to_fresh``), not the wrapper's global hardcode.
-    claude/opencode keep today's exact behavior (byte-identical); a no-fallback
+    claude keeps today's exact behavior (byte-identical); a no-fallback
     adapter yields a command with no fresh tail."""
 
     def test_a2a_no_fallback_zellij_command_has_no_pipe(self):
@@ -824,135 +734,12 @@ class TestContinueFallbackPolicyIsAdapterOwned:
                                                        'continue')
         assert plan.argv == GOLDEN_CONTINUE_NATIVE
 
-    def test_a2b_opencode_zellij_command_byte_identical(self):
-        """T-A2b: opencode's zellij continue command keeps the ``|| <fresh>``
-        tail (it folds the model into both halves) — unchanged by the policy
-        seam since opencode declares the fallback True."""
-        import agents
-        from settings import Settings
-
-        class _P:
-            path = '/proj'
-        a = agents.get_adapter('opencode')
-        # No model set → bare opencode on both halves, with the fresh tail.
-        assert a.zellij_continue_command(Settings(), _P()) == 'opencode -c || opencode'
-        # Model set → folded into BOTH halves, tail preserved.
-        s = Settings(agent_default='opencode',
-                     model_overrides={'/proj': 'ollama/qwen'})
-        assert a.zellij_continue_command(s, _P()) == (
-            'opencode -m ollama/qwen -c || opencode -m ollama/qwen')
-
-    def test_a2b_opencode_continue_wrapper_unchanged(self):
-        """T-A2b: opencode's direct continue wrapper keeps the fresh-fallback
-        body (both halves carry the model)."""
-        import agents
-        from settings import Settings
-
-        class _P:
-            path = '/proj'
-        s = Settings(agent_default='opencode',
-                     model_overrides={'/proj': 'ollama/qwen'})
-        plan = agents.get_adapter('opencode').spawn_plan(s, _P(), 'continue')
-        script = plan.argv[-1]
-        # The fresh-fallback machinery is present (fallback=True).
-        assert 's=$?' in script and '-le 128' in script
-        assert 'opencode -m ollama/qwen -c' in script
-
     def test_a2_default_caps_keep_fallback_true(self):
-        """The shipped adapters declare the fallback policy True (today's
-        behavior); the new field defaults True so nothing else changes."""
+        """The shipped claude adapter declares the fallback policy True (today's
+        behavior); the field defaults True so nothing else changes."""
         import agents
         assert agents.AgentCaps().continue_falls_back_to_fresh is True
         assert agents.get_adapter('claude').caps.continue_falls_back_to_fresh is True
-        assert agents.get_adapter('opencode').caps.continue_falls_back_to_fresh is True
-
-
-# --- A3 / M-P3.5: duplicate/builtin adapter id collision guard ---------------
-
-class TestRegisterAdapterCollisionGuard:
-    """M-P3.5: ``register_adapter`` REFUSES an id that already exists — builtins
-    win, no silent dict shadowing. A custom 'claude' must not replace
-    ClaudeAdapter."""
-
-    def test_a3a_registering_builtin_id_raises_and_builtin_survives(self,
-                                                                    _registry_snapshot):
-        """T-A3a: registering id 'claude' raises ValueError and the real
-        ClaudeAdapter survives intact (not shadowed)."""
-        import agents
-        before = agents.ADAPTERS['claude']
-
-        class _Imposter:
-            id = 'claude'
-            display_name = 'Not Claude'
-        with pytest.raises(ValueError):
-            agents.register_adapter(_Imposter())
-        # The builtin is unchanged — no silent overwrite.
-        assert agents.ADAPTERS['claude'] is before
-        assert type(agents.ADAPTERS['claude']).__name__ == 'ClaudeAdapter'
-        assert agents.get_adapter('claude').id == 'claude'
-
-    def test_a3a_registering_opencode_id_also_refused(self, _registry_snapshot):
-        """The guard covers every builtin, not just claude."""
-        import agents
-        before = agents.ADAPTERS['opencode']
-
-        class _Imposter:
-            id = 'opencode'
-        with pytest.raises(ValueError):
-            agents.register_adapter(_Imposter())
-        assert agents.ADAPTERS['opencode'] is before
-
-    def test_a3b_novel_id_registers_and_resolves(self, _registry_snapshot):
-        """T-A3b: a novel id registers and then resolves through the seam."""
-        import agents
-
-        class _Novel:
-            id = 'novel-agent'
-            display_name = 'Novel Agent'
-        returned = agents.register_adapter(_Novel())
-        assert returned.id == 'novel-agent'
-        assert 'novel-agent' in agents.ADAPTERS
-        assert agents.get_adapter('novel-agent').id == 'novel-agent'
-        adapter, missing = agents.resolve_adapter('novel-agent')
-        assert adapter.id == 'novel-agent'
-        assert missing is None
-
-    def test_a3_duplicate_custom_id_also_refused(self, _registry_snapshot):
-        """Two customs cannot fight over one id — the second is refused (the
-        first registration wins)."""
-        import agents
-
-        class _First:
-            id = 'dup-id'
-            display_name = 'First'
-
-        class _Second:
-            id = 'dup-id'
-            display_name = 'Second'
-        agents.register_adapter(_First())
-        with pytest.raises(ValueError):
-            agents.register_adapter(_Second())
-        assert agents.ADAPTERS['dup-id'].display_name == 'First'
-
-    def test_a3_empty_id_refused(self, _registry_snapshot):
-        """An adapter with no id is refused rather than registered under ''."""
-        import agents
-
-        class _Anon:
-            id = ''
-        with pytest.raises(ValueError):
-            agents.register_adapter(_Anon())
-        assert '' not in agents.ADAPTERS
-
-    def test_a3_builtin_ids_constant_matches_shipped(self):
-        """The builtins frozenset matches the shipped adapters (the source of
-        'builtins win'). P3 added grok as the third builtin — registered in
-        ADAPTERS at import, so BUILTIN_AGENT_IDS = frozenset(ADAPTERS) picks it
-        up automatically."""
-        import agents
-        assert agents.BUILTIN_AGENT_IDS == frozenset({'claude', 'opencode', 'grok'})
-        # Grok is genuinely a builtin → it can't be replaced by a custom adapter.
-        assert 'grok' in agents.BUILTIN_AGENT_IDS
 
 
 # --- A4 / M-P3.1 verify-only: rich_status gates the sidebar dot remap --------
@@ -981,10 +768,9 @@ class TestSidebarDotConsumesRichStatus:
         assert 'def _remap_idle_to_done(self):' in src
         assert 'self._adapter().caps.rich_status' in src
 
-    def test_caps_declares_rich_status_for_both_builtins(self):
-        """Both shipped (bridged) agents declare rich_status True, so the remap
-        stays correct for them; a future bridgeless agent (rich_status False)
-        keeps the honest idle dot."""
+    def test_caps_declares_rich_status_for_claude(self):
+        """The shipped claude adapter declares rich_status True, so the remap
+        stays correct for it; a future low-rich_status adapter keeps the honest
+        idle dot."""
         import agents
         assert agents.get_adapter('claude').caps.rich_status is True
-        assert agents.get_adapter('opencode').caps.rich_status is True

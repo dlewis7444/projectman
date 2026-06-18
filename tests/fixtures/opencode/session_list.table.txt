@@ -1,5 +1,0 @@
-Session ID                      Title                                                                                Updated
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-ses_7a1f9c2dffeAAbbCCddEEff01  Wire the opencode adapter into the seam                                              7:33 AM · 4/6/2026
-ses_7a205e10ffeBBccDDeeFFgg02  Fix the empty-render on the ollama pool                                              4:06 AM · 4/6/2026
-ses_7a30aa91ffeCCddEEffGGhh03  New session - 2026-04-06T07:24:25.812Z                                               1:20 AM · 4/6/2026

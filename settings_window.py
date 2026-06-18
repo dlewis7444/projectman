@@ -5,7 +5,8 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib
 
-from settings import Settings
+from settings import TIERS
+from models import build_provider_options, build_tier_options
 
 
 class SettingsWindow(Adw.PreferencesDialog):
@@ -14,12 +15,14 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._settings = settings
         self._app = app
         self.set_title('Settings')
+        # Guards so programmatic set_selected() during a refresh doesn't
+        # re-enter the change handlers and recurse.
+        self._suppress_combos = False
         self._build_general_page()
         self._build_terminal_page()
         self._build_paa_page()
         self._build_appearance_page()
         self._build_models_page()
-        self._build_agents_page()
         self._build_about_page()
         self._build_claude_json_page()
         self.present(parent)
@@ -40,7 +43,7 @@ class SettingsWindow(Adw.PreferencesDialog):
 
         self._projects_dir_row = Adw.ActionRow(title='Projects Directory')
         self._projects_dir_row.set_subtitle(self._settings.resolved_projects_dir)
-        choose_btn = Gtk.Button(label='Choose Folder\u2026')
+        choose_btn = Gtk.Button(label='Choose Folder…')
         choose_btn.set_valign(Gtk.Align.CENTER)
         choose_btn.add_css_class('flat')
         choose_btn.connect('clicked', self._on_choose_folder)
@@ -48,11 +51,24 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._projects_dir_row.set_activatable_widget(choose_btn)
         projects_group.add(self._projects_dir_row)
 
-        # (The Claude binary row moved to the Agents page — every agent's
-        # binary is configured there now under agents['<id>']['binary'].
-        # resolved_claude_binary reads agents['claude']['binary'] first, so the
-        # Agents page fully drives the claude binary; the legacy claude_binary
-        # key stays honored as a fallback for older settings files.)
+        # Group: Claude Code (the binary row, re-homed from the removed Agents
+        # page — Claude Code is the sole harness, so its binary config lives on
+        # General now). resolved_claude_binary reads agents['claude']['binary']
+        # first, falling back to the legacy claude_binary key.
+        claude_group = Adw.PreferencesGroup(title='Claude Code')
+        page.add(claude_group)
+
+        cfg = (self._settings.agents.get('claude')
+               if isinstance(self._settings.agents, dict) else None)
+        binary = ((cfg.get('binary') or '') if isinstance(cfg, dict)
+                  else self._settings.claude_binary)
+        self._claude_binary_row = Adw.EntryRow(title='Binary')
+        self._claude_binary_row.set_text(binary)
+        self._claude_binary_row.set_show_apply_button(True)
+        self._claude_binary_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+        self._claude_binary_row.set_tooltip_text('Leave blank to use "claude" from PATH')
+        self._claude_binary_row.connect('apply', self._on_claude_binary_apply)
+        claude_group.add(self._claude_binary_row)
 
         # Group: Startup
         startup_group = Adw.PreferencesGroup(title='Startup')
@@ -219,11 +235,10 @@ class SettingsWindow(Adw.PreferencesDialog):
 
         self._paa_haiku_row = Adw.SwitchRow(
             title='Enable AI Scans',
-            # M-UX.7 (C2): the AI scans always shell out to the `claude` CLI with
-            # native Anthropic credentials — NOT your default agent, NOT ccr. Say
-            # so, so a grok/opencode user isn't surprised by Anthropic billing.
+            # The AI scans shell out to the `claude` CLI with native Anthropic
+            # credentials — NOT your custom provider. Say so.
             subtitle='Uses the claude CLI and Anthropic credentials, '
-                     'regardless of your default agent',
+                     'regardless of your default harness',
         )
         self._paa_haiku_row.set_active(self._settings.paa_allow_haiku)
         self._paa_haiku_row.set_sensitive(self._settings.paa_enabled)
@@ -335,7 +350,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         hook_path = os.path.expanduser('~/.claude/projectman/hook.js')
         self._hook_row = Adw.ActionRow(title='Hook Script')
         self._hook_row.set_subtitle(hook_path)
-        edit_hook_btn = Gtk.Button(label='Edit\u2026')
+        edit_hook_btn = Gtk.Button(label='Edit…')
         edit_hook_btn.set_valign(Gtk.Align.CENTER)
         edit_hook_btn.add_css_class('flat')
         edit_hook_btn.connect('clicked', self._on_edit_hook)
@@ -360,7 +375,7 @@ class SettingsWindow(Adw.PreferencesDialog):
             colors_group.add(row)
 
     # ------------------------------------------------------------------ #
-    #  Handlers                                                            #
+    #  Handlers (General / Terminal / PAA / Appearance)                    #
     # ------------------------------------------------------------------ #
 
     def _save_and_notify(self):
@@ -381,6 +396,23 @@ class SettingsWindow(Adw.PreferencesDialog):
             self._save_and_notify()
         except GLib.Error:
             pass  # user cancelled
+
+    def _on_claude_binary_apply(self, row):
+        """Persist the Claude Code binary path into agents['claude']['binary'].
+
+        The legacy ``claude_binary`` key is kept in sync so a clear takes effect
+        (resolved_claude_binary would otherwise fall back to a stale legacy
+        value)."""
+        value = row.get_text().strip()
+        if not isinstance(self._settings.agents, dict):
+            self._settings.agents = {}
+        claude_cfg = self._settings.agents.get('claude')
+        if not isinstance(claude_cfg, dict):
+            claude_cfg = {}
+            self._settings.agents['claude'] = claude_cfg
+        claude_cfg['binary'] = value
+        self._settings.claude_binary = value
+        self._save_and_notify()
 
     def _on_resume_toggled(self, row, _param):
         self._settings.resume_projects = row.get_active()
@@ -562,424 +594,315 @@ class SettingsWindow(Adw.PreferencesDialog):
             self.add_toast(toast)
 
     # ------------------------------------------------------------------ #
-    #  Models page                                                         #
+    #  Models page (click-friendly provider/tier editor)                   #
     # ------------------------------------------------------------------ #
 
     def _build_models_page(self):
-        from models import build_model_options
         page = Adw.PreferencesPage(
             title='Models', icon_name='network-server-symbolic'
         )
         self.add(page)
 
-        # -- Active model --
-        active_group = Adw.PreferencesGroup(
-            title='Active Model',
-            description='Default for new sessions. Override per project '
-                        'from the sidebar right-click menu.',
+        intro_group = Adw.PreferencesGroup(
+            title='Models',
+            description='Route Claude Code at any Anthropic-compatible provider '
+                        '(ollama, LiteLLM, etc.). Pick a default provider, assign '
+                        'the four tiers to its models, and define providers below. '
+                        'Override the provider per project from the sidebar menu. '
+                        'Under Zellij the provider applies to new sessions only '
+                        '(an attach inherits the server env).',
         )
-        page.add(active_group)
+        page.add(intro_group)
 
-        self._model_combo = Adw.ComboRow(title='Default Model')
-        ids, labels = build_model_options(self._settings.providers)
-        self._model_ids = ids
-        self._model_combo.set_model(Gtk.StringList.new(labels))
-        cur = self._settings.model_default
-        self._model_combo.set_selected(ids.index(cur) if cur in ids else 0)
-        self._model_combo.connect('notify::selected', self._on_model_default_changed)
-        # M-UX.1 (C2): tell the truth for the EFFECTIVE default agent. The combo
-        # only lists claude/ccr providers, so when grok/opencode is the default
-        # agent (it picks its model from its OWN config) the combo is irrelevant
-        # — show the truthful "Managed by <agent> (<path>)" subtitle and make the
-        # combo insensitive rather than letting it imply it controls grok's model.
-        import agent_configs
-        agent_id = self._settings.agent_default or 'claude'
-        if agent_configs.load_agent_config(agent_id) is not None:
-            self._model_combo.set_subtitle(
-                agent_configs.default_model_label(self._settings))
-            self._model_combo.set_sensitive(False)
-        active_group.add(self._model_combo)
+        # -- Active Provider --
+        self._active_provider_group = Adw.PreferencesGroup(title='Active Provider')
+        page.add(self._active_provider_group)
+        self._provider_combo = Adw.ComboRow(title='Default Provider')
+        self._provider_combo.set_subtitle(
+            'Anthropic (native) uses your own Anthropic credentials')
+        self._provider_combo.connect('notify::selected', self._on_default_provider_changed)
+        self._active_provider_group.add(self._provider_combo)
 
-        # -- Provider definitions (JSON editor) --
-        prov_group = Adw.PreferencesGroup(
+        # -- Tier Assignments --
+        self._tier_group = Adw.PreferencesGroup(
+            title='Tier Assignments',
+            description='Assign each Claude Code tier to a model on the active '
+                        'provider. "Default" uses the provider\'s first model. '
+                        'Disabled when the default is native.',
+        )
+        page.add(self._tier_group)
+        self._tier_combos = {}
+        for tier, label in (('opus', 'Opus'), ('sonnet', 'Sonnet'),
+                            ('haiku', 'Haiku'), ('subagent', 'Subagent')):
+            combo = Adw.ComboRow(title=label)
+            combo.connect('notify::selected',
+                          lambda r, _p, t=tier: self._on_tier_changed(t, r))
+            self._tier_group.add(combo)
+            self._tier_combos[tier] = combo
+
+        # -- Providers --
+        self._providers_group = Adw.PreferencesGroup(
             title='Providers',
-            description='LLM providers and models as JSON. Custom models are '
-                        'reached through claude-code-router.',
+            description='Define Anthropic-compatible providers and their models.',
         )
-        page.add(prov_group)
+        page.add(self._providers_group)
 
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_min_content_height(260)
-        self._providers_tv = Gtk.TextView()
-        self._providers_tv.set_monospace(True)
-        self._providers_tv.set_left_margin(8)
-        self._providers_tv.set_right_margin(8)
-        self._providers_tv.set_top_margin(8)
-        self._providers_tv.set_bottom_margin(8)
-        self._providers_tv.get_buffer().set_text(self._providers_json_text())
-        scrolled.set_child(self._providers_tv)
-        prov_group.add(scrolled)
+        add_group = Adw.PreferencesGroup()
+        page.add(add_group)
+        add_row = Adw.ActionRow()
+        add_btn = Gtk.Button(label='Add Provider')
+        add_btn.add_css_class('suggested-action')
+        add_btn.set_valign(Gtk.Align.CENTER)
+        add_btn.connect('clicked', self._on_add_provider)
+        add_row.add_suffix(add_btn)
+        add_group.add(add_row)
 
-        btn_group = Adw.PreferencesGroup()
-        page.add(btn_group)
-        save_row = Adw.ActionRow(title='Provider Definitions')
-        # reveal-3 item 6 (G4, shipped 1.0.1, pre-program): the subtitle is a
-        # literal JSON-shape hint with angle-bracket placeholders, NOT Pango
-        # markup. AdwActionRow subtitles parse markup by default, so '<id>' fired
-        # a Gtk-WARNING (Element "markup" closed but open element is "id") on
-        # every Settings open and broke the render. It is a literal string.
-        # Must precede set_subtitle: markup is parsed AT SET TIME (bench round 2).
-        save_row.set_use_markup(False)
-        save_row.set_subtitle(
-            '{"<id>": {"name", "base_url", "api_key", '
-            '"models": {"<id>": {"name"}}}}'
-        )
-        save_btn = Gtk.Button(label='Save Providers')
-        save_btn.add_css_class('suggested-action')
-        save_btn.set_valign(Gtk.Align.CENTER)
-        save_btn.connect('clicked', self._on_save_providers)
-        save_row.add_suffix(save_btn)
-        btn_group.add(save_row)
+        self._provider_card_rows = []
+        self._refresh_models_page()
 
-        # -- Native agent model configs (read-only, M-UX.2 / C1) --
-        self._build_native_model_sections(page)
+    def _refresh_models_page(self):
+        """Rebuild the whole Models page from settings (after any change)."""
+        self._refresh_provider_combo()
+        self._refresh_tier_combos()
+        self._rebuild_providers_group()
 
-        # -- claude-code-router --
-        self._build_ccr_group(page)
-
-    def _build_native_model_sections(self, page):
-        """Read-only surfacing of grok's + opencode's native model configs.
-
-        M-UX.2 (C1 VISIBILITY): grok and opencode each decide their model from a
-        config file PM never showed (grok's config.toml, opencode's
-        opencode.json). This adds one read-only section per agent that has such a
-        file, headed with the SOURCE PATH and an "edited in the agent's own
-        config" note — the read-first ruling: PM displays, it does not edit these
-        (that is P4). Defensive: a missing/garbage file shows "none found", never
-        raises (the parsers guarantee it).
-        """
-        import agent_configs
-        for agent_id, display in (('grok', 'Grok Build'), ('opencode', 'opencode')):
-            cfg = agent_configs.load_agent_config(agent_id)
-            if cfg is None:
-                continue
-            shown_path = agent_configs._display_path(cfg.source_path)
-            group = Adw.PreferencesGroup(
-                title=f'{display} models',
-                description=(f'Read-only — edited in the agent’s own config '
-                            f'({shown_path}).'),
-            )
-            page.add(group)
-
-            if not cfg.exists or not cfg.models:
-                empty = Adw.ActionRow(title='No models found')
-                empty.set_subtitle(
-                    'No model definitions in this config (or the file is absent).')
-                empty.set_sensitive(False)
-                group.add(empty)
-                continue
-
-            for entry in cfg.models:
-                is_default = (entry.key == cfg.default_key)
-                title = entry.name or entry.key
-                if is_default:
-                    title = f'{title}  •  default'
-                row = Adw.ActionRow(title=title)
-                # Subtitle: the config KEY plus the upstream model id / endpoint
-                # when the config states them — the full "what runs" story.
-                bits = [f'key: {entry.key}']
-                if entry.model and entry.model != entry.key:
-                    bits.append(f'model: {entry.model}')
-                if entry.base_url:
-                    bits.append(entry.base_url)
-                row.set_subtitle('   '.join(bits))
-                row.set_sensitive(False)
-                group.add(row)
-
-    def _build_ccr_group(self, page):
-        import ccr
-        import agent_configs
-        # B3 (M-UX.14, C2/C3): when no custom Claude models are configured, the
-        # ccr block stopped frightening users who never set one up — it collapses
-        # to a single self-explaining row instead of showing service-state
-        # controls for a router they don't use.
-        if not agent_configs.ccr_in_use(self._settings):
-            group = Adw.PreferencesGroup(
-                title='Claude Code Router (ccr)',
-            )
-            page.add(group)
-            row = Adw.ActionRow(title='Claude Code Router')
-            row.set_subtitle('not in use (only needed for custom Claude models)')
-            row.set_sensitive(False)
-            group.add(row)
-            return
-
-        group = Adw.PreferencesGroup(
-            title='Claude Code Router (ccr)',
-            description='Custom models are routed through a local ccr service.',
-        )
-        page.add(group)
-
-        installed = ccr.available(self._settings)
-        status_row = Adw.ActionRow(title='Service')
-        if not installed:
-            status_row.set_subtitle('Not installed (routes custom Claude models)')
-            status_row.add_prefix(
-                Gtk.Image.new_from_icon_name('dialog-warning-symbolic'))
-        else:
-            running = ccr.is_running(self._settings)
-            status_row.set_subtitle(
-                'Installed — service running (routes custom Claude models)'
-                if running
-                else 'Installed — service stopped (routes custom Claude models)')
-            status_row.add_prefix(
-                Gtk.Image.new_from_icon_name('emblem-ok-symbolic'))
-        status_row.set_sensitive(False)
-        group.add(status_row)
-
-        if not installed:
-            cmd = 'npm install -g @musistudio/claude-code-router'
-            hint_row = Adw.ActionRow(title='Install ccr')
-            hint_row.set_subtitle(cmd)
-            copy_btn = Gtk.Button(label='Copy')
-            copy_btn.set_valign(Gtk.Align.CENTER)
-            copy_btn.add_css_class('flat')
-            copy_btn.connect('clicked', lambda b, c=cmd: self.get_clipboard().set(c))
-            hint_row.add_suffix(copy_btn)
-            group.add(hint_row)
-
-        self._ccr_managed_row = Adw.SwitchRow(
-            title='Manage ccr',
-            subtitle='Let ProjectMan configure and start/stop the ccr service',
-        )
-        self._ccr_managed_row.set_active(self._settings.ccr_managed)
-        self._ccr_managed_row.set_sensitive(installed)
-        self._ccr_managed_row.connect('notify::active', self._on_ccr_managed_toggled)
-        group.add(self._ccr_managed_row)
-
-    def _providers_json_text(self):
-        import json
-        try:
-            return json.dumps(self._settings.providers, indent=2)
-        except (TypeError, ValueError):
-            return '{}'
-
-    def _refresh_model_combo(self):
-        """Rebuild the default-model combo after the providers dict changes."""
-        from models import build_model_options
-        ids, labels = build_model_options(self._settings.providers)
-        current = self._settings.model_default
-        self._model_combo.handler_block_by_func(self._on_model_default_changed)
-        self._model_combo.set_model(Gtk.StringList.new(labels))
-        self._model_ids = ids
-        self._model_combo.set_selected(ids.index(current) if current in ids else 0)
-        self._model_combo.handler_unblock_by_func(self._on_model_default_changed)
-        if current not in ids:
-            # the stored default's provider/model was removed — fall back
+    def _refresh_provider_combo(self):
+        ids, labels = build_provider_options(self._settings.providers)
+        self._provider_ids = ids
+        cur = self._settings.model_default
+        self._suppress_combos = True
+        self._provider_combo.set_model(Gtk.StringList.new(labels))
+        self._provider_combo.set_selected(ids.index(cur) if cur in ids else 0)
+        self._suppress_combos = False
+        if cur not in ids:
+            # The stored default's provider was removed — fall back to native.
             self._settings.model_default = ''
 
-    def _on_model_default_changed(self, row, _param):
-        idx = row.get_selected()
-        if 0 <= idx < len(self._model_ids):
-            self._settings.model_default = self._model_ids[idx]
-            self._save_and_notify()
+    def _refresh_tier_combos(self, reset_stale=False):
+        """Repopulate the four tier combos from the active provider's models.
 
-    def _on_save_providers(self, button):
-        import json
-        from models import validate_providers
-        buf = self._providers_tv.get_buffer()
-        text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
-        try:
-            parsed = json.loads(text or '{}')
-            validate_providers(parsed)
-        except (json.JSONDecodeError, ValueError) as e:
-            toast = Adw.Toast.new(f'Invalid: {e}')
-            toast.set_timeout(4)
-            self.add_toast(toast)
+        ``reset_stale`` scrubs any tier_models value not on the active provider
+        back to '' (and persists) — used when the active provider changes.
+        """
+        pid = self._settings.model_default
+        models = [m for m in (self._settings.providers.get(pid, {}).get('models', [])
+                              if isinstance(self._settings.providers.get(pid), dict)
+                              else []) if isinstance(m, str)] \
+            if isinstance(self._settings.providers, dict) else []
+        if reset_stale and isinstance(self._settings.tier_models, dict):
+            changed = False
+            for tier in TIERS:
+                val = self._settings.tier_models.get(tier, '')
+                if isinstance(val, str) and val and val not in models:
+                    self._settings.tier_models[tier] = ''
+                    changed = True
+            if changed:
+                self._settings.save()
+        active = pid != ''
+        for tier, combo in self._tier_combos.items():
+            ids, labels = build_tier_options(self._settings.providers, pid)
+            val = self._settings.tier_models.get(tier, '') \
+                if isinstance(self._settings.tier_models, dict) else ''
+            if not isinstance(val, str) or val not in ids:
+                val = ''
+            self._suppress_combos = True
+            combo.set_model(Gtk.StringList.new(labels))
+            combo.set_selected(ids.index(val) if val in ids else 0)
+            combo.set_sensitive(active)
+            self._suppress_combos = False
+
+    def _rebuild_providers_group(self):
+        for row in list(self._provider_card_rows):
+            self._providers_group.remove(row)
+        self._provider_card_rows = []
+        if not isinstance(self._settings.providers, dict):
             return
-        self._settings.providers = parsed
-        self._providers_tv.get_buffer().set_text(json.dumps(parsed, indent=2))
-        self._refresh_model_combo()
-        self._save_and_notify()
-        toast = Adw.Toast.new('Providers saved')
-        toast.set_timeout(2)
-        self.add_toast(toast)
+        for pid in sorted(self._settings.providers):
+            prov = self._settings.providers.get(pid)
+            if not isinstance(prov, dict):
+                continue
+            card = self._build_provider_card(pid, prov)
+            self._providers_group.add(card)
+            self._provider_card_rows.append(card)
 
-    def _on_ccr_managed_toggled(self, row, _param):
-        self._settings.ccr_managed = row.get_active()
-        self._save_and_notify()
+    def _build_provider_card(self, pid, prov):
+        """An expandable card for one provider: name, base_url, api_key (peek),
+        model list with remove buttons, add-model entry, remove-provider button.
+        """
+        name = prov.get('name') or ''
+        card = Adw.ExpandableRow(title=name or pid)
+        card.set_subtitle(pid)
 
-    # ------------------------------------------------------------------ #
-    #  Agents page (B3 — minimal this phase; full doctor is P3)            #
-    # ------------------------------------------------------------------ #
+        name_row = Adw.EntryRow(title='Name')
+        name_row.set_text(name)
+        name_row.set_show_apply_button(True)
+        name_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+        name_row.connect('apply',
+                         lambda r, p=pid: self._on_provider_field(p, 'name', r))
+        card.add_row(name_row)
 
-    def _build_agents_page(self):
-        import agents
-        import agent_configs
-        page = Adw.PreferencesPage(
-            title='Agents', icon_name='applications-engineering-symbolic'
-        )
-        self.add(page)
+        url_row = Adw.EntryRow(title='Base URL')
+        url_row.set_text(prov.get('base_url') or '')
+        url_row.set_show_apply_button(True)
+        url_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+        url_row.set_tooltip_text('e.g. http://localhost:11434')
+        url_row.connect('apply',
+                        lambda r, p=pid: self._on_provider_field(p, 'base_url', r))
+        card.add_row(url_row)
 
-        default_group = Adw.PreferencesGroup(
-            title='Default Agent',
-            description='The coding agent used for new sessions. Override per '
-                        'project from the sidebar right-click menu.',
-        )
-        page.add(default_group)
+        key_row = Adw.ActionRow(title='API Key')
+        key = prov.get('api_key') or ''
+        key_row.set_subtitle(f'••••{key[-4:]}' if key else 'Not set')
+        pe = Gtk.PasswordEntry()
+        pe.set_show_peek_icon(True)
+        pe.set_text(key)
+        pe.set_valign(Gtk.Align.CENTER)
+        pe.set_size_request(220, -1)
+        pe.set_tooltip_text('Sent as ANTHROPIC_AUTH_TOKEN')
+        # notify::text (covers paste + typing) WITHOUT rebuilding the card, so
+        # focus is preserved while editing.
+        pe.connect('notify::text',
+                   lambda e, _p, p=pid, r=key_row: self._on_provider_key(p, e, r))
+        key_row.add_suffix(pe)
+        card.add_row(key_row)
 
-        self._agent_default_ids = list(agents.ADAPTERS.keys())
-        labels = [agents.ADAPTERS[a].display_name for a in self._agent_default_ids]
-        self._agent_default_combo = Adw.ComboRow(title='Default Agent')
-        self._agent_default_combo.set_model(Gtk.StringList.new(labels))
-        cur = self._settings.agent_default
-        self._agent_default_combo.set_selected(
-            self._agent_default_ids.index(cur) if cur in self._agent_default_ids else 0)
-        self._agent_default_combo.connect(
-            'notify::selected', self._on_agent_default_changed)
-        default_group.add(self._agent_default_combo)
+        models = prov.get('models') if isinstance(prov.get('models'), list) else []
+        for mid in models:
+            if not isinstance(mid, str):
+                continue
+            m_row = Adw.ActionRow(title=mid)
+            rm = Gtk.Button.new_from_icon_name('list-remove-symbolic')
+            rm.add_css_class('flat')
+            rm.set_valign(Gtk.Align.CENTER)
+            rm.set_tooltip_text('Remove model')
+            rm.connect('clicked', lambda b, p=pid, m=mid: self._on_remove_model(p, m))
+            m_row.add_suffix(rm)
+            card.add_row(m_row)
 
-        # Per-agent config: binary path + doctor-lite check.
-        self._agent_binary_rows = {}
-        # M-UX.8: (row, button) per agent so the bridge state can refresh after
-        # an install click without rebuilding the page.
-        self._bridge_rows = {}
-        for agent_id in self._agent_default_ids:
-            adapter = agents.ADAPTERS[agent_id]
-            group = Adw.PreferencesGroup(title=adapter.display_name)
-            page.add(group)
+        add_model_row = Adw.EntryRow(title='Add model')
+        add_model_row.set_show_apply_button(True)
+        add_model_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+        add_model_row.set_tooltip_text('Free-text id, e.g. glm-5.2:cloud[1m]')
+        add_model_row.connect('apply',
+                              lambda r, p=pid: self._on_add_model(p, r))
+        card.add_row(add_model_row)
 
-            cfg = self._settings.agents.get(agent_id, {}) if isinstance(
-                self._settings.agents, dict) else {}
-            binary_row = Adw.EntryRow(title='Binary')
-            binary_row.set_text((cfg.get('binary') or '') if isinstance(cfg, dict) else '')
-            binary_row.set_show_apply_button(True)
-            binary_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
-            binary_row.set_tooltip_text(
-                f'Leave blank to use "{agent_id}" from PATH')
-            binary_row.connect(
-                'apply', lambda r, aid=agent_id: self._on_agent_binary_apply(aid, r))
-            group.add(binary_row)
-            self._agent_binary_rows[agent_id] = binary_row
+        rm_row = Adw.ActionRow()
+        rm_btn = Gtk.Button(label='Remove provider')
+        rm_btn.add_css_class('destructive-action')
+        rm_btn.set_valign(Gtk.Align.CENTER)
+        rm_btn.connect('clicked', lambda b, p=pid: self._on_remove_provider(p))
+        rm_row.add_suffix(rm_btn)
+        card.add_row(rm_row)
+        return card
 
-            # Doctor-lite: <binary> --version.
-            check_row = Adw.ActionRow(title='Status')
-            check_row.set_subtitle('Run a check to verify the binary')
-            check_btn = Gtk.Button(label='Check')
-            check_btn.set_valign(Gtk.Align.CENTER)
-            check_btn.add_css_class('flat')
-            check_btn.connect(
-                'clicked', lambda b, aid=agent_id, r=check_row: self._on_agent_doctor(aid, r))
-            check_row.add_suffix(check_btn)
-            group.add(check_row)
+    # --- Models page handlers ------------------------------------------
 
-            # B2 (M-UX.13, C1/C2): per-agent account status — "is my subscription
-            # connected?" answered at a glance, presence-based (the Check button
-            # above stays the live probe). Contents are never read; only the
-            # token file's existence/size (or, for opencode, parsed providers).
-            account_line = agent_configs.account_status_line(agent_id)
-            if account_line is not None:
-                account_row = Adw.ActionRow(title='Account')
-                account_row.set_subtitle(account_line)
-                account_row.set_sensitive(False)
-                group.add(account_row)
-
-            # B1 (M-UX.8-residual / F10, C1/C5): grok reads Claude-style hooks by
-            # default, which would make Claude's hook double-fire on grok events.
-            # Surface the [compat.claude] hooks state read-only (the file-driven
-            # behavior was invisible — a C1 defect).
-            if agent_id == 'grok':
-                compat_row = Adw.ActionRow(title='Claude-hooks compat')
-                compat_row.set_subtitle(agent_configs.grok_compat_hooks_line())
-                compat_row.set_sensitive(False)
-                group.add(compat_row)
-
-            # Status-bridge install button (only for agents that ship one).
-            if agents.agent_bridge_source(self._app_dir(), agent_id) is not None \
-                    or agent_id == 'opencode':
-                bridge_row = Adw.ActionRow(title='Status bridge')
-                bridge_btn = Gtk.Button()
-                bridge_btn.set_valign(Gtk.Align.CENTER)
-                bridge_btn.add_css_class('flat')
-                bridge_btn.connect(
-                    'clicked', lambda b, aid=agent_id: self._on_install_bridge(aid))
-                bridge_row.add_suffix(bridge_btn)
-                group.add(bridge_row)
-                # M-UX.8 (C5): reflect the bridge's ACTUAL installed state via the
-                # F12a manifest rather than always saying "Install bridge".
-                self._bridge_rows[agent_id] = (bridge_row, bridge_btn)
-                self._refresh_bridge_row(agent_id)
-
-    @staticmethod
-    def _app_dir():
-        return os.path.dirname(os.path.abspath(__file__))
-
-    def _on_agent_default_changed(self, row, _param):
-        idx = row.get_selected()
-        if 0 <= idx < len(self._agent_default_ids):
-            self._settings.agent_default = self._agent_default_ids[idx]
-            self._save_and_notify()
-
-    def _on_agent_binary_apply(self, agent_id, row):
-        agents_cfg = dict(self._settings.agents) if isinstance(
-            self._settings.agents, dict) else {}
-        entry = dict(agents_cfg.get(agent_id) or {}) if isinstance(
-            agents_cfg.get(agent_id), dict) else {}
-        value = row.get_text().strip()
-        entry['binary'] = value
-        agents_cfg[agent_id] = entry
-        self._settings.agents = agents_cfg
-        if agent_id == 'claude':
-            # Keep the legacy claude_binary key in sync. Without this, clearing
-            # the row would leave a stale legacy value that resolved_claude_binary
-            # falls back to — the clear would silently not take effect.
-            self._settings.claude_binary = value
-        self._save_and_notify()
-
-    def _on_agent_doctor(self, agent_id, row):
-        import agents
-        ok, detail = agents.agent_doctor(self._settings, agent_id)
-        row.set_subtitle(detail or ('ok' if ok else 'check failed'))
-        # Swap the prefix icon to reflect the result. The Image is created once
-        # per row on first check and updated thereafter — repeated checks must
-        # not stack prefix icons (Adw.ActionRow has no clear-prefixes API).
-        icon = 'emblem-ok-symbolic' if ok else 'dialog-warning-symbolic'
-        existing = getattr(row, '_pm_doctor_icon', None)
-        if existing is None:
-            existing = Gtk.Image.new_from_icon_name(icon)
-            row.add_prefix(existing)
-            row._pm_doctor_icon = existing
-        else:
-            existing.set_from_icon_name(icon)
-
-    def _refresh_bridge_row(self, agent_id):
-        """Set the bridge button label + row subtitle from the manifest state
-        (M-UX.8/C5). Called at build and after every install click."""
-        import agents
-        entry = self._bridge_rows.get(agent_id)
-        if entry is None:
+    def _on_default_provider_changed(self, row, _param):
+        if self._suppress_combos:
             return
-        row, btn = entry
-        state = agents.bridge_state(self._app_dir(), agent_id)
-        label, subtitle = agents.bridge_button_labels(state)
-        btn.set_label(label)
-        row.set_subtitle(subtitle)
+        idx = row.get_selected()
+        ids = getattr(self, '_provider_ids', [])
+        if not (0 <= idx < len(ids)):
+            return
+        self._settings.model_default = ids[idx]
+        self._settings.save()
+        self._app.emit('settings-changed')
+        # Repopulate the tier combos + reset any tier value not on the new
+        # provider's model list to '' (the single-base_url enforcement).
+        self._refresh_tier_combos(reset_stale=True)
 
-    def _on_install_bridge(self, agent_id):
-        import agents
-        result = agents.install_agent_bridge(self._app_dir(), agent_id)
-        msgs = {
-            'installed': 'Status bridge installed',
-            'already': 'Status bridge already up to date',
-            'missing-source': 'Bridge source not found in the app directory',
-            'no-bridge': 'This agent has no status bridge',
-            'error': 'Failed to install the status bridge',
+    def _on_tier_changed(self, tier, row):
+        if self._suppress_combos:
+            return
+        pid = self._settings.model_default
+        ids, _labels = build_tier_options(self._settings.providers, pid)
+        idx = row.get_selected()
+        if not isinstance(self._settings.tier_models, dict):
+            self._settings.tier_models = {}
+        if 0 <= idx < len(ids):
+            self._settings.tier_models[tier] = ids[idx]
+            self._settings.save()
+            self._app.emit('settings-changed')
+
+    def _on_provider_field(self, pid, field, row):
+        prov = self._settings.providers.get(pid)
+        if not isinstance(prov, dict):
+            return
+        prov[field] = row.get_text().strip()
+        self._settings.save()
+        self._app.emit('settings-changed')
+        # name/base_url affect the combo + card; rebuild (apply = Enter, focus
+        # has already left the entry).
+        self._refresh_models_page()
+
+    def _on_provider_key(self, pid, entry, key_row):
+        prov = self._settings.providers.get(pid)
+        if not isinstance(prov, dict):
+            return
+        key = entry.get_text()
+        prov['api_key'] = key
+        key_row.set_subtitle(f'••••{key[-4:]}' if key else 'Not set')
+        # No card rebuild — preserve focus in the password entry while typing.
+        # Save + notify (the env for a running session changes on next spawn).
+        self._settings.save()
+        self._app.emit('settings-changed')
+
+    def _on_add_model(self, pid, row):
+        mid = row.get_text().strip()
+        if not mid:
+            return
+        prov = self._settings.providers.get(pid)
+        if not isinstance(prov, dict):
+            return
+        raw = prov.get('models')
+        models = raw if isinstance(raw, list) else []
+        if mid not in models:
+            prov['models'] = list(models) + [mid]
+        self._settings.save()
+        self._app.emit('settings-changed')
+        self._refresh_models_page()
+
+    def _on_remove_model(self, pid, mid):
+        prov = self._settings.providers.get(pid)
+        if not isinstance(prov, dict):
+            return
+        prov['models'] = [m for m in prov.get('models', []) if m != mid]
+        # If this is the active provider, drop any tier pinning the removed model.
+        if self._settings.model_default == pid and isinstance(self._settings.tier_models, dict):
+            for tier in TIERS:
+                if self._settings.tier_models.get(tier) == mid:
+                    self._settings.tier_models[tier] = ''
+        self._settings.save()
+        self._app.emit('settings-changed')
+        self._refresh_models_page()
+
+    def _on_remove_provider(self, pid):
+        if isinstance(self._settings.providers, dict):
+            self._settings.providers.pop(pid, None)
+        if self._settings.model_default == pid:
+            self._settings.model_default = ''
+        if isinstance(self._settings.model_overrides, dict):
+            self._settings.model_overrides = {
+                p: v for p, v in self._settings.model_overrides.items() if v != pid
+            }
+        self._settings.save()
+        self._app.emit('settings-changed')
+        self._refresh_models_page()
+
+    def _on_add_provider(self, button):
+        if not isinstance(self._settings.providers, dict):
+            self._settings.providers = {}
+        base, i, pid = 'provider', 1, 'provider'
+        while pid in self._settings.providers:
+            i += 1
+            pid = f'{base}{i}'
+        self._settings.providers[pid] = {
+            'name': '', 'base_url': '', 'api_key': '', 'models': [],
         }
-        toast = Adw.Toast.new(msgs.get(result, result))
-        toast.set_timeout(3)
-        self.add_toast(toast)
-        # C5: the button label must now reflect the post-install state.
-        self._refresh_bridge_row(agent_id)
+        self._settings.save()
+        self._app.emit('settings-changed')
+        self._refresh_models_page()
 
     # ------------------------------------------------------------------ #
     #  Extra Pages                                                         #
@@ -1012,9 +935,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         info_group.add(name_row)
 
         desc_row = Adw.ActionRow(title='Description')
-        # M-UX.5 (C2): agent-neutral — the app drives Claude Code, opencode, and
-        # Grok Build, so "Claude Code sessions" lied on a grok-default install.
-        desc_row.set_subtitle('GTK4 desktop cockpit for AI coding agents')
+        desc_row.set_subtitle('GTK4 desktop cockpit for AI coding harnesses')
         desc_row.set_sensitive(False)
         info_group.add(desc_row)
 

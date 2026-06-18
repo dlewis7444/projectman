@@ -54,7 +54,7 @@ def test_load_missing_file_persists_defaults(tmp_path):
     data = json.loads(path.read_text())
     # The persisted content is the full defaults (round-trips to the same obj).
     assert data['font_size'] == 11
-    assert data['agent_default'] == 'claude'
+    assert data['model_default'] == ''
     assert Settings.load(str(path)).font_size == s.font_size
 
 
@@ -161,7 +161,7 @@ def test_paa_budget_month_roundtrip(tmp_path):
     assert s2.paa_budget_month == '2026-03'
 
 
-# --- Model-agnostic / ccr settings ---------------------------------------- #
+# --- Model layer (Claude-Only + provider axis) ----------------------------- #
 
 def _sample_providers():
     return {
@@ -169,7 +169,7 @@ def _sample_providers():
             'name': 'Ollama',
             'base_url': 'http://host:11434/v1',
             'api_key': 'x',
-            'models': {'qwen': {'name': 'Qwen'}},
+            'models': ['qwen'],
         },
     }
 
@@ -179,25 +179,22 @@ def test_provider_defaults():
     assert s.providers == {}
     assert s.model_default == ''
     assert s.model_overrides == {}
-    assert s.ccr_managed is True
-    assert s.ccr_host == '127.0.0.1'
-    assert s.ccr_port == 3456
-    assert s.ccr_api_key == ''
-
-
-def test_resolved_ccr_binary():
-    assert Settings().resolved_ccr_binary == 'ccr'
-    assert Settings(ccr_binary='  ').resolved_ccr_binary == 'ccr'
-    assert Settings(ccr_binary='/opt/ccr').resolved_ccr_binary == '/opt/ccr'
+    assert s.tier_models == {}
+    # ccr/agent_default/agent_overrides are no longer fields
+    assert not hasattr(s, 'ccr_managed')
+    assert not hasattr(s, 'agent_default')
+    assert not hasattr(s, 'agent_overrides')
 
 
 def test_providers_roundtrip(tmp_path):
     path = str(tmp_path / 'settings.json')
-    s = Settings(providers=_sample_providers(), model_default='ollama/qwen')
+    s = Settings(providers=_sample_providers(), model_default='ollama',
+                 tier_models={'opus': 'qwen'})
     s.save(path)
     s2 = Settings.load(path)
     assert s2.providers == _sample_providers()
-    assert s2.model_default == 'ollama/qwen'
+    assert s2.model_default == 'ollama'
+    assert s2.tier_models['opus'] == 'qwen'
 
 
 def test_load_old_file_without_provider_keys(tmp_path):
@@ -209,36 +206,49 @@ def test_load_old_file_without_provider_keys(tmp_path):
     assert s.model_default == ''
 
 
-def test_effective_model_global_default():
-    s = Settings(providers=_sample_providers(), model_default='ollama/qwen')
-    assert s.effective_model('/p/a') == 'ollama/qwen'
+def test_effective_provider_global_default():
+    s = Settings(providers=_sample_providers(), model_default='ollama')
+    assert s.effective_provider('/p/a') == 'ollama'
 
 
-def test_effective_model_per_project_override():
-    s = Settings(providers=_sample_providers(), model_default='ollama/qwen',
+def test_effective_provider_per_project_override():
+    s = Settings(providers=_sample_providers(), model_default='ollama',
                  model_overrides={'/p/a': ''})
-    assert s.effective_model('/p/a') == ''          # pinned to native
-    assert s.effective_model('/p/b') == 'ollama/qwen'  # follows default
+    assert s.effective_provider('/p/a') == ''          # pinned to native
+    assert s.effective_provider('/p/b') == 'ollama'    # follows default
 
 
-def test_uses_custom_model():
-    s = Settings(providers=_sample_providers(), model_default='ollama/qwen')
-    assert s.uses_custom_model('/p/a') is True
+def test_effective_agent_always_claude():
+    # Claude Code is the sole harness; effective_agent is a kept back-compat
+    # symbol that now always returns 'claude'.
+    assert Settings().effective_agent('/p') == 'claude'
+    assert Settings(providers=_sample_providers(),
+                    model_default='ollama').effective_agent('/p') == 'claude'
+
+
+def test_uses_custom_provider():
+    s = Settings(providers=_sample_providers(), model_default='ollama')
+    assert s.uses_custom_provider('/p/a') is True
     # native default
-    assert Settings().uses_custom_model('/p/a') is False
-    # model id whose provider is not defined
-    s2 = Settings(model_default='ghost/x')
-    assert s2.uses_custom_model('/p/a') is False
+    assert Settings().uses_custom_provider('/p/a') is False
+    # provider id not defined
+    s2 = Settings(model_default='ghost')
+    assert s2.uses_custom_provider('/p/a') is False
+    # provider defined but no base_url
+    s3 = Settings(providers={'p': {'name': 'P', 'base_url': '',
+                                     'api_key': '', 'models': []}},
+                  model_default='p')
+    assert s3.uses_custom_provider('/p/a') is False
 
 
-def test_any_custom_model_active():
-    assert Settings().any_custom_model_active() is False
-    s = Settings(providers=_sample_providers(), model_default='ollama/qwen')
-    assert s.any_custom_model_active() is True
+def test_any_custom_provider_active():
+    assert Settings().any_custom_provider_active() is False
+    s = Settings(providers=_sample_providers(), model_default='ollama')
+    assert s.any_custom_provider_active() is True
     # custom only via a per-project override
     s2 = Settings(providers=_sample_providers(),
-                  model_overrides={'/p/a': 'ollama/qwen'})
-    assert s2.any_custom_model_active() is True
+                  model_overrides={'/p/a': 'ollama'})
+    assert s2.any_custom_provider_active() is True
 
 
 def test_save_hardens_permissions(tmp_path):

@@ -66,6 +66,11 @@ def test_update_status_attached_no_file_shows_done():
 # ===========================================================================
 # P2 Part A — A1 (expander through adapter.list_sessions) + A5 (caps gating).
 # The GTK sliver; the headless contract is in test_agent_seam.py.
+#
+# Claude Code is the sole harness (effective_agent always returns 'claude'),
+# so these tests swap ADAPTERS['claude'] for a fake adapter to exercise the
+# caps-gating branches that a single-harness fleet would otherwise never
+# reach.
 # ===========================================================================
 
 def _menu_labels(row):
@@ -79,9 +84,14 @@ def _menu_labels(row):
 
 
 class _FakeCapsAdapter:
-    """Configurable fake adapter for caps/sessions sliver tests."""
-    id = 'fake'
-    display_name = 'Fake'
+    """Configurable fake adapter for caps/sessions sliver tests.
+
+    Swapped in for ADAPTERS['claude'] so the row's _adapter() (which resolves
+    through effective_agent → get_adapter('claude')) returns this fake, letting
+    us exercise low/no caps branches the real single-harness fleet never hits.
+    """
+    id = 'claude'
+    display_name = 'Claude Code'
 
     def __init__(self, caps, refs=None):
         self.caps = caps
@@ -96,8 +106,12 @@ def _row_with_adapter(monkeypatch, caps, refs=None, path='/tmp/test'):
     from settings import Settings
     from model import Project, HistoryReader, StatusWatcher
     from sidebar import ProjectRow
-    monkeypatch.setitem(agents.ADAPTERS, 'fake', _FakeCapsAdapter(caps, refs))
-    s = Settings(agent_default='fake')
+    fake = _FakeCapsAdapter(caps, refs)
+    # The row resolves its adapter via effective_agent (always 'claude') →
+    # get_adapter('claude') → ADAPTERS['claude']; swap claude for the fake so
+    # the row's caps gating and session enumeration use it (during init too).
+    monkeypatch.setitem(agents.ADAPTERS, 'claude', fake)
+    s = Settings()
     proj = Project(name='test', path=path)
     return ProjectRow(proj, HistoryReader(), StatusWatcher(), settings=s)
 
@@ -194,7 +208,9 @@ def test_session_activated_emits_ref_id(monkeypatch):
 
 
 # ===========================================================================
-# P2 Part B — B3 UI: Agent submenu, subtitle/badge, signal rename.
+# P2 Part B — B3 UI: provider subtitle (Claude-Only + first-class model axis).
+# The harness is always Claude Code; the subtitle surfaces a pinned PROVIDER
+# (or a live-harness mismatch defensive guard) — a plain native row stays clean.
 # ===========================================================================
 
 def _make_row_with_settings(settings, path='/tmp/test'):
@@ -204,245 +220,85 @@ def _make_row_with_settings(settings, path='/tmp/test'):
     return ProjectRow(proj, HistoryReader(), StatusWatcher(), settings=settings)
 
 
-def test_agent_submenu_lists_registered_adapters():
-    """The Agent submenu offers Follow default + each registered adapter."""
-    from settings import Settings
-    row = _make_row_with_settings(Settings(agent_default='claude'))
-    labels = []
-    from gi.repository import GLib
-    for i in range(row._agent_submenu.get_n_items()):
-        v = row._agent_submenu.get_item_attribute_value(i, 'label', GLib.VariantType('s'))
-        if v:
-            labels.append(v.get_string())
-    assert labels[0].startswith('Follow default')
-    assert 'Claude Code' in labels
-    assert 'opencode' in labels
-
-
-def test_agent_submenu_lists_three_agents_including_grok(monkeypatch):
-    """T-B4: the third agent (Grok Build) appears in the Agent submenu model by
-    construction — the submenu iterates agents.ADAPTERS, so grok shows up with
-    no sidebar code change."""
-    from settings import Settings
-    from gi.repository import GLib
-    row = _make_row_with_settings(Settings(agent_default='claude'))
-    labels = []
-    for i in range(row._agent_submenu.get_n_items()):
-        v = row._agent_submenu.get_item_attribute_value(i, 'label', GLib.VariantType('s'))
-        if v:
-            labels.append(v.get_string())
-    assert 'Claude Code' in labels
-    assert 'opencode' in labels
-    assert 'Grok Build' in labels
-
-
-def test_grok_override_selects_grok_adapter(monkeypatch):
-    """T-B4: a per-project grok override resolves the row to the GrokAdapter
-    (full caps → Model submenu + expander arrow visible)."""
-    from settings import Settings
-    s = Settings(agent_default='claude', agent_overrides={'/tmp/g': 'grok'})
-    row = _make_row_with_settings(s, path='/tmp/g')
-    assert row._adapter().id == 'grok'
-    assert 'Model' in _menu_labels(row)
-    assert row._arrow.get_visible() is True
-
-
-def test_f9_settings_threaded_into_get_adapter(monkeypatch):
-    """F9 / T-B4: the sidebar's get_adapter call now passes settings, so a
-    named-but-missing agent gates on the M-P3.2 fallback (agent_default →
-    first-available), NOT a hardcoded claude.
-
-    Modelled against a claude-LESS fleet so 'falls back to the configured
-    default' is provably the mechanism: agent_default=grok + a bogus override →
-    the row resolves to grok (the default), not claude. Without threading
-    settings, get_adapter('bogus') would return the legacy claude default and
-    this would fail."""
-    import agents
-    from settings import Settings
-    # Snapshot/restore ADAPTERS so the claude-less fleet doesn't leak.
-    saved = dict(agents.ADAPTERS)
-    try:
-        s = Settings(agent_default='grok', agent_overrides={'/tmp/p': 'bogus'})
-        row = _make_row_with_settings(s, path='/tmp/p')
-        # effective agent for the project is the bogus override...
-        assert s.effective_agent('/tmp/p') == 'bogus'
-        # ...but the row's adapter is the settings-aware fallback: grok (the
-        # configured default), never a hardcoded claude.
-        assert row._adapter().id == 'grok'
-    finally:
-        agents.ADAPTERS.clear()
-        agents.ADAPTERS.update(saved)
-
-
-def test_f9_settings_threaded_first_available_when_default_also_bogus(monkeypatch):
-    """F9: agent_default ALSO bogus → first-available registered adapter (still
-    settings-aware, proven against a fleet with claude removed)."""
-    import agents
-    from settings import Settings
-    saved = dict(agents.ADAPTERS)
-    try:
-        # Remove claude so 'first-available' is provably opencode, not claude.
-        opencode = saved['opencode']
-        agents.ADAPTERS.clear()
-        agents.ADAPTERS['opencode'] = opencode
-        agents.ADAPTERS.update({k: v for k, v in saved.items()
-                                if k not in ('opencode', 'claude')})
-        s = Settings(agent_default='alsobogus', agent_overrides={'/tmp/p': 'bogus'})
-        row = _make_row_with_settings(s, path='/tmp/p')
-        assert row._adapter().id == 'opencode'  # first-available, NOT claude
-    finally:
-        agents.ADAPTERS.clear()
-        agents.ADAPTERS.update(saved)
-
-
-def test_agent_submenu_present_in_menu():
-    from settings import Settings
-    row = _make_row_with_settings(Settings())
-    assert 'Agent' in _menu_labels(row)
-
-
-def test_agent_radio_reflects_override():
-    from settings import Settings
-    s = Settings(agent_default='claude', agent_overrides={'/tmp/p': 'opencode'})
-    row = _make_row_with_settings(s, path='/tmp/p')
-    assert row._agent_action.get_state().get_string() == 'opencode'
-
-
-def test_agent_radio_follow_default_when_no_override():
-    from models import FOLLOW_DEFAULT
-    from settings import Settings
-    row = _make_row_with_settings(Settings(agent_default='opencode'), path='/tmp/p')
-    assert row._agent_action.get_state().get_string() == FOLLOW_DEFAULT
-
-
-def test_agent_select_emits_change_signal():
-    from settings import Settings
-    from gi.repository import GLib
-    row = _make_row_with_settings(Settings(), path='/tmp/p')
-    got = []
-    row.connect('project-agent-change', lambda r, aid: got.append(aid))
-    row._on_agent_select(row._agent_action, GLib.Variant('s', 'opencode'))
-    assert got == ['opencode']
-    assert row._agent_action.get_state().get_string() == 'opencode'
+def _providers(**names):
+    """Build a providers dict where each provider name maps to a minimal entry
+    with an empty model list (the new shape: models is a LIST)."""
+    return {pid: {'name': name, 'base_url': '', 'api_key': '', 'models': []}
+            for pid, name in names.items()}
 
 
 def test_subtitle_hidden_for_plain_default():
-    """Default agent + native model → no subtitle clutter."""
+    """Native provider (no pin) + no running session → no subtitle clutter."""
     from settings import Settings
-    row = _make_row_with_settings(Settings(agent_default='claude'), path='/tmp/p')
+    row = _make_row_with_settings(Settings(), path='/tmp/p')
     assert row._subtitle_label.get_visible() is False
 
 
-def test_subtitle_shows_non_default_agent():
+def test_subtitle_shows_harness_and_provider_when_pinned():
+    """A pinned provider → '<HarnessDisplay> · <ProviderLabel>'."""
     from settings import Settings
-    s = Settings(agent_default='claude', agent_overrides={'/tmp/p': 'opencode'})
+    s = Settings(model_default='ollama',
+                 providers=_providers(ollama='Ollama'))
     row = _make_row_with_settings(s, path='/tmp/p')
     assert row._subtitle_label.get_visible() is True
-    assert 'opencode' in row._subtitle_label.get_text()
+    assert row._subtitle_label.get_text() == 'Claude Code · Ollama'
 
 
-def test_subtitle_shows_agent_and_model():
+def test_subtitle_per_project_override_uses_that_provider_label():
+    """A per-project provider override shows THAT provider's label, not the
+    global default's (effective_provider resolves per-row)."""
     from settings import Settings
-    s = Settings(agent_default='opencode',
-                 model_overrides={'/tmp/p': 'ollama/qwen3.5:cloud'})
+    s = Settings(model_default='ollama',
+                 model_overrides={'/tmp/p': 'openrouter'},
+                 providers=_providers(ollama='Ollama', openrouter='OpenRouter'))
     row = _make_row_with_settings(s, path='/tmp/p')
-    assert row._subtitle_label.get_visible() is True
-    txt = row._subtitle_label.get_text()
-    assert 'opencode' in txt and 'ollama/qwen3.5:cloud' in txt
+    assert row._subtitle_label.get_text() == 'Claude Code · OpenRouter'
 
 
 # ===========================================================================
 # P3.5d Item 1 (FINDING 3 / C5): the subtitle tells the truth about NOW.
-# A restored saved-agent-wins session (A2) can RUN a different agent than the
-# one configured for the next session; the subtitle must lead with what is
-# actually running. T1 = the mismatch string verbatim; T2 = byte-identical
-# golden when running == configured (the pin that breaks if we always show the
-# running form); T3 = no live session → today's string; T4 = model suffix in
-# both shapes.
+# With a single harness the mismatch branch is unreachable in practice, but the
+# defensive guard is pinned: a live child running a different harness than
+# configured leads with what is ACTUALLY running. set_running_agent(None)
+# restores the configured-only subtitle.
 # ===========================================================================
 
 def test_subtitle_running_agent_mismatch_leads_with_running():
-    """T1: live child runs grok while the row is configured for opencode →
-    '<Running> (next: <Configured>)'. Reverting the running-first builder (always
-    showing the configured agent) yields 'opencode' and FAILS this."""
+    """T1: live child runs a different harness than configured (always claude)
+    → '<Running> (next: <Configured>)' + the provider suffix. _harness_display
+    falls back to the raw id for an unregistered harness."""
     from settings import Settings
-    s = Settings(agent_default='claude', agent_overrides={'/tmp/p': 'opencode'})
-    row = _make_row_with_settings(s, path='/tmp/p')
-    row.set_running_agent('grok')
-    assert row._subtitle_label.get_visible() is True
-    assert row._subtitle_label.get_text() == 'Grok Build (next: opencode)'
-
-
-def test_subtitle_running_equals_configured_is_byte_identical():
-    """T2 (GOLDEN pin): running == configured → today's exact string, byte for
-    byte. If the builder ALWAYS rendered the running-first form this would read
-    'opencode (next: opencode)' and FAIL."""
-    from settings import Settings
-    s = Settings(agent_default='claude', agent_overrides={'/tmp/p': 'opencode'})
-    # Baseline: no running agent → today's string.
-    baseline = _make_row_with_settings(s, path='/tmp/p')
-    golden = baseline._subtitle_label.get_text()
-    assert golden == 'opencode'
-    # Running agent EQUALS the configured one → identical to the baseline.
+    s = Settings(model_default='ollama',
+                 providers=_providers(ollama='Ollama'))
     row = _make_row_with_settings(s, path='/tmp/p')
     row.set_running_agent('opencode')
-    assert row._subtitle_label.get_text() == golden
-    assert row._subtitle_label.get_text() == 'opencode'
-
-
-def test_subtitle_no_running_session_is_todays_string():
-    """T3: no live session (running is None) → today's string unchanged, and a
-    plain default row stays clean (no subtitle)."""
-    from settings import Settings
-    # Non-default agent, no running session → shows the configured agent.
-    s = Settings(agent_default='claude', agent_overrides={'/tmp/p': 'opencode'})
-    row = _make_row_with_settings(s, path='/tmp/p')
-    assert row._running_agent is None
-    assert row._subtitle_label.get_text() == 'opencode'
-    # Plain default + no model + no running session → hidden (clean).
-    plain = _make_row_with_settings(Settings(agent_default='claude'), path='/tmp/q')
-    assert plain._subtitle_label.get_visible() is False
-
-
-def test_subtitle_model_suffix_preserved_in_both_shapes():
-    """T4: the ' · <model>' suffix is preserved in BOTH the byte-identical shape
-    and the running-mismatch shape."""
-    from settings import Settings
-    s = Settings(agent_default='claude',
-                 agent_overrides={'/tmp/p': 'opencode'},
-                 model_overrides={'/tmp/p': 'ollama/qwen3.5:cloud'})
-    # No mismatch → today's 'agent · model' shape, byte-identical.
-    matched = _make_row_with_settings(s, path='/tmp/p')
-    assert matched._subtitle_label.get_text() == 'opencode · ollama/qwen3.5:cloud'
-    # Mismatch → running-first head, model suffix still appended.
-    row = _make_row_with_settings(s, path='/tmp/p')
-    row.set_running_agent('grok')
-    assert (row._subtitle_label.get_text()
-            == 'Grok Build (next: opencode) · ollama/qwen3.5:cloud')
+    assert row._subtitle_label.get_visible() is True
+    assert row._subtitle_label.get_text() == 'opencode (next: Claude Code) · Ollama'
 
 
 def test_subtitle_mismatch_overrides_clean_default_hide():
-    """C5 corollary: a default-configured row (normally hidden) still shows the
-    truth when a live child runs a NON-default agent."""
+    """C5 corollary: a native (normally hidden) row still shows the truth when a
+    live child runs a non-default harness (no provider → no suffix)."""
     from settings import Settings
-    s = Settings(agent_default='claude')          # default → normally hidden
+    s = Settings()                       # native default → normally hidden
     row = _make_row_with_settings(s, path='/tmp/p')
-    assert row._subtitle_label.get_visible() is False   # clean while idle
-    row.set_running_agent('grok')                  # live child runs grok
+    assert row._subtitle_label.get_visible() is False
+    row.set_running_agent('opencode')    # live child runs a different harness
     assert row._subtitle_label.get_visible() is True
-    assert row._subtitle_label.get_text() == 'Grok Build (next: Claude Code)'
+    assert row._subtitle_label.get_text() == 'opencode (next: Claude Code)'
 
 
 def test_set_running_agent_none_restores_clean_subtitle():
     """Clearing the running agent (session ended) restores the configured-only
     subtitle — the mismatch form is gone."""
     from settings import Settings
-    s = Settings(agent_default='claude', agent_overrides={'/tmp/p': 'opencode'})
+    s = Settings(model_default='ollama',
+                 providers=_providers(ollama='Ollama'))
     row = _make_row_with_settings(s, path='/tmp/p')
-    row.set_running_agent('grok')
-    assert row._subtitle_label.get_text() == 'Grok Build (next: opencode)'
+    row.set_running_agent('opencode')
+    assert 'opencode' in row._subtitle_label.get_text()
     row.set_running_agent(None)
-    assert row._subtitle_label.get_text() == 'opencode'
+    assert row._subtitle_label.get_text() == 'Claude Code · Ollama'
 
 
 def test_sidebar_set_running_agent_unknown_path_is_noop():
@@ -458,7 +314,7 @@ def test_sidebar_set_running_agent_unknown_path_is_noop():
 
     sb = Sidebar(_EmptyStore(), HistoryReader(), StatusWatcher(),
                  settings=Settings())
-    sb.set_running_agent('/no/such/path', 'grok')   # must be a silent no-op
+    sb.set_running_agent('/no/such/path', 'opencode')   # must be a silent no-op
 
 
 def test_new_session_signal_rename():
@@ -502,8 +358,8 @@ def test_attached_idle_dot_remaps_to_done_for_rich_status_true(monkeypatch):
 class _ExplodingCapsAdapter:
     """Caps access can be made to raise AFTER construction — exercises the
     dot path's never-throw fallback without breaking _apply_caps at init."""
-    id = 'fake'
-    display_name = 'Fake (exploding caps)'
+    id = 'claude'
+    display_name = 'Claude Code'
 
     def __init__(self, caps):
         self._caps = caps
@@ -528,10 +384,11 @@ def test_attached_dot_survives_adapter_resolution_failure(monkeypatch):
     from sidebar import ProjectRow
     adapter = _ExplodingCapsAdapter(
         agents.AgentCaps(continue_=True, rich_status=False))
-    monkeypatch.setitem(agents.ADAPTERS, 'fake', adapter)
+    # Swap claude for the exploding adapter so the row resolves to it.
+    monkeypatch.setitem(agents.ADAPTERS, 'claude', adapter)
     row = ProjectRow(Project(name='test', path='/tmp/test'),
                      HistoryReader(), StatusWatcher(),
-                     settings=Settings(agent_default='fake'))
+                     settings=Settings())
     adapter.explode = True
     row.set_process_state('attached')   # must not raise
     assert row._status_dot.has_css_class('status-done')
@@ -583,9 +440,44 @@ def _find_button_with_tooltip(widget, tooltip):
 
 
 # ===========================================================================
-# P3.5e FB-1a: the per-project Model submenu lists the EFFECTIVE agent's
-# NATIVE models (grok config keys / opencode provider-model ids), not the
-# ccr/providers list. claude submenu stays byte-identical to today.
+# P3.5f (C2, David's second reveal): the "Default (…)" label is PER-ROW —
+# computed from THIS row's effective provider, not the single global label
+# the window pushes (which a per-project-override row would wear as the global
+# default's story).
+# ===========================================================================
+
+def test_override_row_default_label_is_per_row_not_global():
+    """BINDING (P3.5f / C2): on an ollama-default bench, a project that OVERRIDES
+    its provider to openrouter shows a 'Default (…)' label that tells
+    OpenRouter's story — NOT the global ollama default's 'Ollama' story, even
+    though the window pushes that ollama label as global_label. The row derives
+    its OWN label from its effective provider."""
+    from settings import Settings
+    from models import FOLLOW_DEFAULT, NATIVE_LABEL, build_provider_options
+    providers = _providers(ollama='Ollama', openrouter='OpenRouter')
+    s = Settings(model_default='ollama',
+                 model_overrides={'/tmp/p': 'openrouter'},
+                 providers=providers)
+    row = _make_row_with_settings(s, path='/tmp/p')
+    # The window pushes the OLLAMA global label (what _refresh_sidebar_models
+    # computes from model_default=ollama) — the row must NOT wear it.
+    options = list(zip(*build_provider_options(providers)))
+    row.set_model_options(options, FOLLOW_DEFAULT, 'Ollama')
+    labels = _model_submenu_labels(row)
+    default_lbls = [l for l in labels if l.startswith('Default (')]
+    assert len(default_lbls) == 1
+    default_lbl = default_lbls[0]
+    # Tells OpenRouter's story (THIS row's effective provider), NOT the global
+    # ollama default's.
+    assert 'OpenRouter' in default_lbl
+    assert 'Ollama' not in default_lbl
+
+
+# ===========================================================================
+# G1 (reveal-3 item 1, C2/C4): the Model submenu must not offer the same
+# choice twice. A provider option whose LABEL restates the Default story is a
+# redundant pin the user hasn't taken — suppress it UNLESS it is the live
+# selection (a pin the user DID take stays visible and checked).
 # ===========================================================================
 
 def _model_submenu_labels(row):
@@ -609,104 +501,6 @@ def _model_submenu_targets(row):
     return out
 
 
-def test_grok_project_model_submenu_lists_native_models(tmp_path, monkeypatch):
-    """BINDING (FB-1a): a grok project's Model submenu contains pool-qwen — the
-    config KEY — and offering it as the set-model target (the -m value). The ccr
-    providers list is NOT what's shown."""
-    import agent_configs
-    from settings import Settings
-    cfg = tmp_path / 'config.toml'
-    cfg.write_text(_read_fixture('grok', 'config.toml'))
-    monkeypatch.setattr(agent_configs, 'GROK_CONFIG_PATH', str(cfg))
-    from models import FOLLOW_DEFAULT, NATIVE_LABEL
-    s = Settings(agent_default='grok')
-    row = _make_row_with_settings(s, path='/tmp/grokproj')
-    # The sidebar pushes the ccr/providers option list; a grok row REPLACES it
-    # with grok's native models (this is what window._refresh_sidebar_models
-    # drives for every row).
-    row.set_model_options([('openrouter/foo', 'OpenRouter — Foo')],
-                          FOLLOW_DEFAULT, NATIVE_LABEL)
-    labels = _model_submenu_labels(row)
-    targets = _model_submenu_targets(row)
-    assert any('pool-qwen' in lbl for lbl in labels)
-    assert 'pool-qwen' in targets   # the exact -m value GrokAdapter passes
-    assert 'grok-4' in targets
-    # The ccr option did NOT survive — the native list replaced it.
-    assert 'openrouter/foo' not in targets
-
-
-def test_claude_project_model_submenu_lists_ccr_options_unchanged(tmp_path):
-    """REGRESSION (FB-1a): a claude project's submenu is the ccr/providers list —
-    byte-identical to before (native resolution returns None for claude)."""
-    from settings import Settings
-    from models import FOLLOW_DEFAULT, NATIVE_LABEL
-    s = Settings(agent_default='claude')
-    row = _make_row_with_settings(s, path='/tmp/claudeproj')
-    # Push a ccr option list; for claude it must be shown verbatim.
-    row.set_model_options([('openrouter/foo', 'OpenRouter — Foo')],
-                          FOLLOW_DEFAULT, NATIVE_LABEL)
-    targets = _model_submenu_targets(row)
-    assert 'openrouter/foo' in targets
-    # No grok/opencode native keys leak in.
-    assert 'pool-qwen' not in targets
-
-
-def test_claude_override_row_default_label_is_per_row_not_global(tmp_path, monkeypatch):
-    """BINDING (P3.5f / C2, David's second reveal): on a grok-default bench, a
-    project that OVERRIDES its agent to claude shows a 'Default (…)' label that
-    tells CLAUDE's story — NOT the global grok default's 'Grok Build' story, even
-    though the window pushes that grok label as global_label. The row derives its
-    OWN label from its effective agent."""
-    import agent_configs
-    from settings import Settings
-    cfg = tmp_path / 'config.toml'
-    cfg.write_text(_read_fixture('grok', 'config.toml'))
-    monkeypatch.setattr(agent_configs, 'GROK_CONFIG_PATH', str(cfg))
-    from models import FOLLOW_DEFAULT, NATIVE_LABEL
-    # Global default is grok; THIS project overrides to claude.
-    s = Settings(agent_default='grok',
-                 agent_overrides={'/tmp/claudeoverride': 'claude'})
-    row = _make_row_with_settings(s, path='/tmp/claudeoverride')
-    # The window pushes the GROK global label (what _refresh_sidebar_models
-    # computes from agent_default=grok) — the row must NOT wear it.
-    grok_global = agent_configs.default_model_label(s, home=str(tmp_path.parent))
-    row.set_model_options([('openrouter/foo', 'OpenRouter — Foo')],
-                          FOLLOW_DEFAULT, grok_global)
-    labels = _model_submenu_labels(row)
-    default_lbls = [l for l in labels if l.startswith('Default (')]
-    assert len(default_lbls) == 1
-    default_lbl = default_lbls[0]
-    # Tells claude's native story, NOT the grok default's.
-    assert NATIVE_LABEL in default_lbl
-    assert 'Grok Build' not in default_lbl
-
-
-def test_grok_row_default_label_keeps_grok_story(tmp_path, monkeypatch):
-    """REGRESSION (P3.5f / C2): a grok project on a grok bench still shows grok's
-    Default label — the per-row resolver did not regress the grok story."""
-    import agent_configs
-    from settings import Settings
-    cfg = tmp_path / 'config.toml'
-    cfg.write_text(_read_fixture('grok', 'config.toml'))
-    monkeypatch.setattr(agent_configs, 'GROK_CONFIG_PATH', str(cfg))
-    from models import FOLLOW_DEFAULT, NATIVE_LABEL
-    s = Settings(agent_default='grok')
-    row = _make_row_with_settings(s, path='/tmp/grokproj')
-    row.set_model_options([('openrouter/foo', 'OpenRouter — Foo')],
-                          FOLLOW_DEFAULT, NATIVE_LABEL)
-    labels = _model_submenu_labels(row)
-    default_lbls = [l for l in labels if l.startswith('Default (')]
-    assert len(default_lbls) == 1
-    assert 'Grok Build' in default_lbls[0]
-
-
-# ===========================================================================
-# G1 (reveal-3 item 1, C2/C4): the Model submenu must not offer the same
-# choice twice. A native option whose LABEL restates the Default story is a
-# redundant pin the user hasn't taken — suppress it UNLESS it is the live
-# selection (a pin the user DID take stays visible and checked).
-# ===========================================================================
-
 def _model_submenu_targets_all(row):
     """Like _model_submenu_targets but None-safe: the native sentinel's target
     is the EMPTY string '', whose GLib.Variant is falsy — the `if v` form above
@@ -720,19 +514,17 @@ def _model_submenu_targets_all(row):
     return out
 
 
-def test_g1a_claude_no_providers_default_native_dedups(monkeypatch):
-    """T-G1a (the verbatim repro): claude effective agent, NO providers, global
-    default native, current=FOLLOW_DEFAULT → the submenu contains EXACTLY one
-    item, 'Default (Anthropic (native Claude))'. The bare native sentinel that
-    duplicated the Default story is gone. Reverting the suppression FAILS here
-    (the bare 'Anthropic (native Claude)' entry reappears)."""
-    import agent_configs
+def test_g1a_no_providers_default_native_dedups():
+    """T-G1a (the verbatim repro): no providers, global default native,
+    current=FOLLOW_DEFAULT → the submenu contains EXACTLY one item,
+    'Default (Anthropic (native))'. The bare native sentinel that duplicated the
+    Default story is gone. Reverting the suppression FAILS here (the bare
+    'Anthropic (native)' entry reappears)."""
     from settings import Settings
-    from models import FOLLOW_DEFAULT, NATIVE_LABEL, build_model_options
-    # claude default, no providers → ccr option list is just the native sentinel.
-    s = Settings(agent_default='claude', providers={})
-    ids, labels = build_model_options(s.providers)
-    options = list(zip(ids, labels))           # [('', 'Anthropic (native Claude)')]
+    from models import FOLLOW_DEFAULT, NATIVE_LABEL, build_provider_options
+    s = Settings(providers={})
+    ids, labels = build_provider_options(s.providers)
+    options = list(zip(ids, labels))           # [('', 'Anthropic (native)')]
     assert options == [('', NATIVE_LABEL)]
     row = _make_row_with_settings(s, path='/tmp/claudeproj')
     row.set_model_options(options, FOLLOW_DEFAULT, NATIVE_LABEL)
@@ -748,41 +540,41 @@ def test_g1b_providers_native_suppressed_provider_entries_intact():
     provider entries; the native sentinel (whose label == the Default story) is
     suppressed; the provider entries survive intact."""
     from settings import Settings
-    from models import FOLLOW_DEFAULT, NATIVE_LABEL, build_model_options
+    from models import FOLLOW_DEFAULT, NATIVE_LABEL, build_provider_options
     providers = {
         'openrouter': {'name': 'OpenRouter', 'base_url': '', 'api_key': '',
-                       'models': {'foo': {'name': 'Foo'}}},
+                       'models': []},
     }
-    s = Settings(agent_default='claude', providers=providers)
-    options = [(i, l) for i, l in zip(*build_model_options(s.providers))]
+    s = Settings(providers=providers)
+    options = [(i, l) for i, l in zip(*build_provider_options(s.providers))]
     row = _make_row_with_settings(s, path='/tmp/claudeproj')
     row.set_model_options(options, FOLLOW_DEFAULT, NATIVE_LABEL)
     targets = _model_submenu_targets(row)
     labels = _model_submenu_labels(row)
     # native sentinel ('') suppressed; provider entry intact.
     assert '' not in targets
-    assert 'openrouter/foo' in targets
+    assert 'openrouter' in targets
     assert NATIVE_LABEL not in labels        # only inside the 'Default (…)' label
     assert labels[0] == f'Default ({NATIVE_LABEL})'
 
 
-def test_g1c_default_is_provider_model_native_sentinel_present():
-    """T-G1c: the Default story resolves to a PROVIDER model's label → the native
+def test_g1c_default_is_provider_label_native_sentinel_present():
+    """T-G1c: the Default story resolves to a PROVIDER's label → the native
     sentinel no longer duplicates and IS present; the provider entry whose label
     equals the Default story is the one suppressed.
 
     Uses a settings-less row so the row's Default label is exactly the pushed
-    ``global_label`` (a claude-settings row always tells the native story per
-    P3.5f, which would re-suppress the native sentinel — not the case under
-    test). build_model_options gives the native sentinel + the provider entry."""
-    from models import FOLLOW_DEFAULT, NATIVE_LABEL, build_model_options
+    ``global_label`` (a settings row resolves per-row to its effective provider,
+    which would re-suppress a different entry — not the case under test).
+    build_provider_options gives the native sentinel + the provider entry."""
+    from models import FOLLOW_DEFAULT, NATIVE_LABEL, build_provider_options
     providers = {
         'openrouter': {'name': 'OpenRouter', 'base_url': '', 'api_key': '',
-                       'models': {'foo': {'name': 'Foo'}}},
+                       'models': []},
     }
-    options = [(i, l) for i, l in zip(*build_model_options(providers))]
-    story = 'OpenRouter — Foo'                 # the global default's resolved label
-    row = _make_row()                          # no settings → Default label == global_label
+    options = [(i, l) for i, l in zip(*build_provider_options(providers))]
+    story = 'OpenRouter'                     # the global default's resolved label
+    row = _make_row()                        # no settings → Default label == global_label
     row.set_model_options(options, FOLLOW_DEFAULT, story)
     targets = _model_submenu_targets_all(row)
     labels = _model_submenu_labels(row)
@@ -790,7 +582,7 @@ def test_g1c_default_is_provider_model_native_sentinel_present():
     assert '' in targets
     assert NATIVE_LABEL in labels
     # The provider entry whose label == the Default story is suppressed.
-    assert 'openrouter/foo' not in targets
+    assert 'openrouter' not in targets
     assert labels[0] == f'Default ({story})'
 
 
@@ -799,22 +591,15 @@ def test_g1d_live_pin_to_suppressed_id_stays_present_and_checked():
     PRESENT and the action state points at it — a pin the user took must stay
     visible and checked, never silently dropped."""
     from settings import Settings
-    from models import NATIVE_LABEL, build_model_options
-    s = Settings(agent_default='claude', providers={})
-    options = list(zip(*build_model_options(s.providers)))  # [('', NATIVE_LABEL)]
+    from models import NATIVE_LABEL, build_provider_options
+    s = Settings(providers={})
+    options = list(zip(*build_provider_options(s.providers)))  # [('', NATIVE_LABEL)]
     row = _make_row_with_settings(s, path='/tmp/claudeproj')
     # current pinned to '' (the native sentinel that equals the Default story).
     row.set_model_options(options, '', NATIVE_LABEL)
     targets = _model_submenu_targets_all(row)
     assert '' in targets                      # the pinned entry survives
     assert row._model_action.get_state().get_string() == ''  # and is the active state
-
-
-def _read_fixture(*parts):
-    import os
-    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')
-    with open(os.path.join(base, *parts)) as f:
-        return f.read()
 
 
 # ===========================================================================

@@ -6,6 +6,11 @@ from dataclasses import dataclass, asdict, field
 
 DEFAULT_SETTINGS_PATH = os.path.expanduser('~/.ProjectMan/settings.json')
 
+# The four Claude Code model tiers. PM can pin each independently to any model
+# defined on the active provider (free-text ids), or leave a tier on '' to use
+# the provider's first/default model. See models.build_spawn_env.
+TIERS = ('opus', 'sonnet', 'haiku', 'subagent')
+
 
 @dataclass
 class Settings:
@@ -32,27 +37,28 @@ class Settings:
     paa_stale_days: int = 60
     ntfy_enabled: bool = False
     ntfy_topic: str = ''
-    # --- Model-agnostic / claude-code-router (ccr) ---
+    # --- Model layer (Claude-Only + first-class model axis, 2026-06) ---
     # providers: {provider_id: {"name": str, "base_url": str, "api_key": str,
-    #                           "transformer": str|None,
-    #                           "models": {model_id: {"name": str}}}}
+    #                           "models": [str, ...]}}
+    #   ``models`` is a LIST of free-text model-id strings (CC strips a trailing
+    #   ``[1m]`` itself, so ids like ``glm-5.2:cloud[1m]`` are valid verbatim).
     providers: dict = field(default_factory=dict)
-    model_default: str = ''      # '' = Anthropic native; else 'provider_id/model_id'
-    # model_overrides: {project_path: 'provider_id/model_id' | ''}
+    # model_default: provider_id | ''  — '' = Anthropic (native). The active
+    # provider whose base_url receives every tier's model id (CC's
+    # ANTHROPIC_BASE_URL is process-wide, so a session mixes model NAMES across
+    # tiers but never providers).
+    model_default: str = ''
+    # model_overrides: {project_path: provider_id | ''}  — per-project provider
+    # override ('' pins that project to native; absent = follow model_default).
     model_overrides: dict = field(default_factory=dict)
-    ccr_managed: bool = True
-    ccr_host: str = '127.0.0.1'
-    ccr_port: int = 3456
-    ccr_api_key: str = ''        # ccr APIKEY + injected auth token; auto-minted if blank
-    ccr_binary: str = ''
-    # --- Agent-agnostic ---
-    # agents: {agent_id: {"binary": str, ...}}. claude_binary migrates into
-    #         agents['claude']['binary'] on load; the old key stays honored
-    #         when agents is absent (existing user files load unchanged).
+    # tier_models: {tier: model_id | ''}  — global per-tier assignment against the
+    # active provider's model list. '' = use the provider's first model.
+    tier_models: dict = field(default_factory=dict)
+    # --- Harness binary ---
+    # Claude Code is the sole harness. agents['claude']['binary'] is the live
+    # value; the legacy ``claude_binary`` key is kept as a fallback for older
+    # settings files (mirrored on load by _migrate_claude_binary).
     agents: dict = field(default_factory=dict)
-    agent_default: str = 'claude'        # global default agent id
-    # agent_overrides: {project_path: agent_id}
-    agent_overrides: dict = field(default_factory=dict)
 
     @property
     def resolved_projects_dir(self) -> str:
@@ -70,44 +76,45 @@ class Settings:
         return self.claude_binary.strip() or 'claude'
 
     def effective_agent(self, project_path: str = '') -> str:
-        """Return the agent id for a project (mirrors ``effective_model``).
+        """Return the harness id for a project.
 
-        A per-project override takes precedence over the global default. An
-        override stored as '' means 'use the default', not 'no agent'.
+        Claude Code is the sole harness, so this is always ``'claude'``. Kept as
+        a method (not a constant) so terminal.py/window.py/sidebar.py callers
+        keep working unchanged — the agent concept is renamed "harness" in
+        user-facing UI, but the Python symbol stays (don't rename symbols).
         """
-        if project_path and project_path in self.agent_overrides:
-            return self.agent_overrides[project_path] or self.agent_default
-        return self.agent_default
+        return 'claude'
 
-    @property
-    def resolved_ccr_binary(self) -> str:
-        return (self.ccr_binary or '').strip() or 'ccr'
-
-    def effective_model(self, project_path: str = '') -> str:
-        """Return the 'provider/model' id for a project ('' = Anthropic native).
+    def effective_provider(self, project_path: str = '') -> str:
+        """Return the active provider_id for a project ('' = Anthropic native).
 
         A per-project override takes precedence over the global default. An
-        override stored as '' explicitly pins that project to native Claude.
+        override stored as '' explicitly pins that project to native.
         """
         if project_path and project_path in self.model_overrides:
             return self.model_overrides[project_path] or ''
         return self.model_default or ''
 
-    def uses_custom_model(self, project_path: str = '') -> bool:
-        """True if the effective model for this project needs ccr."""
-        model = self.effective_model(project_path)
-        if not model or '/' not in model:
+    def uses_custom_provider(self, project_path: str = '') -> bool:
+        """True if the effective provider for this project has a base_url
+        (i.e. spawn needs env injection rather than native Anthropic)."""
+        pid = self.effective_provider(project_path)
+        if not pid:
             return False
-        provider = model.split('/', 1)[0]
-        return provider in self.providers
+        prov = self.providers.get(pid) if isinstance(self.providers, dict) else None
+        return isinstance(prov, dict) and bool(prov.get('base_url'))
 
-    def any_custom_model_active(self) -> bool:
-        """True if the global default or any per-project override needs ccr."""
+    def any_custom_provider_active(self) -> bool:
+        """True if the global default or any per-project override names a
+        provider that has a base_url (env injection will run on its spawns)."""
         candidates = [self.model_default]
-        candidates.extend(self.model_overrides.values())
-        for model in candidates:
-            if model and '/' in model and model.split('/', 1)[0] in self.providers:
-                return True
+        if isinstance(self.model_overrides, dict):
+            candidates.extend(self.model_overrides.values())
+        for pid in candidates:
+            if pid and isinstance(self.providers, dict):
+                prov = self.providers.get(pid)
+                if isinstance(prov, dict) and prov.get('base_url'):
+                    return True
         return False
 
     @classmethod
@@ -121,6 +128,7 @@ class Settings:
                      if k in cls.__dataclass_fields__}
             inst = cls(**known)
             inst._migrate_claude_binary()
+            inst._migrate_old_model_shape()
             return inst
         except FileNotFoundError:
             # FB-7 (power #2): on a genuine first run (no settings.json yet),
@@ -158,6 +166,87 @@ class Settings:
             self.agents['claude'] = claude_cfg
         if not (claude_cfg.get('binary') or '').strip():
             claude_cfg['binary'] = legacy
+
+    def _migrate_old_model_shape(self) -> None:
+        """Migrate the pre-pivot model layer to the new provider-axis shape.
+
+        Pre-pivot (removed in the Claude-Only pivot):
+          * providers[*]['models'] was a dict ``{model_id: {"name": str}}`` with
+            a sibling ``transformer``; now ``models`` is a list of free-text
+            strings and ``transformer`` is gone.
+          * model_default / model_overrides held ``'provider/model'`` strings;
+            now they hold bare provider ids ('' = native).
+          * tier_models did not exist; a pre-pivot ``'provider/model'`` default
+            is split into ``model_default=provider`` + a global tier pin.
+          * ccr_* / agent_default / agent_overrides fields existed; they are no
+            longer dataclass fields, so the ``known``-field filter already
+            dropped them — nothing to do here for those.
+
+        Defensive throughout: a malformed old shape degrades to the new default
+        for that field rather than raising. Idempotent: a file already in the
+        new shape passes through unchanged.
+        """
+        if not isinstance(self.providers, dict):
+            self.providers = {}
+        for pid, prov in list(self.providers.items()):
+            if not isinstance(prov, dict):
+                continue
+            models = prov.get('models')
+            if isinstance(models, dict):
+                # Old shape: {model_id: {"name": str}} → [model_id, ...].
+                prov['models'] = list(models.keys())
+            elif isinstance(models, list):
+                prov['models'] = [str(m) for m in models]
+            elif models is None:
+                prov['models'] = []
+            else:
+                prov['models'] = []
+            prov.pop('transformer', None)
+
+        # model_default: 'provider/model' → provider; ''/bare-id stay.
+        if isinstance(self.model_default, str) and '/' in self.model_default:
+            pid, mid = self.model_default.split('/', 1)
+            self.model_default = pid
+            if not isinstance(self.tier_models, dict):
+                self.tier_models = {}
+            for tier in TIERS:
+                self.tier_models.setdefault(tier, mid)
+        elif not isinstance(self.model_default, str):
+            self.model_default = ''
+
+        # model_overrides: 'provider/model' → provider; '' stays; non-str dropped.
+        if isinstance(self.model_overrides, dict):
+            new_overrides = {}
+            for path, val in self.model_overrides.items():
+                if not isinstance(val, str):
+                    continue
+                new_overrides[path] = val.split('/', 1)[0] if '/' in val else val
+            self.model_overrides = new_overrides
+        else:
+            self.model_overrides = {}
+
+        # Scrub tier_models: only keep a value if it's a model on the active
+        # provider; otherwise reset to ''. Native (model_default=='') → all ''.
+        if not isinstance(self.tier_models, dict):
+            self.tier_models = {}
+        active_models = []
+        if self.model_default and isinstance(self.providers, dict):
+            prov = self.providers.get(self.model_default)
+            if isinstance(prov, dict):
+                active_models = [m for m in prov.get('models', [])
+                                 if isinstance(m, str)]
+        for tier in TIERS:
+            val = self.tier_models.get(tier, '')
+            if not isinstance(val, str):
+                self.tier_models[tier] = ''
+            elif val and val not in active_models:
+                self.tier_models[tier] = ''
+            else:
+                self.tier_models[tier] = val
+        # Drop any stray tier keys outside the canonical four.
+        for stray in list(self.tier_models.keys()):
+            if stray not in TIERS:
+                self.tier_models.pop(stray, None)
 
     def save(self, path: str | None = None) -> None:
         if path is None:
