@@ -6,7 +6,7 @@ gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib
 
 from settings import TIERS
-from models import build_provider_options, build_tier_options, apply_recommended_preset
+from models import build_provider_options, build_tier_options
 
 
 class SettingsWindow(Adw.PreferencesDialog):
@@ -623,19 +623,6 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._provider_combo.connect('notify::selected', self._on_default_provider_changed)
         self._active_provider_group.add(self._provider_combo)
 
-        # One-click load of the lab's known-good localhost ollama-pool mapping.
-        preset_row = Adw.ActionRow(
-            title='Recommended',
-            subtitle="Load the lab's localhost ollama pool — sets the default "
-                     'provider and assigns all four tiers (existing providers '
-                     'kept).')
-        preset_btn = Gtk.Button(label='Load recommended (localhost pool)')
-        preset_btn.add_css_class('suggested-action')
-        preset_btn.set_valign(Gtk.Align.CENTER)
-        preset_btn.connect('clicked', self._on_load_recommended_preset)
-        preset_row.add_suffix(preset_btn)
-        self._active_provider_group.add(preset_row)
-
         # -- Tier Assignments --
         self._tier_group = Adw.PreferencesGroup(
             title='Tier Assignments',
@@ -646,10 +633,17 @@ class SettingsWindow(Adw.PreferencesDialog):
         page.add(self._tier_group)
         self._tier_combos = {}
         for tier, label in (('opus', 'Opus'), ('sonnet', 'Sonnet'),
-                            ('haiku', 'Haiku'), ('subagent', 'Subagent')):
+                            ('haiku', 'Haiku'), ('subagent', 'Subagent'),
+                            ('fable', 'Fable (future?)')):
             combo = Adw.ComboRow(title=label)
             combo.connect('notify::selected',
                           lambda r, _p, t=tier: self._on_tier_changed(t, r))
+            if tier == 'fable':
+                # Forward-looking placeholder tier — CC has a Fable model but no
+                # documented per-tier default env var yet. Wired to the env like
+                # the others (build_spawn_env emits ANTHROPIC_DEFAULT_FABLE_MODEL)
+                # but not user-adjustable until CC honors it.
+                combo.set_sensitive(False)
             self._tier_group.add(combo)
             self._tier_combos[tier] = combo
 
@@ -721,7 +715,9 @@ class SettingsWindow(Adw.PreferencesDialog):
             self._suppress_combos = True
             combo.set_model(Gtk.StringList.new(labels))
             combo.set_selected(ids.index(val) if val in ids else 0)
-            combo.set_sensitive(active)
+            # Fable stays disabled (future placeholder) even when a provider is
+            # active; the other tiers follow the active/native gate.
+            combo.set_sensitive(active and tier != 'fable')
             self._suppress_combos = False
 
     def _rebuild_providers_group(self):
@@ -916,35 +912,6 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._settings.save()
         self._app.emit('settings-changed')
         self._refresh_models_page()
-
-    def _on_load_recommended_preset(self, button):
-        """Confirm, then upsert the localhost ollama-pool provider + tier mapping.
-
-        Overwrites the default provider and the four tier assignments; existing
-        providers are kept. The confirm dialog guards against surprising a user
-        who has hand-tuned their tiers.
-        """
-        dialog = Adw.AlertDialog.new(
-            'Load recommended preset?',
-            'Sets the default provider to the localhost ollama pool and '
-            'overwrites the four tier assignments. Existing providers are '
-            'kept. Continue?')
-        dialog.add_response('cancel', 'Cancel')
-        dialog.add_response('load', 'Load')
-        dialog.set_response_appearance('load', Adw.ResponseAppearance.SUGGESTED)
-        dialog.set_default_response('cancel')
-        dialog.set_close_response('cancel')
-
-        def on_response(d, response_id):
-            if response_id != 'load':
-                return
-            apply_recommended_preset(self._settings)
-            self._settings.save()
-            self._app.emit('settings-changed')
-            self._refresh_models_page()
-
-        dialog.connect('response', on_response)
-        dialog.present(self)
 
     # ------------------------------------------------------------------ #
     #  Extra Pages                                                         #

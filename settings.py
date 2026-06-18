@@ -6,10 +6,12 @@ from dataclasses import dataclass, asdict, field
 
 DEFAULT_SETTINGS_PATH = os.path.expanduser('~/.ProjectMan/settings.json')
 
-# The four Claude Code model tiers. PM can pin each independently to any model
+# The Claude Code model tiers. PM can pin each independently to any model
 # defined on the active provider (free-text ids), or leave a tier on '' to use
-# the provider's first/default model. See models.build_spawn_env.
-TIERS = ('opus', 'sonnet', 'haiku', 'subagent')
+# the provider's first/default model. See models.build_spawn_env. 'fable' is a
+# forward-looking placeholder tier (CC has a Fable model; a per-tier default env
+# var is not yet documented) — the Models tab shows it disabled as "(future?)".
+TIERS = ('opus', 'sonnet', 'haiku', 'subagent', 'fable')
 
 
 @dataclass

@@ -647,7 +647,7 @@ class TestCapsGatingContract:
 
     def test_low_caps_adapter_disables_gated_features(self):
         a = _FakeLowCapsAdapter()
-        assert a.caps.model_select is False   # → Model submenu hidden
+        assert a.caps.model_select is False   # → Provider submenu hidden
         assert a.caps.sessions is False        # → expander hidden
         assert a.caps.resume_by_id is False    # → no resume rows
 

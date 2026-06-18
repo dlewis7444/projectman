@@ -581,15 +581,15 @@ class ProjectRow(Gtk.ListBoxRow):
     def _apply_caps(self):
         """Show/hide caps-gated menu entries for the effective adapter (A5).
 
-        * Model submenu     — caps.model_select
+        * Provider submenu   — caps.model_select (the per-project provider picker)
         * History expander  — caps.sessions (the expand arrow + new-session row)
         * Session resume     — caps.resume_by_id (gated where the row is built)
 
         Idempotent: safe to call after construction and on every settings push.
         """
         caps = self._caps()
-        # Model submenu visibility.
-        self._set_menu_item_present('Model', caps.model_select,
+        # Provider submenu visibility (the per-project provider picker).
+        self._set_menu_item_present('Provider', caps.model_select,
                                     self._insert_model_submenu)
         # History expander: hide the arrow entirely when the agent can't
         # enumerate sessions, so there's no empty dropdown to open.
@@ -681,13 +681,13 @@ class ProjectRow(Gtk.ListBoxRow):
             self._rebuild_popover()
 
     def _insert_model_submenu(self):
-        """Re-attach the Model submenu (used by caps gating to restore it).
+        """Re-attach the Provider submenu (used by caps gating to restore it).
 
         Appended at the end on re-add (the initial build placed it mid-menu);
         the position only shifts on a low→high caps transition, which is rare
         and cosmetic.
         """
-        self._menu.append_submenu('Model', self._model_submenu)
+        self._menu.append_submenu('Provider', self._model_submenu)
 
     def _setup_context_menu(self):
         self._menu = Gio.Menu()
@@ -695,7 +695,7 @@ class ProjectRow(Gtk.ListBoxRow):
         self._menu.append('New Zellij Session', 'row.zellij')
         self._menu.append('Haiku Check',        'row.haiku-check')
         self._model_submenu = Gio.Menu()
-        self._menu.append_submenu('Model', self._model_submenu)
+        self._menu.append_submenu('Provider', self._model_submenu)
         self._menu.append('Rename',             'row.rename')
         self._menu.append('Archive',            'row.archive')
 

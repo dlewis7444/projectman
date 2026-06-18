@@ -47,7 +47,8 @@ def test_tier_models_roundtrip(tmp_path):
                  tier_models={'opus': 'b', 'sonnet': 'a', 'haiku': '', 'subagent': ''})
     s.save(path)
     s2 = Settings.load(path)
-    assert s2.tier_models == {'opus': 'b', 'sonnet': 'a', 'haiku': '', 'subagent': ''}
+    assert s2.tier_models == {'opus': 'b', 'sonnet': 'a', 'haiku': '',
+                              'subagent': '', 'fable': ''}
 
 
 def test_tier_models_only_canonical_keys_persisted(tmp_path):

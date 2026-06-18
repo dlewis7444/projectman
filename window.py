@@ -519,26 +519,25 @@ class AppWindow(Adw.ApplicationWindow):
                          timeout=0)
 
     def _handle_late_death(self, tv, status, path):
-        """FB-3 (C7): a child exited — surface it in the pane and never let the
-        ACTIVE project vanish.
+        """FB-3 (C7): a child exited — surface it in the pane.
 
-        (a) Feed a one-line 'session ended — exit <code>' banner into the pane
-            (display-only) so a late/external death doesn't leave a frozen,
-            unexplained terminal. The exit code is derived from the raw wait
-            status; an undecodable status falls back to the raw number.
-        (b) If the dying project is the ACTIVE/visible one, drop the Active Only
-            filter — you were looking at it; it must not disappear behind a
-            filter when it goes inactive. A BACKGROUND death does NOT touch the
-            filter (its row was already hidden by the user's own choice; the
-            toast/dedup paths are unchanged).
+        Feeds a one-line 'session ended — exit <code>' banner into the pane
+        (display-only) so a late/external death doesn't leave a frozen,
+        unexplained terminal. The exit code is derived from the raw wait
+        status; an undecodable status falls back to the raw number.
+
+        The Active Only filter is NOT touched here. An earlier version dropped
+        the filter when the active project died so its row wouldn't vanish
+        behind it — but that auto-toggled a filter the user had set, which was
+        worse (David 2026-06-18: closing a session should leave the filter
+        alone). The row going inactive hides as the filter intends; the user
+        toggles it off themselves.
         """
         try:
             code = os.waitstatus_to_exitcode(status)
         except (ValueError, ChildProcessError):
             code = status
         tv.feed_session_ended(code)
-        if path == self._active_path:
-            self._sidebar.set_active_only(False)
 
     def _show_provider_fallback_toast(self, project_name, reason):
         """Enqueue a fallback notice for aggregation; flush after a ~2s window.
@@ -661,8 +660,8 @@ class AppWindow(Adw.ApplicationWindow):
                 # No live child → no running agent; clear the C5 mismatch subtitle.
                 self._sidebar.set_running_agent(p, None)
                 # FB-3 (C7): a dying child must not leave a frozen, unexplained
-                # pane — feed a "session ended" banner — and the project you were
-                # LOOKING at must never vanish behind the Active Only filter.
+                # pane — feed a "session ended" banner. The Active Only filter
+                # is left untouched (see _handle_late_death).
                 self._handle_late_death(t, s, p)
 
             def _on_detached(t, p=project.path):

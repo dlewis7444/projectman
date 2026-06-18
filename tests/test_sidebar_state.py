@@ -116,21 +116,21 @@ def _row_with_adapter(monkeypatch, caps, refs=None, path='/tmp/test'):
     return ProjectRow(proj, HistoryReader(), StatusWatcher(), settings=s)
 
 
-def test_full_caps_adapter_shows_model_submenu_and_arrow(monkeypatch):
+def test_full_caps_adapter_shows_provider_submenu_and_arrow(monkeypatch):
     import agents
     caps = agents.AgentCaps(continue_=True, resume_by_id=True, sessions=True,
                             model_select=True)
     row = _row_with_adapter(monkeypatch, caps)
-    assert 'Model' in _menu_labels(row)
+    assert 'Provider' in _menu_labels(row)
     assert row._arrow.get_visible() is True
 
 
-def test_low_caps_adapter_hides_model_submenu(monkeypatch):
+def test_low_caps_adapter_hides_provider_submenu(monkeypatch):
     import agents
     caps = agents.AgentCaps(continue_=True, model_select=False, sessions=True,
                             resume_by_id=True)
     row = _row_with_adapter(monkeypatch, caps)
-    assert 'Model' not in _menu_labels(row)
+    assert 'Provider' not in _menu_labels(row)
 
 
 def test_no_sessions_caps_hides_expander_arrow(monkeypatch):
@@ -476,7 +476,7 @@ def test_override_row_default_label_is_per_row_not_global():
 
 
 # ===========================================================================
-# G1 (reveal-3 item 1, C2/C4): the Model submenu must not offer the same
+# G1 (reveal-3 item 1, C2/C4): the Provider submenu must not offer the same
 # choice twice. A provider option whose LABEL restates the Default story is a
 # redundant pin the user hasn't taken — suppress it UNLESS it is the live
 # selection (a pin the user DID take stays visible and checked).

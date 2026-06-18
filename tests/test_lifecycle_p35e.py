@@ -9,8 +9,9 @@ and the shared zellij.kill_session helper are covered headless.
 
 Binding tests:
   FB-2  should_save_session decision table; _save_session guard skips/saves
-  FB-3  _handle_late_death feeds the code; active-death drops the filter,
-        background-death does not
+  FB-3  _handle_late_death feeds the code; the Active Only filter is NOT
+        touched on any death (David 2026-06-18: closing a session must leave
+        the user's filter alone)
   FB-4  zellij.kill_session only kills a live session; spawn-path decision
   FB-10 the spawn-failure toast call pins timeout=0
 """
@@ -134,19 +135,21 @@ def test_late_death_feeds_exit_code():
     assert tv.fed == 1
 
 
-def test_late_death_active_project_drops_filter():
-    """BINDING (FB-3b): the dying project IS the active one → Active Only dropped
-    (you were looking at it; it must not vanish)."""
+def test_late_death_active_project_leaves_filter_alone():
+    """BINDING (FB-3b): the dying project IS the active one, but the Active Only
+    filter is NOT touched (David 2026-06-18: closing a session must leave the
+    user's filter alone — the row hiding is the filter doing its job). The banner
+    still feeds."""
     fake, calls = _latedeath_fake('/p')
     tv = _FeedTerm()
     AppWindow._handle_late_death(fake, tv, 0, '/p')   # path == active
-    assert ('set_active_only', False) in calls
+    assert calls == []                  # filter untouched
     assert tv.fed == 0
 
 
 def test_late_death_background_project_does_not_drop_filter():
-    """BINDING (FB-3b): a BACKGROUND death does NOT touch the filter (its row was
-    already hidden by the user's own choice). The banner still feeds."""
+    """BINDING (FB-3b): a BACKGROUND death does NOT touch the filter. (An active
+    death doesn't either now — see the test above.) The banner still feeds."""
     fake, calls = _latedeath_fake('/active')
     tv = _FeedTerm()
     AppWindow._handle_late_death(fake, tv, 0, '/background')  # not the active path

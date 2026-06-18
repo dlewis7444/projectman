@@ -191,12 +191,14 @@ def build_spawn_env(settings, project_path):
     to native and the UI surfaces ``reason`` via the provider-unavailable toast.
 
     The Opus tier model gets a trailing ``[1m]`` appended at spawn time when it
-    is a GLM id (see :func:`_maybe_1m`); Sonnet/Haiku never do. The
+    is a GLM id (see :func:`_maybe_1m`); Sonnet/Haiku/Fable never do. The
     ``CLAUDE_CODE_SUBAGENT_MODEL`` var is **opt-in**: emitted only when the user
     explicitly assigned a model to the Subagent tier (e.g. kimi for vision);
     otherwise it is omitted so per-call ``model:"sonnet"`` routes image
     subagents through the Sonnet tier and default subagents fall to CC's global
     default. Never force GLM on subagents (vision-less → nested subagent loops).
+    ``ANTHROPIC_DEFAULT_FABLE_MODEL`` is emitted (forward-looking placeholder;
+    CC today doesn't document it, so it's ignored harmlessly).
     """
     pid = settings.effective_provider(project_path)
     if not pid:
@@ -218,6 +220,10 @@ def build_spawn_env(settings, project_path):
     env['ANTHROPIC_DEFAULT_OPUS_MODEL'] = _maybe_1m(resolve_tier_model(settings, pid, 'opus'))
     env['ANTHROPIC_DEFAULT_SONNET_MODEL'] = resolve_tier_model(settings, pid, 'sonnet')
     env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = resolve_tier_model(settings, pid, 'haiku')
+    # Fable tier placeholder (forward-looking): wired like the others so a
+    # future CC that honors ANTHROPIC_DEFAULT_FABLE_MODEL picks up the resolved
+    # model. CC today doesn't document this var, so it's ignored harmlessly.
+    env['ANTHROPIC_DEFAULT_FABLE_MODEL'] = resolve_tier_model(settings, pid, 'fable')
     # Subagent is opt-in force: emit only when the user explicitly assigned a
     # model to the Subagent tier (e.g. kimi for vision). Otherwise omit — no
     # forced subagent — so a per-call model:"sonnet" routes image subagents
@@ -237,57 +243,6 @@ def build_spawn_env(settings, project_path):
     env['OLLAMA_HOST'] = base_url
     env['DISABLE_AUTOUPDATER'] = '1'
     return (env, None)
-
-
-# ---------------------------------------------------------------------------
-# Recommended preset — the lab's known-good localhost ollama-pool tier mapping.
-# Pure data + a pure applier; the Models tab wires it to a button (no GTK here).
-# ---------------------------------------------------------------------------
-
-RECOMMENDED_PRESET = {
-    # Upserted into Settings.providers under this id (existing providers kept).
-    'provider_id': 'ollama',
-    'provider': {
-        'name': 'Ollama (localhost pool)',
-        'base_url': 'http://localhost:11434',
-        'api_key': 'ollama',          # dummy token, same as claude-ollama
-        # GLM stored WITHOUT [1m] — build_spawn_env appends it to the Opus tier
-        # at spawn time via _maybe_1m, so the UI stays clean and the auto-suffix
-        # feature is exercised.
-        'models': ['glm-5.2:cloud', 'kimi-k2.7-code:cloud',
-                   'ministral-3:8b-instruct-2512-q8_0'],
-    },
-    'model_default': 'ollama',
-    'tier_models': {
-        'opus': 'glm-5.2:cloud',                 # → glm-5.2:cloud[1m] at spawn
-        'sonnet': 'kimi-k2.7-code:cloud',         # vision-capable
-        'haiku': 'ministral-3:8b-instruct-2512-q8_0',
-        # Opt-in force: pinning subagent to kimi guarantees every subagent is
-        # vision-capable (the safety net; per-call model:"sonnet" also lands
-        # here). Users who want no forced subagent clear this tier to Default.
-        'subagent': 'kimi-k2.7-code:cloud',
-    },
-}
-
-
-def apply_recommended_preset(settings):
-    """Upsert the recommended localhost ollama-pool provider, set it as the
-    default, and assign all four tiers.
-
-    Existing providers are preserved (only the ``ollama`` id is overwritten);
-    ``model_default`` and ``tier_models`` are replaced. Returns the provider id.
-    Pure — the caller (settings_window.py) handles ``save()`` / emit /
-    refresh after a confirm dialog.
-    """
-    pid = RECOMMENDED_PRESET['provider_id']
-    if not isinstance(settings.providers, dict):
-        settings.providers = {}
-    settings.providers[pid] = dict(RECOMMENDED_PRESET['provider'])
-    settings.model_default = pid
-    if not isinstance(settings.tier_models, dict):
-        settings.tier_models = {}
-    settings.tier_models.update(RECOMMENDED_PRESET['tier_models'])
-    return pid
 
 
 # ---------------------------------------------------------------------------

@@ -7,8 +7,7 @@ fallback-toast aggregation.
 import os
 
 from settings import Settings, TIERS
-from models import (build_spawn_env, aggregate_fallback_notices,
-                    apply_recommended_preset, RECOMMENDED_PRESET)
+from models import build_spawn_env, aggregate_fallback_notices
 
 
 def _provider(pid='ollama', base_url='http://localhost:11434', api_key='secret-key',
@@ -163,51 +162,6 @@ def test_opus_non_glm_no_suffix():
     assert env['ANTHROPIC_DEFAULT_SONNET_MODEL'] == 'glm-mini'
 
 
-# --- recommended preset ----------------------------------------------------
-
-def test_recommended_preset_shape():
-    assert RECOMMENDED_PRESET['provider_id'] == 'ollama'
-    prov = RECOMMENDED_PRESET['provider']
-    assert prov['base_url'] == 'http://localhost:11434'
-    assert set(prov['models']) == {'glm-5.2:cloud', 'kimi-k2.7-code:cloud',
-                                   'ministral-3:8b-instruct-2512-q8_0'}
-    assert set(RECOMMENDED_PRESET['tier_models']) == set(TIERS)
-
-
-def test_apply_recommended_preset_sets_provider_default_and_tiers():
-    # Start with an unrelated provider that must be preserved.
-    s = Settings(providers={'other': {'name': 'Other', 'base_url': 'http://x',
-                                      'api_key': '', 'models': ['m']}})
-    pid = apply_recommended_preset(s)
-    assert pid == 'ollama'
-    assert s.model_default == 'ollama'
-    assert 'other' in s.providers and 'ollama' in s.providers  # other kept
-    assert s.providers['ollama']['base_url'] == 'http://localhost:11434'
-    assert s.tier_models['opus'] == 'glm-5.2:cloud'
-    assert s.tier_models['sonnet'] == 'kimi-k2.7-code:cloud'
-    assert s.tier_models['haiku'] == 'ministral-3:8b-instruct-2512-q8_0'
-    assert s.tier_models['subagent'] == 'kimi-k2.7-code:cloud'  # opt-in force
-
-
-def test_preset_spawn_env_full():
-    """build_spawn_env after the preset: opus gets [1m], the other three tiers
-    resolve, and subagent is forced to kimi (opt-in)."""
-    s = Settings()
-    apply_recommended_preset(s)
-    env, reason = build_spawn_env(s, '/p')
-    assert reason is None and env is not None
-    assert env['ANTHROPIC_BASE_URL'] == 'http://localhost:11434'
-    assert env['ANTHROPIC_AUTH_TOKEN'] == 'ollama'
-    assert env['ANTHROPIC_API_KEY'] == ''
-    assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'glm-5.2:cloud[1m]'   # auto-suffix
-    assert env['ANTHROPIC_DEFAULT_SONNET_MODEL'] == 'kimi-k2.7-code:cloud'
-    assert env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] == 'ministral-3:8b-instruct-2512-q8_0'
-    assert env['CLAUDE_CODE_SUBAGENT_MODEL'] == 'kimi-k2.7-code:cloud'  # forced
-    assert env['CLAUDE_CODE_ATTRIBUTION_HEADER'] == '0'
-    assert env['OLLAMA_HOST'] == 'http://localhost:11434'
-    assert env['DISABLE_AUTOUPDATER'] == '1'
-
-
 # --- misconfiguration fallback ----------------------------------------------
 
 def test_missing_provider_falls_back_native_with_reason():
@@ -255,5 +209,20 @@ def test_aggregate_distinct_reasons_return_list():
     assert ('provider unavailable — running native Claude. r2') in out
 
 
-def test_all_four_tiers_canonical():
-    assert set(TIERS) == {'opus', 'sonnet', 'haiku', 'subagent'}
+def test_all_tiers_canonical():
+    assert set(TIERS) == {'opus', 'sonnet', 'haiku', 'subagent', 'fable'}
+
+
+def test_fable_tier_env_emitted():
+    """The Fable placeholder tier is wired like the others: build_spawn_env
+    emits ANTHROPIC_DEFAULT_FABLE_MODEL (CC today doesn't document it, so it's
+    ignored harmlessly). Unset → the provider's first model, like the others."""
+    s = Settings(providers=_provider(models=['glm-5.2:cloud[1m]', 'kimi']),
+                 model_default='ollama')
+    env, _ = build_spawn_env(s, '/p')
+    assert env['ANTHROPIC_DEFAULT_FABLE_MODEL'] == 'glm-5.2:cloud[1m]'
+    # An explicit Fable assignment is honored verbatim (no [1m] — only Opus).
+    s2 = Settings(providers=_provider(models=['glm-5.2:cloud', 'kimi']),
+                  model_default='ollama', tier_models={'fable': 'kimi'})
+    e2, _ = build_spawn_env(s2, '/p')
+    assert e2['ANTHROPIC_DEFAULT_FABLE_MODEL'] == 'kimi'
