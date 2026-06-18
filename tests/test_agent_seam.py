@@ -261,7 +261,8 @@ class TestClaudeAdapterSpawnPlanParity:
         assert plan.env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'qwen'
         assert plan.env['ANTHROPIC_DEFAULT_SONNET_MODEL'] == 'qwen'
         assert plan.env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] == 'qwen'
-        assert plan.env['CLAUDE_CODE_SUBAGENT_MODEL'] == 'qwen'
+        # No explicit subagent tier → not forced (opt-in force policy).
+        assert 'CLAUDE_CODE_SUBAGENT_MODEL' not in plan.env
         assert plan.env['CLAUDE_CODE_ATTRIBUTION_HEADER'] == '0'
         assert plan.env['OLLAMA_HOST'] == 'http://host:11434/v1'
         assert plan.env['DISABLE_AUTOUPDATER'] == '1'
@@ -548,7 +549,8 @@ class TestZellijSpawnEnvUnderAdapter:
         assert env['ANTHROPIC_AUTH_TOKEN'] == 'k'
         assert env['ANTHROPIC_API_KEY'] == ''
         assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'qwen'
-        assert env['CLAUDE_CODE_SUBAGENT_MODEL'] == 'qwen'
+        # No explicit subagent tier → not forced (opt-in force policy).
+        assert 'CLAUDE_CODE_SUBAGENT_MODEL' not in env
         assert env['CLAUDE_CODE_ATTRIBUTION_HEADER'] == '0'
         assert env['OLLAMA_HOST'] == 'http://host:11434/v1'
         assert env['DISABLE_AUTOUPDATER'] == '1'

@@ -7,7 +7,8 @@ fallback-toast aggregation.
 import os
 
 from settings import Settings, TIERS
-from models import build_spawn_env, aggregate_fallback_notices
+from models import (build_spawn_env, aggregate_fallback_notices,
+                    apply_recommended_preset, RECOMMENDED_PRESET)
 
 
 def _provider(pid='ollama', base_url='http://localhost:11434', api_key='secret-key',
@@ -62,23 +63,23 @@ def test_custom_provider_resolves_all_four_tiers():
     assert env['ANTHROPIC_DEFAULT_SONNET_MODEL'] == 'a'
     # '' tier → provider's first model
     assert env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] == 'a'
-    assert env['CLAUDE_CODE_SUBAGENT_MODEL'] == 'a'
+    # Subagent tier unset ('') → NOT forced (opt-in force policy); the env var
+    # is omitted so per-call model:"sonnet" can route image subagents and
+    # default subagents fall to CC's global default.
+    assert 'CLAUDE_CODE_SUBAGENT_MODEL' not in env
 
 
 def test_tier_models_empty_uses_provider_first_model():
     s = Settings(providers=_provider(models=['first', 'second']),
                  model_default='ollama')
     env, _ = build_spawn_env(s, '/p')
-    for tier in ('opus', 'sonnet', 'haiku', 'subagent'):
-        if tier == 'opus':
-            key = 'ANTHROPIC_DEFAULT_OPUS_MODEL'
-        elif tier == 'sonnet':
-            key = 'ANTHROPIC_DEFAULT_SONNET_MODEL'
-        elif tier == 'haiku':
-            key = 'ANTHROPIC_DEFAULT_HAIKU_MODEL'
-        else:
-            key = 'CLAUDE_CODE_SUBAGENT_MODEL'
+    for tier in ('opus', 'sonnet', 'haiku'):
+        key = {'opus': 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+               'sonnet': 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+               'haiku': 'ANTHROPIC_DEFAULT_HAIKU_MODEL'}[tier]
         assert env[key] == 'first'
+    # No explicit subagent tier → not forced.
+    assert 'CLAUDE_CODE_SUBAGENT_MODEL' not in env
 
 
 def test_custom_provider_inherits_parent_environ():
@@ -99,6 +100,112 @@ def test_per_project_override_to_provider_uses_it():
                  model_overrides={'/p': 'mistral'})
     env, _ = build_spawn_env(s, '/p')
     assert env['ANTHROPIC_BASE_URL'] == 'http://b'
+
+
+# --- subagent opt-in force --------------------------------------------------
+
+def test_subagent_explicit_is_forced():
+    """An explicitly-assigned Subagent tier model is emitted (opt-in force)."""
+    s = Settings(providers=_provider(models=['a', 'b']), model_default='ollama',
+                 tier_models={'subagent': 'a'})
+    env, _ = build_spawn_env(s, '/p')
+    assert env['CLAUDE_CODE_SUBAGENT_MODEL'] == 'a'
+
+
+def test_subagent_unset_is_scrubbed_from_parent_env():
+    """When the Subagent tier is unset, any inherited CLAUDE_CODE_SUBAGENT_MODEL
+    (e.g. from a claude-ollama launcher) is scrubbed — no forced subagent."""
+    os.environ['CLAUDE_CODE_SUBAGENT_MODEL'] = 'inherited-glm'
+    try:
+        s = Settings(providers=_provider(models=['a']), model_default='ollama')
+        env, _ = build_spawn_env(s, '/p')
+        assert 'CLAUDE_CODE_SUBAGENT_MODEL' not in env
+    finally:
+        del os.environ['CLAUDE_CODE_SUBAGENT_MODEL']
+
+
+def test_subagent_stale_value_is_omitted():
+    """A stale Subagent tier value (model no longer on the active provider) is
+    treated as unset → not forced, and any inherited value is scrubbed."""
+    os.environ['CLAUDE_CODE_SUBAGENT_MODEL'] = 'inherited'
+    try:
+        s = Settings(providers=_provider(models=['a']), model_default='ollama',
+                     tier_models={'subagent': 'gone'})
+        env, _ = build_spawn_env(s, '/p')
+        assert 'CLAUDE_CODE_SUBAGENT_MODEL' not in env
+    finally:
+        del os.environ['CLAUDE_CODE_SUBAGENT_MODEL']
+
+
+# --- Opus [1m] auto-suffix (GLM-aware) --------------------------------------
+
+def test_opus_glm_gets_1m_suffix():
+    s = Settings(providers=_provider(models=['glm-5.2:cloud']),
+                 model_default='ollama', tier_models={'opus': 'glm-5.2:cloud'})
+    env, _ = build_spawn_env(s, '/p')
+    assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'glm-5.2:cloud[1m]'
+
+
+def test_opus_already_1m_unchanged():
+    s = Settings(providers=_provider(models=['glm-5.2:cloud[1m]']),
+                 model_default='ollama', tier_models={'opus': 'glm-5.2:cloud[1m]'})
+    env, _ = build_spawn_env(s, '/p')
+    assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'glm-5.2:cloud[1m]'
+
+
+def test_opus_non_glm_no_suffix():
+    s = Settings(providers=_provider(models=['qwen-max', 'glm-mini']),
+                 model_default='ollama',
+                 tier_models={'opus': 'qwen-max', 'sonnet': 'glm-mini'})
+    env, _ = build_spawn_env(s, '/p')
+    assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'qwen-max'  # no [1m]
+    # Only Opus gets [1m]; a GLM id on the Sonnet tier is left verbatim.
+    assert env['ANTHROPIC_DEFAULT_SONNET_MODEL'] == 'glm-mini'
+
+
+# --- recommended preset ----------------------------------------------------
+
+def test_recommended_preset_shape():
+    assert RECOMMENDED_PRESET['provider_id'] == 'ollama'
+    prov = RECOMMENDED_PRESET['provider']
+    assert prov['base_url'] == 'http://localhost:11434'
+    assert set(prov['models']) == {'glm-5.2:cloud', 'kimi-k2.7-code:cloud',
+                                   'ministral-3:8b-instruct-2512-q8_0'}
+    assert set(RECOMMENDED_PRESET['tier_models']) == set(TIERS)
+
+
+def test_apply_recommended_preset_sets_provider_default_and_tiers():
+    # Start with an unrelated provider that must be preserved.
+    s = Settings(providers={'other': {'name': 'Other', 'base_url': 'http://x',
+                                      'api_key': '', 'models': ['m']}})
+    pid = apply_recommended_preset(s)
+    assert pid == 'ollama'
+    assert s.model_default == 'ollama'
+    assert 'other' in s.providers and 'ollama' in s.providers  # other kept
+    assert s.providers['ollama']['base_url'] == 'http://localhost:11434'
+    assert s.tier_models['opus'] == 'glm-5.2:cloud'
+    assert s.tier_models['sonnet'] == 'kimi-k2.7-code:cloud'
+    assert s.tier_models['haiku'] == 'ministral-3:8b-instruct-2512-q8_0'
+    assert s.tier_models['subagent'] == 'kimi-k2.7-code:cloud'  # opt-in force
+
+
+def test_preset_spawn_env_full():
+    """build_spawn_env after the preset: opus gets [1m], the other three tiers
+    resolve, and subagent is forced to kimi (opt-in)."""
+    s = Settings()
+    apply_recommended_preset(s)
+    env, reason = build_spawn_env(s, '/p')
+    assert reason is None and env is not None
+    assert env['ANTHROPIC_BASE_URL'] == 'http://localhost:11434'
+    assert env['ANTHROPIC_AUTH_TOKEN'] == 'ollama'
+    assert env['ANTHROPIC_API_KEY'] == ''
+    assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'glm-5.2:cloud[1m]'   # auto-suffix
+    assert env['ANTHROPIC_DEFAULT_SONNET_MODEL'] == 'kimi-k2.7-code:cloud'
+    assert env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] == 'ministral-3:8b-instruct-2512-q8_0'
+    assert env['CLAUDE_CODE_SUBAGENT_MODEL'] == 'kimi-k2.7-code:cloud'  # forced
+    assert env['CLAUDE_CODE_ATTRIBUTION_HEADER'] == '0'
+    assert env['OLLAMA_HOST'] == 'http://localhost:11434'
+    assert env['DISABLE_AUTOUPDATER'] == '1'
 
 
 # --- misconfiguration fallback ----------------------------------------------

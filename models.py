@@ -21,8 +21,15 @@ dict at spawn.
 """
 
 import os
+import re
 
 NATIVE_LABEL = 'Anthropic (native)'
+
+# GLM cloud models accept a trailing ``[1m]`` suffix to request the 1M-context
+# window (Claude Code strips it before the API call; Ollama receives the base
+# name). The suffix is GLM-specific — other backends reject it — so it is only
+# appended to model ids that look like GLM. Used for the Opus tier only.
+_GLM_RE = re.compile(r'glm', re.IGNORECASE)
 
 # Sentinel used by the per-project provider menu to mean "follow the global
 # default" (i.e. remove any override). Safe because a real provider id is a
@@ -141,15 +148,55 @@ def resolve_tier_model(settings, pid, tier):
     return models[0] if models else ''
 
 
+def _explicit_tier_model(settings, pid, tier):
+    """The explicitly-chosen model id for ``tier`` if it is still on the active
+    provider's model list; else ``''``.
+
+    Unlike :func:`resolve_tier_model`, this does NOT fall back to the
+    provider's first model — it returns ``''`` when the tier is unset (or its
+    value is stale). Used to decide whether to *force* a tier's env var
+    (the subagent) vs leave it unset so a per-call ``model:"sonnet"`` can route
+    image subagents through the Sonnet tier and default subagents fall to CC's
+    global default. See the no-forced-subagent policy (David 2026-06-17).
+    """
+    models = _provider_models(settings.providers, pid)
+    if isinstance(getattr(settings, 'tier_models', None), dict):
+        v = settings.tier_models.get(tier, '')
+        if isinstance(v, str) and v and v in models:
+            return v
+    return ''
+
+
+def _maybe_1m(model_id):
+    """Append the GLM 1M-context suffix ``[1m]`` to a GLM Opus model id that
+    lacks it. Non-GLM ids are returned unchanged — the suffix is GLM-specific
+    (CC strips it before the API call; Ollama receives the base name) and
+    other backends would reject it. Mirrors ``claude-ollama``'s ``[1m]`` logic;
+    applied to the Opus tier only, at spawn time, so the UI combo keeps showing
+    the stored id verbatim.
+    """
+    if not model_id or model_id.endswith('[1m]'):
+        return model_id
+    return f'{model_id}[1m]' if _GLM_RE.search(model_id) else model_id
+
+
 def build_spawn_env(settings, project_path):
     """Build the env override for a spawn, or report a native fallback.
 
     Returns ``(env_dict, None)`` for a custom provider (the ollama-style env
-    dict, incl. the four resolved tier models + ``DISABLE_AUTOUPDATER=1``);
-    ``(None, None)`` for native (no injection — CC uses its own creds); or
-    ``(None, reason)`` when a custom provider was requested but is unusable
-    (missing or no base_url), so the spawn falls back to native and the UI
-    surfaces ``reason`` via the provider-unavailable toast.
+    dict, incl. the resolved Opus/Sonnet/Haiku tier models +
+    ``DISABLE_AUTOUPDATER=1``); ``(None, None)`` for native (no injection — CC
+    uses its own creds); or ``(None, reason)`` when a custom provider was
+    requested but is unusable (missing or no base_url), so the spawn falls back
+    to native and the UI surfaces ``reason`` via the provider-unavailable toast.
+
+    The Opus tier model gets a trailing ``[1m]`` appended at spawn time when it
+    is a GLM id (see :func:`_maybe_1m`); Sonnet/Haiku never do. The
+    ``CLAUDE_CODE_SUBAGENT_MODEL`` var is **opt-in**: emitted only when the user
+    explicitly assigned a model to the Subagent tier (e.g. kimi for vision);
+    otherwise it is omitted so per-call ``model:"sonnet"`` routes image
+    subagents through the Sonnet tier and default subagents fall to CC's global
+    default. Never force GLM on subagents (vision-less → nested subagent loops).
     """
     pid = settings.effective_provider(project_path)
     if not pid:
@@ -168,14 +215,79 @@ def build_spawn_env(settings, project_path):
     env['ANTHROPIC_BASE_URL'] = base_url
     env['ANTHROPIC_AUTH_TOKEN'] = api_key
     env['ANTHROPIC_API_KEY'] = ''   # empty — the anti-3rd-party-block shape
-    env['ANTHROPIC_DEFAULT_OPUS_MODEL'] = resolve_tier_model(settings, pid, 'opus')
+    env['ANTHROPIC_DEFAULT_OPUS_MODEL'] = _maybe_1m(resolve_tier_model(settings, pid, 'opus'))
     env['ANTHROPIC_DEFAULT_SONNET_MODEL'] = resolve_tier_model(settings, pid, 'sonnet')
     env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = resolve_tier_model(settings, pid, 'haiku')
-    env['CLAUDE_CODE_SUBAGENT_MODEL'] = resolve_tier_model(settings, pid, 'subagent')
+    # Subagent is opt-in force: emit only when the user explicitly assigned a
+    # model to the Subagent tier (e.g. kimi for vision). Otherwise omit — no
+    # forced subagent — so a per-call model:"sonnet" routes image subagents
+    # through the Sonnet tier above and default subagents fall to CC's global
+    # default. Never force GLM here (vision-less → nested subagent loops).
+    subagent = _explicit_tier_model(settings, pid, 'subagent')
+    if subagent:
+        env['CLAUDE_CODE_SUBAGENT_MODEL'] = subagent
+    else:
+        # No forced subagent: scrub any value inherited from the parent env
+        # (e.g. a launcher like claude-ollama that set CLAUDE_CODE_SUBAGENT_MODEL)
+        # so the spawned session doesn't inherit a stale forced-subagent model.
+        # A per-call model:"sonnet" then routes image subagents through the
+        # Sonnet tier above; default subagents fall to CC's global default.
+        env.pop('CLAUDE_CODE_SUBAGENT_MODEL', None)
     env['CLAUDE_CODE_ATTRIBUTION_HEADER'] = '0'
     env['OLLAMA_HOST'] = base_url
     env['DISABLE_AUTOUPDATER'] = '1'
     return (env, None)
+
+
+# ---------------------------------------------------------------------------
+# Recommended preset — the lab's known-good localhost ollama-pool tier mapping.
+# Pure data + a pure applier; the Models tab wires it to a button (no GTK here).
+# ---------------------------------------------------------------------------
+
+RECOMMENDED_PRESET = {
+    # Upserted into Settings.providers under this id (existing providers kept).
+    'provider_id': 'ollama',
+    'provider': {
+        'name': 'Ollama (localhost pool)',
+        'base_url': 'http://localhost:11434',
+        'api_key': 'ollama',          # dummy token, same as claude-ollama
+        # GLM stored WITHOUT [1m] — build_spawn_env appends it to the Opus tier
+        # at spawn time via _maybe_1m, so the UI stays clean and the auto-suffix
+        # feature is exercised.
+        'models': ['glm-5.2:cloud', 'kimi-k2.7-code:cloud',
+                   'ministral-3:8b-instruct-2512-q8_0'],
+    },
+    'model_default': 'ollama',
+    'tier_models': {
+        'opus': 'glm-5.2:cloud',                 # → glm-5.2:cloud[1m] at spawn
+        'sonnet': 'kimi-k2.7-code:cloud',         # vision-capable
+        'haiku': 'ministral-3:8b-instruct-2512-q8_0',
+        # Opt-in force: pinning subagent to kimi guarantees every subagent is
+        # vision-capable (the safety net; per-call model:"sonnet" also lands
+        # here). Users who want no forced subagent clear this tier to Default.
+        'subagent': 'kimi-k2.7-code:cloud',
+    },
+}
+
+
+def apply_recommended_preset(settings):
+    """Upsert the recommended localhost ollama-pool provider, set it as the
+    default, and assign all four tiers.
+
+    Existing providers are preserved (only the ``ollama`` id is overwritten);
+    ``model_default`` and ``tier_models`` are replaced. Returns the provider id.
+    Pure — the caller (settings_window.py) handles ``save()`` / emit /
+    refresh after a confirm dialog.
+    """
+    pid = RECOMMENDED_PRESET['provider_id']
+    if not isinstance(settings.providers, dict):
+        settings.providers = {}
+    settings.providers[pid] = dict(RECOMMENDED_PRESET['provider'])
+    settings.model_default = pid
+    if not isinstance(settings.tier_models, dict):
+        settings.tier_models = {}
+    settings.tier_models.update(RECOMMENDED_PRESET['tier_models'])
+    return pid
 
 
 # ---------------------------------------------------------------------------
