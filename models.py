@@ -131,18 +131,23 @@ def build_tier_options(providers, pid):
 def resolve_tier_model(settings, pid, tier):
     """Resolve the model id to pin for a tier on the active provider.
 
-    ``tier_models[tier]`` wins when it names a model on the active provider;
-    otherwise the provider's first model is used; if the provider has no
-    models the empty string is returned (the spawn env still sets the var, CC
-    will fall back to its own default). Covers a stale tier value left over
-    from a per-project override to a provider that lacks the named model.
+    ``tier_models[pid][tier]`` wins when it names a model on the active
+    provider; otherwise the provider's first model is used; if the provider
+    has no models the empty string is returned (the spawn env still sets the
+    var, CC will fall back to its own default). Covers a stale tier value left
+    over from a per-project override to a provider that lacks the named model.
+    ``tier_models`` is per-provider (``{pid: {tier: model_id}}``); a missing
+    pid entry is treated as all-default.
     """
     models = _provider_models(settings.providers, pid)
     val = ''
-    if isinstance(getattr(settings, 'tier_models', None), dict):
-        v = settings.tier_models.get(tier, '')
-        if isinstance(v, str):
-            val = v
+    tm = getattr(settings, 'tier_models', None)
+    if isinstance(tm, dict):
+        sub = tm.get(pid)
+        if isinstance(sub, dict):
+            v = sub.get(tier, '')
+            if isinstance(v, str):
+                val = v
     if val and val in models:
         return val
     return models[0] if models else ''
@@ -152,18 +157,22 @@ def _explicit_tier_model(settings, pid, tier):
     """The explicitly-chosen model id for ``tier`` if it is still on the active
     provider's model list; else ``''``.
 
-    Unlike :func:`resolve_tier_model`, this does NOT fall back to the
-    provider's first model — it returns ``''`` when the tier is unset (or its
-    value is stale). Used to decide whether to *force* a tier's env var
-    (the subagent) vs leave it unset so a per-call ``model:"sonnet"`` can route
-    image subagents through the Sonnet tier and default subagents fall to CC's
-    global default. See the no-forced-subagent policy (David 2026-06-17).
+    Reads ``tier_models[pid][tier]`` (per-provider). Unlike
+    :func:`resolve_tier_model`, this does NOT fall back to the provider's first
+    model — it returns ``''`` when the tier is unset (or its value is stale).
+    Used to decide whether to *force* a tier's env var (the subagent) vs leave
+    it unset so a per-call ``model:"sonnet"`` can route image subagents through
+    the Sonnet tier and default subagents fall to CC's global default. See the
+    no-forced-subagent policy (David 2026-06-17).
     """
     models = _provider_models(settings.providers, pid)
-    if isinstance(getattr(settings, 'tier_models', None), dict):
-        v = settings.tier_models.get(tier, '')
-        if isinstance(v, str) and v and v in models:
-            return v
+    tm = getattr(settings, 'tier_models', None)
+    if isinstance(tm, dict):
+        sub = tm.get(pid)
+        if isinstance(sub, dict):
+            v = sub.get(tier, '')
+            if isinstance(v, str) and v and v in models:
+                return v
     return ''
 
 

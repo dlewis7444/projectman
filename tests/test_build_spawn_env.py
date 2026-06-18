@@ -56,7 +56,8 @@ def test_custom_provider_injects_full_env():
 
 def test_custom_provider_resolves_all_four_tiers():
     s = Settings(providers=_provider(models=['a', 'b']), model_default='ollama',
-                 tier_models={'opus': 'b', 'sonnet': 'a', 'haiku': '', 'subagent': ''})
+                 tier_models={'ollama': {'opus': 'b', 'sonnet': 'a', 'haiku': '',
+                                         'subagent': ''}})
     env, _ = build_spawn_env(s, '/p')
     assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'b'
     assert env['ANTHROPIC_DEFAULT_SONNET_MODEL'] == 'a'
@@ -101,12 +102,36 @@ def test_per_project_override_to_provider_uses_it():
     assert env['ANTHROPIC_BASE_URL'] == 'http://b'
 
 
+def test_per_provider_tiers_resolve_against_override_provider():
+    """Tier assignments are per-provider. A project overridden to a non-default
+    provider injects THAT provider's tier assignments — not the default's —
+    proving TA applies to any added provider, even when it isn't the default
+    (and even when the default is native)."""
+    s = Settings(providers={**_provider('ollama', base_url='http://a',
+                                        models=['glm', 'kimi']),
+                            **_provider('openrouter', base_url='http://b',
+                                        models=['or-opus', 'or-sonnet'])},
+                 model_default='',  # native default — TA still applies to overrides
+                 model_overrides={'/p': 'openrouter'},
+                 tier_models={
+                     'ollama': {'opus': 'glm', 'sonnet': 'kimi'},
+                     'openrouter': {'opus': 'or-opus', 'sonnet': 'or-sonnet'},
+                 })
+    env, _ = build_spawn_env(s, '/p')
+    assert env['ANTHROPIC_BASE_URL'] == 'http://b'
+    assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'or-opus'      # openrouter's
+    assert env['ANTHROPIC_DEFAULT_SONNET_MODEL'] == 'or-sonnet'  # openrouter's
+    # The default's (ollama's) tiers must NOT leak into the override's env.
+    assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] != 'glm'
+    assert env['ANTHROPIC_DEFAULT_SONNET_MODEL'] != 'kimi'
+
+
 # --- subagent opt-in force --------------------------------------------------
 
 def test_subagent_explicit_is_forced():
     """An explicitly-assigned Subagent tier model is emitted (opt-in force)."""
     s = Settings(providers=_provider(models=['a', 'b']), model_default='ollama',
-                 tier_models={'subagent': 'a'})
+                 tier_models={'ollama': {'subagent': 'a'}})
     env, _ = build_spawn_env(s, '/p')
     assert env['CLAUDE_CODE_SUBAGENT_MODEL'] == 'a'
 
@@ -129,7 +154,7 @@ def test_subagent_stale_value_is_omitted():
     os.environ['CLAUDE_CODE_SUBAGENT_MODEL'] = 'inherited'
     try:
         s = Settings(providers=_provider(models=['a']), model_default='ollama',
-                     tier_models={'subagent': 'gone'})
+                     tier_models={'ollama': {'subagent': 'gone'}})
         env, _ = build_spawn_env(s, '/p')
         assert 'CLAUDE_CODE_SUBAGENT_MODEL' not in env
     finally:
@@ -140,14 +165,16 @@ def test_subagent_stale_value_is_omitted():
 
 def test_opus_glm_gets_1m_suffix():
     s = Settings(providers=_provider(models=['glm-5.2:cloud']),
-                 model_default='ollama', tier_models={'opus': 'glm-5.2:cloud'})
+                 model_default='ollama',
+                 tier_models={'ollama': {'opus': 'glm-5.2:cloud'}})
     env, _ = build_spawn_env(s, '/p')
     assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'glm-5.2:cloud[1m]'
 
 
 def test_opus_already_1m_unchanged():
     s = Settings(providers=_provider(models=['glm-5.2:cloud[1m]']),
-                 model_default='ollama', tier_models={'opus': 'glm-5.2:cloud[1m]'})
+                 model_default='ollama',
+                 tier_models={'ollama': {'opus': 'glm-5.2:cloud[1m]'}})
     env, _ = build_spawn_env(s, '/p')
     assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'glm-5.2:cloud[1m]'
 
@@ -155,7 +182,7 @@ def test_opus_already_1m_unchanged():
 def test_opus_non_glm_no_suffix():
     s = Settings(providers=_provider(models=['qwen-max', 'glm-mini']),
                  model_default='ollama',
-                 tier_models={'opus': 'qwen-max', 'sonnet': 'glm-mini'})
+                 tier_models={'ollama': {'opus': 'qwen-max', 'sonnet': 'glm-mini'}})
     env, _ = build_spawn_env(s, '/p')
     assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'qwen-max'  # no [1m]
     # Only Opus gets [1m]; a GLM id on the Sonnet tier is left verbatim.
@@ -223,6 +250,6 @@ def test_fable_tier_env_emitted():
     assert env['ANTHROPIC_DEFAULT_FABLE_MODEL'] == 'glm-5.2:cloud[1m]'
     # An explicit Fable assignment is honored verbatim (no [1m] — only Opus).
     s2 = Settings(providers=_provider(models=['glm-5.2:cloud', 'kimi']),
-                  model_default='ollama', tier_models={'fable': 'kimi'})
+                  model_default='ollama', tier_models={'ollama': {'fable': 'kimi'}})
     e2, _ = build_spawn_env(s2, '/p')
     assert e2['ANTHROPIC_DEFAULT_FABLE_MODEL'] == 'kimi'

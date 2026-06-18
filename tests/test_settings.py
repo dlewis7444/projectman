@@ -194,7 +194,7 @@ def test_providers_roundtrip(tmp_path):
     s2 = Settings.load(path)
     assert s2.providers == _sample_providers()
     assert s2.model_default == 'ollama'
-    assert s2.tier_models['opus'] == 'qwen'
+    assert s2.tier_models['ollama']['opus'] == 'qwen'
 
 
 def test_load_old_file_without_provider_keys(tmp_path):

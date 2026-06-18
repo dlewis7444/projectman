@@ -92,20 +92,20 @@ def test_build_tier_options_native_no_provider():
 
 def test_resolve_tier_model_explicit_value_used():
     s = Settings(providers={'p': {'models': ['a', 'b']}},
-                 model_default='p', tier_models={'opus': 'b'})
+                 model_default='p', tier_models={'p': {'opus': 'b'}})
     assert resolve_tier_model(s, 'p', 'opus') == 'b'
 
 
 def test_resolve_tier_model_empty_falls_to_first_model():
     s = Settings(providers={'p': {'models': ['a', 'b']}},
-                 model_default='p', tier_models={'opus': ''})
+                 model_default='p', tier_models={'p': {'opus': ''}})
     assert resolve_tier_model(s, 'p', 'opus') == 'a'
 
 
 def test_resolve_tier_model_stale_value_falls_to_first():
     # tier value not on the active provider → first model (defensive fallback)
     s = Settings(providers={'p': {'models': ['a', 'b']}},
-                 model_default='p', tier_models={'opus': 'gone'})
+                 model_default='p', tier_models={'p': {'opus': 'gone'}})
     assert resolve_tier_model(s, 'p', 'opus') == 'a'
 
 

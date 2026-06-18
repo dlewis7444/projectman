@@ -606,11 +606,11 @@ class SettingsWindow(Adw.PreferencesDialog):
         intro_group = Adw.PreferencesGroup(
             title='Models',
             description='Route Claude Code at any Anthropic-compatible provider '
-                        '(ollama, LiteLLM, etc.). Pick a default provider, assign '
-                        'the four tiers to its models, and define providers below. '
-                        'Override the provider per project from the sidebar menu. '
-                        'Under Zellij the provider applies to new sessions only '
-                        '(an attach inherits the server env).',
+                        '(ollama, LiteLLM, etc.). Pick a default provider and '
+                        'define providers below — each provider card carries its '
+                        'own tier assignments. Override the provider per project '
+                        'from the sidebar menu. Under Zellij the provider applies '
+                        'to new sessions only (an attach inherits the server env).',
         )
         page.add(intro_group)
 
@@ -623,34 +623,14 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._provider_combo.connect('notify::selected', self._on_default_provider_changed)
         self._active_provider_group.add(self._provider_combo)
 
-        # -- Tier Assignments --
-        self._tier_group = Adw.PreferencesGroup(
-            title='Tier Assignments',
-            description='Assign each Claude Code tier to a model on the active '
-                        'provider. "Default" uses the provider\'s first model. '
-                        'Disabled when the default is native.',
-        )
-        page.add(self._tier_group)
-        self._tier_combos = {}
-        for tier, label in (('opus', 'Opus'), ('sonnet', 'Sonnet'),
-                            ('haiku', 'Haiku'), ('subagent', 'Subagent'),
-                            ('fable', 'Fable (future?)')):
-            combo = Adw.ComboRow(title=label)
-            combo.connect('notify::selected',
-                          lambda r, _p, t=tier: self._on_tier_changed(t, r))
-            if tier == 'fable':
-                # Forward-looking placeholder tier — CC has a Fable model but no
-                # documented per-tier default env var yet. Wired to the env like
-                # the others (build_spawn_env emits ANTHROPIC_DEFAULT_FABLE_MODEL)
-                # but not user-adjustable until CC honors it.
-                combo.set_sensitive(False)
-            self._tier_group.add(combo)
-            self._tier_combos[tier] = combo
-
         # -- Providers --
+        # Each provider card holds its own per-provider Tier Assignments (B2):
+        # TA applies to any defined provider, not just the default, so the combos
+        # live in the card instead of a separate group gated on the default.
         self._providers_group = Adw.PreferencesGroup(
             title='Providers',
-            description='Define Anthropic-compatible providers and their models.',
+            description='Define Anthropic-compatible providers and their models. '
+                        'Each card carries its own tier assignments.',
         )
         page.add(self._providers_group)
 
@@ -670,7 +650,6 @@ class SettingsWindow(Adw.PreferencesDialog):
     def _refresh_models_page(self):
         """Rebuild the whole Models page from settings (after any change)."""
         self._refresh_provider_combo()
-        self._refresh_tier_combos()
         self._rebuild_providers_group()
 
     def _refresh_provider_combo(self):
@@ -685,54 +664,25 @@ class SettingsWindow(Adw.PreferencesDialog):
             # The stored default's provider was removed — fall back to native.
             self._settings.model_default = ''
 
-    def _refresh_tier_combos(self, reset_stale=False):
-        """Repopulate the four tier combos from the active provider's models.
-
-        ``reset_stale`` scrubs any tier_models value not on the active provider
-        back to '' (and persists) — used when the active provider changes.
-        """
-        pid = self._settings.model_default
-        models = [m for m in (self._settings.providers.get(pid, {}).get('models', [])
-                              if isinstance(self._settings.providers.get(pid), dict)
-                              else []) if isinstance(m, str)] \
-            if isinstance(self._settings.providers, dict) else []
-        if reset_stale and isinstance(self._settings.tier_models, dict):
-            changed = False
-            for tier in TIERS:
-                val = self._settings.tier_models.get(tier, '')
-                if isinstance(val, str) and val and val not in models:
-                    self._settings.tier_models[tier] = ''
-                    changed = True
-            if changed:
-                self._settings.save()
-        active = pid != ''
-        for tier, combo in self._tier_combos.items():
-            ids, labels = build_tier_options(self._settings.providers, pid)
-            val = self._settings.tier_models.get(tier, '') \
-                if isinstance(self._settings.tier_models, dict) else ''
-            if not isinstance(val, str) or val not in ids:
-                val = ''
-            self._suppress_combos = True
-            combo.set_model(Gtk.StringList.new(labels))
-            combo.set_selected(ids.index(val) if val in ids else 0)
-            # Fable stays disabled (future placeholder) even when a provider is
-            # active; the other tiers follow the active/native gate.
-            combo.set_sensitive(active and tier != 'fable')
-            self._suppress_combos = False
-
     def _rebuild_providers_group(self):
         for row in list(self._provider_card_rows):
             self._providers_group.remove(row)
         self._provider_card_rows = []
         if not isinstance(self._settings.providers, dict):
             return
-        for pid in sorted(self._settings.providers):
-            prov = self._settings.providers.get(pid)
-            if not isinstance(prov, dict):
-                continue
-            card = self._build_provider_card(pid, prov)
-            self._providers_group.add(card)
-            self._provider_card_rows.append(card)
+        # Suppress combo writes while the cards (and their tier combos) are
+        # being populated — set_selected fires notify::selected.
+        self._suppress_combos = True
+        try:
+            for pid in sorted(self._settings.providers):
+                prov = self._settings.providers.get(pid)
+                if not isinstance(prov, dict):
+                    continue
+                card = self._build_provider_card(pid, prov)
+                self._providers_group.add(card)
+                self._provider_card_rows.append(card)
+        finally:
+            self._suppress_combos = False
 
     def _build_provider_card(self, pid, prov):
         """An expandable card for one provider: name, base_url, api_key (peek),
@@ -796,6 +746,41 @@ class SettingsWindow(Adw.PreferencesDialog):
                               lambda r, p=pid: self._on_add_model(p, r))
         card.add_row(add_model_row)
 
+        # --- Per-provider Tier Assignments (B2) ---
+        # TA applies to THIS provider regardless of whether it's the default, so
+        # the combos live in the card. Each is populated from this provider's
+        # models and bound to tier_models[pid][tier]. "Default" = the provider's
+        # first model.
+        tier_sub = self._settings.tier_models.get(pid, {}) \
+            if isinstance(self._settings.tier_models, dict) else {}
+        if not isinstance(tier_sub, dict):
+            tier_sub = {}
+        tier_ids, tier_labels = build_tier_options(self._settings.providers, pid)
+        tier_header = Adw.ActionRow(
+            title='Tier assignments',
+            subtitle='Opus/Sonnet/Haiku/Subagent → a model on this provider. '
+                     '"Default" uses the first model.')
+        tier_header.set_sensitive(False)
+        card.add_row(tier_header)
+        for tier, label in (('opus', 'Opus'), ('sonnet', 'Sonnet'),
+                            ('haiku', 'Haiku'), ('subagent', 'Subagent'),
+                            ('fable', 'Fable (future?)')):
+            combo = Adw.ComboRow(title=label)
+            combo.set_model(Gtk.StringList.new(tier_labels))
+            val = tier_sub.get(tier, '')
+            if not isinstance(val, str) or val not in tier_ids:
+                val = ''
+            combo.set_selected(tier_ids.index(val) if val in tier_ids else 0)
+            combo.connect('notify::selected',
+                          lambda r, _p, p=pid, t=tier: self._on_card_tier_changed(p, t, r))
+            if tier == 'fable':
+                # Forward-looking placeholder: CC has a Fable model but no
+                # documented per-tier default env var yet. Wired to the env like
+                # the others (build_spawn_env emits ANTHROPIC_DEFAULT_FABLE_MODEL)
+                # but not user-adjustable until CC honors it.
+                combo.set_sensitive(False)
+            card.add_row(combo)
+
         rm_row = Adw.ActionRow()
         rm_btn = Gtk.Button(label='Remove provider')
         rm_btn.add_css_class('destructive-action')
@@ -817,20 +802,26 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._settings.model_default = ids[idx]
         self._settings.save()
         self._app.emit('settings-changed')
-        # Repopulate the tier combos + reset any tier value not on the new
-        # provider's model list to '' (the single-base_url enforcement).
-        self._refresh_tier_combos(reset_stale=True)
+        # Tier assignments are per-provider (in each provider's card), so
+        # changing the default doesn't invalidate any provider's tiers — just
+        # refresh the combo/card layout.
+        self._refresh_models_page()
 
-    def _on_tier_changed(self, tier, row):
+    def _on_card_tier_changed(self, pid, tier, row):
+        """A tier combo inside a provider's card changed → write the per-provider
+        tier assignment. No card rebuild (the combo already reflects it)."""
         if self._suppress_combos:
             return
-        pid = self._settings.model_default
         ids, _labels = build_tier_options(self._settings.providers, pid)
         idx = row.get_selected()
         if not isinstance(self._settings.tier_models, dict):
             self._settings.tier_models = {}
+        sub = self._settings.tier_models.setdefault(pid, {})
+        if not isinstance(sub, dict):
+            sub = {}
+            self._settings.tier_models[pid] = sub
         if 0 <= idx < len(ids):
-            self._settings.tier_models[tier] = ids[idx]
+            sub[tier] = ids[idx]
             self._settings.save()
             self._app.emit('settings-changed')
 
@@ -877,11 +868,14 @@ class SettingsWindow(Adw.PreferencesDialog):
         if not isinstance(prov, dict):
             return
         prov['models'] = [m for m in prov.get('models', []) if m != mid]
-        # If this is the active provider, drop any tier pinning the removed model.
-        if self._settings.model_default == pid and isinstance(self._settings.tier_models, dict):
-            for tier in TIERS:
-                if self._settings.tier_models.get(tier) == mid:
-                    self._settings.tier_models[tier] = ''
+        # Drop this provider's tier pins that referenced the removed model
+        # (per-provider: it's this provider's own tiers, regardless of default).
+        if isinstance(self._settings.tier_models, dict):
+            sub = self._settings.tier_models.get(pid)
+            if isinstance(sub, dict):
+                for tier in TIERS:
+                    if sub.get(tier) == mid:
+                        sub[tier] = ''
         self._settings.save()
         self._app.emit('settings-changed')
         self._refresh_models_page()
@@ -895,6 +889,9 @@ class SettingsWindow(Adw.PreferencesDialog):
             self._settings.model_overrides = {
                 p: v for p, v in self._settings.model_overrides.items() if v != pid
             }
+        # Drop this provider's per-provider tier assignments.
+        if isinstance(self._settings.tier_models, dict):
+            self._settings.tier_models.pop(pid, None)
         self._settings.save()
         self._app.emit('settings-changed')
         self._refresh_models_page()

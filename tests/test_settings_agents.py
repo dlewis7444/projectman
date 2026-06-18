@@ -44,19 +44,23 @@ def test_tier_models_roundtrip(tmp_path):
     s = Settings(providers={'ollama': {'name': 'O', 'base_url': 'http://x',
                                          'api_key': 'k', 'models': ['a', 'b']}},
                  model_default='ollama',
-                 tier_models={'opus': 'b', 'sonnet': 'a', 'haiku': '', 'subagent': ''})
+                 tier_models={'ollama': {'opus': 'b', 'sonnet': 'a', 'haiku': '',
+                                         'subagent': '', 'fable': ''}})
     s.save(path)
     s2 = Settings.load(path)
-    assert s2.tier_models == {'opus': 'b', 'sonnet': 'a', 'haiku': '',
-                              'subagent': '', 'fable': ''}
+    assert s2.tier_models == {'ollama': {'opus': 'b', 'sonnet': 'a', 'haiku': '',
+                                         'subagent': '', 'fable': ''}}
 
 
 def test_tier_models_only_canonical_keys_persisted(tmp_path):
     path = str(tmp_path / 'settings.json')
-    s = Settings(tier_models={'opus': 'x', 'sonnet': '', 'haiku': '', 'subagent': ''})
+    s = Settings(providers={'ollama': {'name': 'O', 'base_url': 'http://x',
+                                       'api_key': 'k', 'models': ['x']}},
+                 tier_models={'ollama': {'opus': 'x', 'bogus': 'y', 'sonnet': ''}})
     s.save(path)
     s2 = Settings.load(path)
-    assert set(s2.tier_models.keys()) <= set(TIERS)
+    assert set(s2.tier_models['ollama'].keys()) == set(TIERS)
+    assert 'bogus' not in s2.tier_models['ollama']
 
 
 # ── claude_binary migration: old key still honored when agents absent ─────────

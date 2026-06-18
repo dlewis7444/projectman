@@ -1,6 +1,9 @@
 """Tests for Settings._migrate_old_model_shape — the pre-pivot → provider-axis
 migration. Pre-pivot providers used a dict models map + transformer; model_default
 / model_overrides held 'provider/model' strings; tier_models did not exist.
+
+tier_models is now PER-PROVIDER: ``{provider_id: {tier: model_id|''}}``. The
+legacy GLOBAL shape ``{tier: model_id}`` is folded into one provider on migrate.
 """
 from settings import Settings, TIERS
 
@@ -25,8 +28,9 @@ def test_old_model_default_slashes_split_into_provider_and_tiers():
     }, model_default='ollama/glm')
     s._migrate_old_model_shape()
     assert s.model_default == 'ollama'
+    # The split tier pin lands in the per-provider sub-dict.
     for tier in TIERS:
-        assert s.tier_models[tier] == 'glm'
+        assert s.tier_models['ollama'][tier] == 'glm'
 
 
 def test_old_model_overrides_slashes_keep_provider_only():
@@ -39,7 +43,7 @@ def test_old_model_overrides_slashes_keep_provider_only():
 
 
 def test_tier_models_scrubbed_when_not_on_active_provider():
-    # tier_models points at a model the active provider doesn't have → ''
+    # Legacy global tier_models points at a model the provider doesn't have → ''.
     s = Settings(providers={
         'ollama': {'name': 'O', 'base_url': 'http://x', 'api_key': 'k',
                    'models': ['glm']}},
@@ -47,22 +51,60 @@ def test_tier_models_scrubbed_when_not_on_active_provider():
         tier_models={'opus': 'gone', 'sonnet': 'glm', 'haiku': 'glm',
                      'subagent': 'glm'})
     s._migrate_old_model_shape()
-    assert s.tier_models['opus'] == ''   # 'gone' not in ['glm']
-    assert s.tier_models['sonnet'] == 'glm'
+    assert s.tier_models['ollama']['opus'] == ''   # 'gone' not in ['glm']
+    assert s.tier_models['ollama']['sonnet'] == 'glm'
 
 
-def test_tier_models_scrubbed_to_empty_when_native_default():
+def test_tier_models_dropped_when_native_default_and_no_providers():
+    # Native default + no custom provider → nothing to fold the legacy global
+    # tiers into, so they're dropped (they were inert under native anyway).
     s = Settings(model_default='',
                  tier_models={'opus': 'x', 'sonnet': 'y'})
     s._migrate_old_model_shape()
-    for tier in TIERS:
-        assert s.tier_models[tier] == ''
+    assert s.tier_models == {}
 
 
-def test_stray_tier_keys_dropped():
-    s = Settings(tier_models={'opus': '', 'bogus': 'x', 'sonnet': ''})
+def test_legacy_global_tier_models_fold_into_default_when_custom():
+    # Legacy global tiers fold into model_default when it's a custom provider.
+    s = Settings(providers={
+        'ollama': {'name': 'O', 'base_url': 'http://x', 'api_key': 'k',
+                   'models': ['glm', 'qwen']},
+        'openrouter': {'name': 'OR', 'base_url': 'http://y', 'api_key': 'k2',
+                       'models': ['m']}},
+        model_default='ollama',
+        tier_models={'opus': 'glm', 'sonnet': '', 'haiku': '', 'subagent': ''})
     s._migrate_old_model_shape()
-    assert set(s.tier_models.keys()) <= set(TIERS)
+    assert set(s.tier_models.keys()) == {'ollama'}   # not spread to openrouter
+    assert s.tier_models['ollama']['opus'] == 'glm'
+    assert s.tier_models['ollama']['sonnet'] == ''
+
+
+def test_legacy_global_tier_models_fold_into_first_custom_when_native_default():
+    # Native default but a custom provider exists → fold into the first (sorted)
+    # custom provider so the user's prior assignments aren't lost.
+    s = Settings(providers={
+        'ollama': {'name': 'O', 'base_url': 'http://x', 'api_key': 'k',
+                   'models': ['glm']},
+        'openrouter': {'name': 'OR', 'base_url': 'http://y', 'api_key': 'k2',
+                       'models': ['m']}},
+        model_default='',
+        tier_models={'opus': 'glm', 'sonnet': 'glm', 'haiku': '',
+                     'subagent': ''})
+    s._migrate_old_model_shape()
+    assert set(s.tier_models.keys()) == {'ollama'}   # sorted-first custom
+    assert s.tier_models['ollama']['opus'] == 'glm'
+    assert s.tier_models['ollama']['sonnet'] == 'glm'
+    assert 'openrouter' not in s.tier_models
+
+
+def test_stray_tier_keys_dropped_per_provider():
+    s = Settings(providers={
+        'ollama': {'name': 'O', 'base_url': 'http://x', 'api_key': 'k',
+                   'models': []}},
+        tier_models={'ollama': {'opus': '', 'bogus': 'x', 'sonnet': ''}})
+    s._migrate_old_model_shape()
+    assert set(s.tier_models['ollama'].keys()) == set(TIERS)
+    assert 'bogus' not in s.tier_models['ollama']
 
 
 def test_dropped_fields_silently_vanish():
@@ -83,13 +125,15 @@ def test_new_shape_passes_through_unchanged():
                    'models': ['glm', 'qwen']}},
         model_default='ollama',
         model_overrides={'/p': 'ollama'},
-        tier_models={'opus': 'qwen', 'sonnet': '', 'haiku': '', 'subagent': ''})
+        tier_models={'ollama': {'opus': 'qwen', 'sonnet': '', 'haiku': '',
+                                'subagent': '', 'fable': ''}})
     s._migrate_old_model_shape()
     assert s.providers['ollama']['models'] == ['glm', 'qwen']
     assert s.model_default == 'ollama'
     assert s.model_overrides == {'/p': 'ollama'}
-    assert s.tier_models['opus'] == 'qwen'
-    assert s.tier_models['sonnet'] == ''
+    assert s.tier_models['ollama']['opus'] == 'qwen'
+    assert s.tier_models['ollama']['sonnet'] == ''
+    assert s.tier_models['ollama']['fable'] == ''
 
 
 def test_malformed_old_shape_degrades_to_defaults():
@@ -102,8 +146,7 @@ def test_malformed_old_shape_degrades_to_defaults():
     s._migrate_old_model_shape()
     assert s.model_default == ''
     assert s.model_overrides == {}
-    for tier in TIERS:
-        assert s.tier_models[tier] == ''
+    assert s.tier_models == {}   # 'opus' isn't a known provider id → dropped
 
 
 def test_load_runs_migration_on_old_file(tmp_path):
@@ -120,4 +163,4 @@ def test_load_runs_migration_on_old_file(tmp_path):
     assert s.providers['ollama']['models'] == ['glm']
     assert s.model_default == 'ollama'
     assert s.model_overrides == {'/p': 'ollama'}
-    assert s.tier_models['opus'] == 'glm'
+    assert s.tier_models['ollama']['opus'] == 'glm'

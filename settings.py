@@ -53,8 +53,11 @@ class Settings:
     # model_overrides: {project_path: provider_id | ''}  — per-project provider
     # override ('' pins that project to native; absent = follow model_default).
     model_overrides: dict = field(default_factory=dict)
-    # tier_models: {tier: model_id | ''}  — global per-tier assignment against the
-    # active provider's model list. '' = use the provider's first model.
+    # tier_models: {provider_id: {tier: model_id | ''}}  — per-provider tier
+    # assignments. Each custom provider carries its own Opus/Sonnet/Haiku/
+    # Subagent/Fable mapping against ITS model list; '' = use the provider's
+    # first model. Native ('') is never a key (native spawns inject no tier env).
+    # See models.resolve_tier_model / build_spawn_env.
     tier_models: dict = field(default_factory=dict)
     # --- Harness binary ---
     # Claude Code is the sole harness. agents['claude']['binary'] is the live
@@ -211,8 +214,12 @@ class Settings:
             self.model_default = pid
             if not isinstance(self.tier_models, dict):
                 self.tier_models = {}
+            sub = self.tier_models.setdefault(pid, {})
+            if not isinstance(sub, dict):
+                sub = {}
+                self.tier_models[pid] = sub
             for tier in TIERS:
-                self.tier_models.setdefault(tier, mid)
+                sub.setdefault(tier, mid)
         elif not isinstance(self.model_default, str):
             self.model_default = ''
 
@@ -227,28 +234,59 @@ class Settings:
         else:
             self.model_overrides = {}
 
-        # Scrub tier_models: only keep a value if it's a model on the active
-        # provider; otherwise reset to ''. Native (model_default=='') → all ''.
-        if not isinstance(self.tier_models, dict):
+        # tier_models: migrate the legacy GLOBAL shape {tier: model_id} → the
+        # per-provider shape {provider_id: {tier: model_id}}. The legacy dict is
+        # detected by having string values. Fold it into one provider: the
+        # default if it's custom, else the first custom provider, else drop
+        # (the values were inert under native anyway).
+        if isinstance(self.tier_models, dict) and self.tier_models and any(
+                isinstance(v, str) for v in self.tier_models.values()):
+            legacy = {t: v for t, v in self.tier_models.items()
+                      if isinstance(v, str)}
+            target = ''
+            if (self.model_default and isinstance(self.providers, dict)
+                    and self.model_default in self.providers):
+                target = self.model_default
+            elif isinstance(self.providers, dict) and self.providers:
+                target = sorted(self.providers)[0]
+            self.tier_models = ({target: {tier: legacy.get(tier, '')
+                                          for tier in TIERS}}
+                                if target else {})
+        # Normalize + scrub per-provider (see _normalize_tier_models).
+        self._normalize_tier_models()
+
+    def _normalize_tier_models(self) -> None:
+        """Normalize ``tier_models`` to ``{provider_id: {tier: model_id|''}}``.
+
+        Drops entries for unknown provider ids; for each kept provider, ensures
+        a dict with exactly the TIERS keys (str or ''), drops stray tier keys,
+        and scrubs any tier value not on that provider's model list to ''.
+        Idempotent and defensive against malformed shapes. Does NOT create
+        entries for providers that have none — missing == all-default (the
+        spawn path reads ``tier_models.get(pid, {})``).
+        """
+        if not isinstance(self.tier_models, dict) or not isinstance(self.providers, dict):
             self.tier_models = {}
-        active_models = []
-        if self.model_default and isinstance(self.providers, dict):
-            prov = self.providers.get(self.model_default)
-            if isinstance(prov, dict):
-                active_models = [m for m in prov.get('models', [])
-                                 if isinstance(m, str)]
-        for tier in TIERS:
-            val = self.tier_models.get(tier, '')
-            if not isinstance(val, str):
-                self.tier_models[tier] = ''
-            elif val and val not in active_models:
-                self.tier_models[tier] = ''
-            else:
-                self.tier_models[tier] = val
-        # Drop any stray tier keys outside the canonical four.
-        for stray in list(self.tier_models.keys()):
-            if stray not in TIERS:
-                self.tier_models.pop(stray, None)
+            return
+        for pid in list(self.tier_models.keys()):
+            if pid not in self.providers:
+                self.tier_models.pop(pid, None)
+                continue
+            sub = self.tier_models.get(pid)
+            if not isinstance(sub, dict):
+                sub = {}
+            prov = self.providers.get(pid)
+            models = ([m for m in prov.get('models', []) if isinstance(m, str)]
+                      if isinstance(prov, dict) else [])
+            new_sub = {}
+            for tier in TIERS:
+                v = sub.get(tier, '')
+                if not isinstance(v, str):
+                    v = ''
+                elif v and v not in models:
+                    v = ''
+                new_sub[tier] = v
+            self.tier_models[pid] = new_sub
 
     def save(self, path: str | None = None) -> None:
         if path is None:
