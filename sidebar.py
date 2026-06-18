@@ -601,12 +601,13 @@ class ProjectRow(Gtk.ListBoxRow):
         """Pure builder for the row subtitle string. Returns the text to show,
         or ``None`` when the row should stay clean (no subtitle).
 
-        Claude Code is the sole harness, so the harness part is always the
-        default and is hidden unless a provider is pinned. Two shapes:
+        Claude Code is the sole harness, so the harness part is always the same
+        and is NOT shown in the normal case — a pinned-provider row shows just
+        ``<ProviderLabel>``. Two shapes:
 
           * NO live mismatch — the running harness is absent OR equals the
-            configured one (always true now): ``None`` for a plain native row,
-            ``<HarnessDisplay> · <ProviderLabel>`` when a provider is pinned.
+            configured one (always true with a single harness): ``None`` for a
+            plain native row, ``<ProviderLabel>`` when a provider is pinned.
           * LIVE mismatch — a child is running a DIFFERENT harness than the one
             configured (unreachable with a single harness, but kept as a
             defensive guard): lead with what is ACTUALLY running, naming the
@@ -622,14 +623,16 @@ class ProjectRow(Gtk.ListBoxRow):
         if mismatch:
             head = (f'{self._harness_display(running)} '
                     f'(next: {self._harness_display(agent_id)})')
-        else:
-            if not provider:
-                return None
-            head = self._harness_display(agent_id)
-        parts = [head]
-        if provider:
-            parts.append(provider_label(self._settings.providers, provider))
-        return ' · '.join(parts)
+            parts = [head]
+            if provider:
+                parts.append(provider_label(self._settings.providers, provider))
+            return ' · '.join(parts)
+        # No mismatch: Claude Code is the sole harness, so the harness part is
+        # always the same and is omitted — a pinned-provider row shows just the
+        # provider label. A native row (no provider) stays clean.
+        if not provider:
+            return None
+        return provider_label(self._settings.providers, provider)
 
     @staticmethod
     def _harness_display(agent_id):

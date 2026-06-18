@@ -743,7 +743,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         model list with remove buttons, add-model entry, remove-provider button.
         """
         name = prov.get('name') or ''
-        card = Adw.ExpandableRow(title=name or pid)
+        card = Adw.ExpanderRow(title=name or pid)
         card.set_subtitle(pid)
 
         name_row = Adw.EntryRow(title='Name')

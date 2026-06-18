@@ -234,14 +234,16 @@ def test_subtitle_hidden_for_plain_default():
     assert row._subtitle_label.get_visible() is False
 
 
-def test_subtitle_shows_harness_and_provider_when_pinned():
-    """A pinned provider → '<HarnessDisplay> · <ProviderLabel>'."""
+def test_subtitle_shows_provider_only_when_pinned():
+    """A pinned provider → just '<ProviderLabel>'. Claude Code is the sole
+    harness, so the (always-identical) harness part is omitted from the
+    subtitle."""
     from settings import Settings
     s = Settings(model_default='ollama',
                  providers=_providers(ollama='Ollama'))
     row = _make_row_with_settings(s, path='/tmp/p')
     assert row._subtitle_label.get_visible() is True
-    assert row._subtitle_label.get_text() == 'Claude Code · Ollama'
+    assert row._subtitle_label.get_text() == 'Ollama'
 
 
 def test_subtitle_per_project_override_uses_that_provider_label():
@@ -252,7 +254,7 @@ def test_subtitle_per_project_override_uses_that_provider_label():
                  model_overrides={'/tmp/p': 'openrouter'},
                  providers=_providers(ollama='Ollama', openrouter='OpenRouter'))
     row = _make_row_with_settings(s, path='/tmp/p')
-    assert row._subtitle_label.get_text() == 'Claude Code · OpenRouter'
+    assert row._subtitle_label.get_text() == 'OpenRouter'
 
 
 # ===========================================================================
@@ -298,7 +300,7 @@ def test_set_running_agent_none_restores_clean_subtitle():
     row.set_running_agent('opencode')
     assert 'opencode' in row._subtitle_label.get_text()
     row.set_running_agent(None)
-    assert row._subtitle_label.get_text() == 'Claude Code · Ollama'
+    assert row._subtitle_label.get_text() == 'Ollama'
 
 
 def test_sidebar_set_running_agent_unknown_path_is_noop():
