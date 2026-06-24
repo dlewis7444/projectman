@@ -7,3 +7,6 @@ docs/
 visual-companion/
 paa/project-snapshot.md
 /CLAUDE.md
+# The GUI test framework was extracted to cage-gate (GitLab dlewis/cage-gate) on
+# 2026-06-24. This repo ships no harness scripts; keep any local scratch out of git.
+/scripts-local/
