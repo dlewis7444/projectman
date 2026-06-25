@@ -10,6 +10,10 @@ These construct real GTK widgets headless (no display) like the sidebar tests,
 with ``SettingsWindow.present`` patched out so the unrealized window never
 needs a surface. They run in plain pytest, so they gate every commit AND the
 VM gate's pytest phase automatically.
+
+Provider editing now lives in a dedicated ``ProviderEditorWindow`` sub-window
+(not the in-page ExpanderRow), so the tier-combo / editability tests open that
+editor headless (its ``present`` patched out too).
 """
 import types
 
@@ -38,24 +42,37 @@ def _walk(widget):
         child = child.get_next_sibling()
 
 
+def _no_present_factory():
+    """Return a no-op present() replacement. Used for both SettingsWindow and
+    ProviderEditorWindow — neither realizes under pytest."""
+    def _no_present(_self, *a, **k):
+        pass
+    return _no_present
+
+
 def _make_sw(settings):
     """Construct a SettingsWindow without presenting it (no display needed).
 
     present() realizes the window and needs a surface; patching it out lets the
-    full page-build path — including _build_provider_card — run headless, which
-    is exactly where the ExpandableRow crash lived.
+    full page-build path — including the slim provider rows — run headless,
+    which is exactly where the ExpandableRow crash lived.
     """
-    sw = None
-
-    def _no_present(_self, *a, **k):
-        pass
     orig = sw_mod.SettingsWindow.present
-    sw_mod.SettingsWindow.present = _no_present
+    sw_mod.SettingsWindow.present = _no_present_factory()
     try:
-        sw = sw_mod.SettingsWindow(settings, _FAKE_APP, None)
+        return sw_mod.SettingsWindow(settings, _FAKE_APP, None)
     finally:
         sw_mod.SettingsWindow.present = orig
-    return sw
+
+
+def _make_editor(settings, pid):
+    """Construct a ProviderEditorWindow headless (present patched out)."""
+    orig = sw_mod.ProviderEditorWindow.present
+    sw_mod.ProviderEditorWindow.present = _no_present_factory()
+    try:
+        return sw_mod.ProviderEditorWindow(settings, _FAKE_APP, None, pid)
+    finally:
+        sw_mod.ProviderEditorWindow.present = orig
 
 
 def _ollama_provider(models=('glm-5.2:cloud[1m]',)):
@@ -63,9 +80,9 @@ def _ollama_provider(models=('glm-5.2:cloud[1m]',)):
                        'api_key': 'k', 'models': list(models)}}
 
 
-def _tier_combos(card):
-    """The Adw.ComboRow tier combos added to a provider card, keyed by title."""
-    return {w.get_title(): w for w in _walk(card)
+def _tier_combos(widget):
+    """The Adw.ComboRow tier combos inside an editor (or card), keyed by title."""
+    return {w.get_title(): w for w in _walk(widget)
             if isinstance(w, Adw.ComboRow)}
 
 
@@ -87,45 +104,80 @@ def test_builds_without_crash_native_default_no_providers():
     assert sw is not None
 
 
-def test_provider_card_has_five_tier_combos():
+def test_provider_row_titled_with_name_preserves_walk_assertion():
+    """The slim provider row's title is the provider's display name — the gate
+    walk asserts ``has('Ollama')``, so this must hold after the ExpanderRow→row
+    refactor."""
     s = Settings(providers=_ollama_provider(), model_default='ollama')
     sw = _make_sw(s)
-    card = sw._build_provider_card('ollama', s.providers['ollama'])
-    combos = _tier_combos(card)
+    row = sw._build_provider_row('ollama', s.providers['ollama'])
+    assert row.get_title() == 'Ollama'
+    assert row.get_subtitle() == 'ollama'
+    # The row carries a "Models" button that opens the editor.
+    buttons = [w for w in _walk(row)
+               if isinstance(w, Gtk.Button) and w.get_label() == 'Models']
+    assert len(buttons) == 1
+
+
+def test_models_button_opens_editor_for_pid():
+    """Clicking a provider row's "Models" button routes to _open_editor(pid)
+    — the wiring that lets the parallel cage-gate walk reach the editor. The
+    row is built directly (the unrealized PreferencesDialog doesn't expose its
+    pages' children through the widget walk)."""
+    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    sw = _make_sw(s)
+    opened = []
+    sw._open_editor = lambda pid: opened.append(pid)
+    row = sw._build_provider_row('ollama', s.providers['ollama'])
+    btn = next(w for w in _walk(row)
+               if isinstance(w, Gtk.Button) and w.get_label() == 'Models')
+    btn.emit('clicked')
+    assert opened == ['ollama']
+
+
+# --- #2: editor tier combos (replaces the old provider-card combo tests) ----
+
+def test_editor_has_five_tier_combos():
+    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    combos = _tier_combos(editor)
     assert set(combos) == {'Opus', 'Sonnet', 'Haiku', 'Subagent', 'Fable (future?)'}
 
 
-def test_fable_combo_disabled_in_provider_card():
+def test_editor_fable_combo_disabled():
     s = Settings(providers=_ollama_provider(), model_default='ollama')
-    sw = _make_sw(s)
-    card = sw._build_provider_card('ollama', s.providers['ollama'])
-    combos = _tier_combos(card)
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    combos = _tier_combos(editor)
     assert combos['Fable (future?)'].get_sensitive() is False
     # The real tiers are editable.
     assert combos['Opus'].get_sensitive() is True
 
 
-def test_tier_combos_sensitive_even_when_default_is_native():
+def test_editor_tier_combos_sensitive_even_when_default_is_native():
     """The B2 invariant: TA is editable for any defined provider regardless of
-    the default. With a native default, the ollama card's tier combos are still
-    sensitive (the old standalone TA group disabled them when default='')."""
+    the default. With a native default, the ollama editor's tier combos are
+    still sensitive (the old standalone TA group disabled them when
+    default='')."""
     s = Settings(providers=_ollama_provider(), model_default='')  # native default
-    sw = _make_sw(s)
-    card = sw._build_provider_card('ollama', s.providers['ollama'])
-    combos = _tier_combos(card)
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    combos = _tier_combos(editor)
     assert combos['Opus'].get_sensitive() is True
     assert combos['Sonnet'].get_sensitive() is True
     assert combos['Subagent'].get_sensitive() is True
     assert combos['Fable (future?)'].get_sensitive() is False  # placeholder
 
 
-# --- #2: UI↔spawn editability invariant --------------------------------------
+# --- #3: UI↔spawn editability invariant --------------------------------------
 
-def test_override_provider_tiers_honored_and_card_editable():
+def test_override_provider_tiers_honored_and_editor_editable():
     """The cross-layer agreement: a provider reachable only via a per-project
     override (native default) has its tiers honored by build_spawn_env AND its
-    card combos are editable. Locks the per-provider design so the UI and the
-    spawn path can't silently disagree again (the TA-disabled-when-native gap)."""
+    editor combos are editable. Locks the per-provider design so the UI and the
+    spawn path can't silently disagree again (the TA-disabled-when-native gap).
+    """
     from models import build_spawn_env
     s = Settings(providers={**_ollama_provider(models=('glm', 'kimi')),
                             **{'openrouter': {'name': 'OR', 'base_url': 'http://b',
@@ -138,9 +190,76 @@ def test_override_provider_tiers_honored_and_card_editable():
     assert reason is None and env is not None
     assert env['ANTHROPIC_BASE_URL'] == 'http://b'
     assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'or-opus'
-    # UI side: the override provider's card is editable even though it's not
+    # UI side: the override provider's editor is editable even though it's not
     # the default (and the default is native).
-    sw = _make_sw(s)
-    card = sw._build_provider_card('openrouter', s.providers['openrouter'])
-    combos = _tier_combos(card)
+    _make_sw(s)
+    editor = _make_editor(s, 'openrouter')
+    combos = _tier_combos(editor)
     assert combos['Opus'].get_sensitive() is True
+
+
+# --- #4: save-on-change writes all four fields (the bug-#2 regression guard) -
+
+def test_editor_save_on_change_writes_all_four_fields():
+    """The data-loss bug: under the ExpanderRow, Name/Base URL saved only on
+    apply (Enter) and a full rebuild yanked focus mid-fill, so they were lost.
+    The editor saves Name on apply, Base URL on focus-out (the focus
+    controller's 'leave'), API key on every keystroke, and a model on Add
+    apply — so all four fields persist to settings.json without ever pressing
+    Enter on Base URL."""
+    import settings as settings_mod
+    s = Settings(providers={'ollama': {'name': '', 'base_url': '',
+                                       'api_key': '', 'models': []}},
+                 model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+
+    # Name — explicit apply (Enter / checkmark).
+    editor._name_row.set_text('Ollama')
+    editor._name_row.emit('apply')
+
+    # Base URL — focus-out only (NO apply). This is the path that used to lose
+    # the field. Emit 'leave' on the stashed focus controller.
+    editor._url_row.set_text('http://localhost:11434')
+    editor._url_row._focus_ctrl.emit('leave')
+
+    # API key — notify::text fires on set_text (covers paste + typing).
+    editor._key_entry.set_text('sekret')
+
+    # Add model — apply on the Add-model entry.
+    editor._add_model_row.set_text('glm-5.2:cloud[1m]')
+    editor._add_model_row.emit('apply')
+
+    prov = s.providers['ollama']
+    assert prov['name'] == 'Ollama'
+    assert prov['base_url'] == 'http://localhost:11434'
+    assert prov['api_key'] == 'sekret'
+    assert prov['models'] == ['glm-5.2:cloud[1m]']
+
+    # And it round-trips through save()→load() (the isolated settings.json).
+    reloaded = Settings.load(settings_mod.DEFAULT_SETTINGS_PATH)
+    r = reloaded.providers['ollama']
+    assert r['name'] == 'Ollama'
+    assert r['base_url'] == 'http://localhost:11434'
+    assert r['api_key'] == 'sekret'
+    assert r['models'] == ['glm-5.2:cloud[1m]']
+
+
+def test_editor_add_model_does_not_destroy_other_fields():
+    """The bug-#1 regression guard: adding a model (which rebuilds the model
+    list) must NOT clear an in-progress Name edit. Name lives in a separate
+    group from the model list, so it survives the rebuild."""
+    s = Settings(providers={'ollama': {'name': '', 'base_url': '',
+                                       'api_key': '', 'models': []}},
+                 model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    editor._name_row.set_text('Ollama')
+    editor._name_row.emit('apply')
+    # Add two models back-to-back; the Add entry is rebuilt each time.
+    editor._add_model_row.set_text('glm')
+    editor._add_model_row.emit('apply')
+    editor._add_model_row.set_text('kimi')
+    editor._add_model_row.emit('apply')
+    assert s.providers['ollama']['name'] == 'Ollama'
+    assert s.providers['ollama']['models'] == ['glm', 'kimi']

@@ -22,6 +22,8 @@ dict at spawn.
 
 import os
 import re
+import json
+import urllib.request
 
 NATIVE_LABEL = 'Anthropic (native)'
 
@@ -126,6 +128,71 @@ def build_tier_options(providers, pid):
         ids.append(mid)
         labels.append(mid)
     return ids, labels
+
+
+def normalize_model_id(mid):
+    """Strip a trailing ``[1m]`` so a probe membership check doesn't
+    false-negative on GLM 1M-context model ids (CC strips ``[1m]`` itself before
+    the API call, so the provider's endpoint never lists the suffixed form)."""
+    if isinstance(mid, str) and mid.endswith('[1m]'):
+        return mid[:-4]
+    return mid
+
+
+def list_provider_models(provider):
+    """Probe a provider's endpoint for the models it offers, or ``None`` on
+    failure.
+
+    Advisory-only reachability check used by the provider editor's per-model
+    indicator. Tries an Anthropic-compatible ``<base_url>/v1/models`` first
+    (``x-api-key`` + ``anthropic-version`` headers, parse ``data[].id``), then
+    Ollama's ``<base_url>/api/tags`` (parse ``models[].name``). Returned ids are
+    ``normalize_model_id``-stripped. 4s timeout.
+
+    Returns a set of normalized model ids, or ``None`` if the provider shape is
+    bad or neither endpoint responds. Callers MUST keep the model regardless —
+    false negatives (id mismatch, tags, ``[1m]``) are expected, so this never
+    gates an add.
+    """
+    if not isinstance(provider, dict):
+        return None
+    base = (provider.get('base_url') or '').rstrip('/')
+    if not base:
+        return None
+    key = provider.get('api_key') or ''
+    timeout = 4
+
+    def _get(url, headers=None):
+        req = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode('utf-8', 'replace'))
+
+    # Anthropic-compatible /v1/models.
+    try:
+        payload = _get(f'{base}/v1/models',
+                       {'x-api-key': key, 'anthropic-version': '2023-06-01'})
+        data = payload.get('data') if isinstance(payload, dict) else None
+        if isinstance(data, list):
+            ids = {normalize_model_id(item['id']) for item in data
+                   if isinstance(item, dict) and isinstance(item.get('id'), str)}
+            if ids:
+                return ids
+    except Exception:
+        pass
+
+    # Ollama /api/tags.
+    try:
+        payload = _get(f'{base}/api/tags')
+        models = payload.get('models') if isinstance(payload, dict) else None
+        if isinstance(models, list):
+            ids = {normalize_model_id(item['name']) for item in models
+                   if isinstance(item, dict) and isinstance(item.get('name'), str)}
+            if ids:
+                return ids
+    except Exception:
+        pass
+
+    return None
 
 
 def resolve_tier_model(settings, pid, tier):

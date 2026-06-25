@@ -1,12 +1,373 @@
 import os
+import threading
 
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, Adw, GLib, Gdk
 
 from settings import TIERS
-from models import build_provider_options, build_tier_options
+from models import (build_provider_options, build_tier_options,
+                    list_provider_models, normalize_model_id)
+
+
+class ProviderEditorWindow(Adw.Window):
+    """A resizeable sub-window for editing one provider: name, base URL, API
+    key, tier assignments, and model list — with save-on-change and an async
+    model-reachability indicator.
+
+    Replaces the in-page ``Adw.ExpanderRow`` card and fixes the two bugs that
+    card had: (1) no full rebuild mid-edit, so adding a model or saving a field
+    never collapses/closes the editor or yanks focus out of the entry being
+    typed; (2) Name/Base URL save on apply AND focus-out (not apply-only), so a
+    type-and-move-on doesn't lose them. On close it calls back into the owning
+    SettingsWindow once to refresh the slim provider-row list.
+    """
+
+    def __init__(self, settings, app, parent, pid, on_close=None):
+        super().__init__()
+        self._settings = settings
+        self._app = app
+        self._pid = pid
+        self._on_close = on_close
+        self._suppress = False
+        self._model_row_for = {}      # mid -> Adw.ActionRow
+        self._add_model_row = None
+
+        prov = settings.providers.get(pid) \
+            if isinstance(settings.providers, dict) else None
+        if not isinstance(prov, dict):
+            prov = {}
+        self._prov = prov
+
+        self.set_title(f'{prov.get("name") or pid} Models')
+        self.set_default_size(560, 640)
+        if parent is not None:
+            self.set_transient_for(parent)
+        self.set_modal(False)
+
+        key_ctrl = Gtk.EventControllerKey.new()
+        key_ctrl.connect('key-pressed', self._on_key_pressed)
+        self.add_controller(key_ctrl)
+
+        toolbar_view = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        toolbar_view.add_top_bar(header)
+
+        clamp = Adw.Clamp()
+        clamp.set_maximum_size(620)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        outer.set_margin_top(12)
+        outer.set_margin_bottom(12)
+        clamp.set_child(outer)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_vexpand(True)
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_child(clamp)
+        toolbar_view.set_content(scrolled)
+        self.set_content(toolbar_view)
+
+        # -- Identity: Name / Base URL / API Key --
+        ident = Adw.PreferencesGroup(title='Provider')
+
+        self._name_row = Adw.EntryRow(title='Name')
+        self._name_row.set_text(prov.get('name') or '')
+        self._name_row.set_show_apply_button(True)
+        self._name_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+        self._name_row.connect('apply', lambda _r: self._commit_name())
+        self._wire_focus_commit(self._name_row, self._commit_name)
+        ident.add(self._name_row)
+
+        self._url_row = Adw.EntryRow(title='Base URL')
+        self._url_row.set_text(prov.get('base_url') or '')
+        self._url_row.set_show_apply_button(True)
+        self._url_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+        self._url_row.set_tooltip_text('e.g. http://localhost:11434')
+        self._url_row.connect('apply', lambda _r: self._commit_url())
+        self._wire_focus_commit(self._url_row, self._commit_url)
+        ident.add(self._url_row)
+
+        key_row = Adw.ActionRow(title='API Key')
+        key = prov.get('api_key') or ''
+        key_row.set_subtitle(f'••••{key[-4:]}' if key else 'Not set')
+        self._key_entry = Gtk.PasswordEntry()
+        self._key_entry.set_show_peek_icon(True)
+        self._key_entry.set_text(key)
+        self._key_entry.set_valign(Gtk.Align.CENTER)
+        self._key_entry.set_size_request(240, -1)
+        self._key_entry.set_tooltip_text('Sent as ANTHROPIC_AUTH_TOKEN')
+        self._key_entry.connect('notify::text',
+            lambda e, _p, r=key_row: self._on_key_changed(e, r))
+        key_row.add_suffix(self._key_entry)
+        ident.add(key_row)
+        outer.append(ident)
+
+        # -- Tier assignments (ABOVE the models list) --
+        self._tier_group = Adw.PreferencesGroup(
+            title='Tier assignments',
+            description='Opus/Sonnet/Haiku/Subagent → a model on this provider. '
+                        '"Default" uses the first model.')
+        self._tier_combos = {}
+        self._rebuild_tier_combos()
+        outer.append(self._tier_group)
+
+        # -- Models --
+        self._models_group = Adw.PreferencesGroup(title='Models')
+        self._rebuild_models_group()
+        outer.append(self._models_group)
+
+        # -- Remove provider --
+        rm_group = Adw.PreferencesGroup()
+        rm_row = Adw.ActionRow()
+        rm_btn = Gtk.Button(label='Remove provider')
+        rm_btn.add_css_class('destructive-action')
+        rm_btn.set_valign(Gtk.Align.CENTER)
+        rm_btn.connect('clicked', self._on_remove_provider)
+        rm_row.add_suffix(rm_btn)
+        rm_group.add(rm_row)
+        outer.append(rm_group)
+
+        self.connect('close-request', self._on_close_request)
+        self.present()
+
+    # --- construction helpers -----------------------------------------
+
+    def _wire_focus_commit(self, row, commit):
+        """Commit a field when focus leaves its entry (apply/Enter covers the
+        explicit-save path; this covers type-and-move-on). Stashes the
+        controller on the row so tests can emit 'leave' directly."""
+        fc = Gtk.EventControllerFocus()
+        fc.connect('leave', lambda _c: commit())
+        row.add_controller(fc)
+        row._focus_ctrl = fc
+
+    def _rebuild_tier_combos(self):
+        """Rebuild the tier ComboRows from the provider's current model list,
+        preserving each combo's current selection. Tier combos are discrete
+        selections (not being typed), so rebuilding them when the model list
+        changes is safe and doesn't disturb any entry's focus."""
+        for combo in self._tier_combos.values():
+            self._tier_group.remove(combo)
+        self._tier_combos = {}
+
+        tier_ids, tier_labels = build_tier_options(
+            self._settings.providers, self._pid)
+        tier_sub = self._settings.tier_models.get(self._pid, {}) \
+            if isinstance(self._settings.tier_models, dict) else {}
+        if not isinstance(tier_sub, dict):
+            tier_sub = {}
+
+        for tier, label in (('opus', 'Opus'), ('sonnet', 'Sonnet'),
+                            ('haiku', 'Haiku'), ('subagent', 'Subagent'),
+                            ('fable', 'Fable (future?)')):
+            combo = Adw.ComboRow(title=label)
+            combo.set_model(Gtk.StringList.new(tier_labels))
+            val = tier_sub.get(tier, '')
+            if not isinstance(val, str) or val not in tier_ids:
+                val = ''
+            self._suppress = True
+            try:
+                combo.set_selected(tier_ids.index(val) if val in tier_ids else 0)
+            finally:
+                self._suppress = False
+            combo.connect('notify::selected',
+                          lambda r, _p, t=tier: self._on_tier_changed(t, r))
+            if tier == 'fable':
+                # Forward-looking placeholder: CC has a Fable model but no
+                # documented per-tier default env var yet. Wired to the env
+                # like the others (build_spawn_env emits
+                # ANTHROPIC_DEFAULT_FABLE_MODEL) but not user-adjustable until
+                # CC honors it.
+                combo.set_sensitive(False)
+            self._tier_group.add(combo)
+            self._tier_combos[tier] = combo
+
+    def _rebuild_models_group(self):
+        """Rebuild the model ActionRows + the Add-model entry. The Name/Base
+        URL/Key entries live in a separate group, so this never destroys an
+        entry the user is mid-typing in (Add-model apply already fired before
+        this is called from _on_add_model)."""
+        for row in list(self._model_row_for.values()):
+            self._models_group.remove(row)
+        self._model_row_for = {}
+        if self._add_model_row is not None:
+            self._models_group.remove(self._add_model_row)
+            self._add_model_row = None
+
+        models = self._prov.get('models') \
+            if isinstance(self._prov.get('models'), list) else []
+        for mid in models:
+            if isinstance(mid, str):
+                self._models_group.add(self._build_model_row(mid))
+
+        add_row = Adw.EntryRow(title='Add model')
+        add_row.set_show_apply_button(True)
+        add_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+        add_row.set_tooltip_text('Free-text id, e.g. glm-5.2:cloud[1m]')
+        add_row.connect('apply', self._on_add_model)
+        self._models_group.add(add_row)
+        self._add_model_row = add_row
+
+    def _build_model_row(self, mid):
+        row = Adw.ActionRow(title=mid)
+        row.set_tooltip_text(mid)
+        rm = Gtk.Button.new_from_icon_name('list-remove-symbolic')
+        rm.add_css_class('flat')
+        rm.set_valign(Gtk.Align.CENTER)
+        rm.set_tooltip_text('Remove model')
+        rm.connect('clicked', lambda _b, m=mid: self._on_remove_model(m))
+        row.add_suffix(rm)
+        self._model_row_for[mid] = row
+        return row
+
+    # --- save + notify ------------------------------------------------
+
+    def _save_and_notify(self):
+        self._settings.save()
+        self._app.emit('settings-changed')
+
+    def _commit_name(self):
+        name = self._name_row.get_text().strip()
+        if self._prov.get('name') == name:
+            return
+        self._prov['name'] = name
+        self.set_title(f'{name or self._pid} Models')
+        self._save_and_notify()
+
+    def _commit_url(self):
+        url = self._url_row.get_text().strip()
+        if self._prov.get('base_url') == url:
+            return
+        self._prov['base_url'] = url
+        self._save_and_notify()
+
+    def _on_key_changed(self, entry, key_row):
+        key = entry.get_text()
+        self._prov['api_key'] = key
+        key_row.set_subtitle(f'••••{key[-4:]}' if key else 'Not set')
+        self._save_and_notify()
+
+    def _on_tier_changed(self, tier, row):
+        if self._suppress:
+            return
+        ids, _labels = build_tier_options(self._settings.providers, self._pid)
+        idx = row.get_selected()
+        if not isinstance(self._settings.tier_models, dict):
+            self._settings.tier_models = {}
+        sub = self._settings.tier_models.setdefault(self._pid, {})
+        if not isinstance(sub, dict):
+            sub = {}
+            self._settings.tier_models[self._pid] = sub
+        if 0 <= idx < len(ids):
+            sub[tier] = ids[idx]
+            self._save_and_notify()
+
+    def _on_add_model(self, row):
+        mid = row.get_text().strip()
+        if not mid:
+            return
+        raw = self._prov.get('models')
+        models = raw if isinstance(raw, list) else []
+        if mid not in models:
+            self._prov['models'] = list(models) + [mid]
+            self._save_and_notify()
+            self._rebuild_tier_combos()   # new model is now a tier option
+        # Rebuild refreshes the model rows + a fresh Add entry. apply already
+        # fired, so no entry the user is editing is destroyed mid-typing.
+        self._rebuild_models_group()
+        if mid in (self._prov.get('models') or []):
+            self._probe_model(mid)
+
+    def _on_remove_model(self, mid):
+        self._prov['models'] = [m for m in self._prov.get('models', []) if m != mid]
+        # Drop tier pins that referenced the removed model.
+        if isinstance(self._settings.tier_models, dict):
+            sub = self._settings.tier_models.get(self._pid)
+            if isinstance(sub, dict):
+                for tier in TIERS:
+                    if sub.get(tier) == mid:
+                        sub[tier] = ''
+        self._save_and_notify()
+        self._rebuild_tier_combos()
+        self._rebuild_models_group()
+
+    def _on_remove_provider(self, _btn):
+        if isinstance(self._settings.providers, dict):
+            self._settings.providers.pop(self._pid, None)
+        if self._settings.model_default == self._pid:
+            self._settings.model_default = ''
+        if isinstance(self._settings.model_overrides, dict):
+            self._settings.model_overrides = {
+                p: v for p, v in self._settings.model_overrides.items()
+                if v != self._pid
+            }
+        if isinstance(self._settings.tier_models, dict):
+            self._settings.tier_models.pop(self._pid, None)
+        self._save_and_notify()
+        self._teardown()
+        self.destroy()
+
+    # --- async reachability probe -------------------------------------
+
+    def _probe_model(self, mid):
+        """Advisory ping: is ``mid`` offered by the provider's endpoint? Runs
+        off the main loop; sets a green/amber indicator on the model row when
+        it returns. The model is always kept regardless of the result."""
+        prov_snap = dict(self._prov)
+
+        def work():
+            offered = list_provider_models(prov_snap)
+            reachable = offered is not None
+            found = bool(offered) and (normalize_model_id(mid) in offered)
+            GLib.idle_add(self._apply_probe_result, mid, found, reachable)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_probe_result(self, mid, found, reachable):
+        row = self._model_row_for.get(mid)
+        if row is None or row.get_parent() is None:
+            return False
+        if found:
+            icon_name, tip, cls = ('emblem-ok-symbolic',
+                                   'found on provider', 'success')
+        elif reachable:
+            icon_name, tip, cls = ('dialog-warning-symbolic',
+                                   'not found on provider — kept anyway', 'warning')
+        else:
+            icon_name, tip, cls = ('dialog-warning-symbolic',
+                                   'provider unreachable — kept anyway', 'warning')
+        icon = Gtk.Image.new_from_icon_name(icon_name)
+        icon.set_tooltip_text(tip)
+        icon.set_valign(Gtk.Align.CENTER)
+        if cls:
+            icon.add_css_class(cls)
+        # Replace any prior probe indicator on this row.
+        prior = getattr(row, '_probe_icon', None)
+        if prior is not None:
+            row.remove_suffix(prior)
+        row.add_suffix(icon)
+        row._probe_icon = icon
+        return False
+
+    # --- lifecycle ----------------------------------------------------
+
+    def _teardown(self):
+        """Commit any pending field edits as a focus-out safety net, then
+        refresh the owning SettingsWindow's slim provider-row list once."""
+        self._commit_name()
+        self._commit_url()
+        if self._on_close is not None:
+            self._on_close()
+
+    def _on_close_request(self, _w):
+        self._teardown()
+
+    def _on_key_pressed(self, controller, keyval, _keycode, _state):
+        if keyval == Gdk.KEY_Escape:
+            self.destroy()
+            return True
+        return False
 
 
 class SettingsWindow(Adw.PreferencesDialog):
@@ -670,125 +1031,41 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._provider_card_rows = []
         if not isinstance(self._settings.providers, dict):
             return
-        # Suppress combo writes while the cards (and their tier combos) are
-        # being populated — set_selected fires notify::selected.
-        self._suppress_combos = True
-        try:
-            for pid in sorted(self._settings.providers):
-                prov = self._settings.providers.get(pid)
-                if not isinstance(prov, dict):
-                    continue
-                card = self._build_provider_card(pid, prov)
-                self._providers_group.add(card)
-                self._provider_card_rows.append(card)
-        finally:
-            self._suppress_combos = False
-
-    def _build_provider_card(self, pid, prov):
-        """An expandable card for one provider: name, base_url, api_key (peek),
-        model list with remove buttons, add-model entry, remove-provider button.
-        """
-        name = prov.get('name') or ''
-        card = Adw.ExpanderRow(title=name or pid)
-        card.set_subtitle(pid)
-
-        name_row = Adw.EntryRow(title='Name')
-        name_row.set_text(name)
-        name_row.set_show_apply_button(True)
-        name_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
-        name_row.connect('apply',
-                         lambda r, p=pid: self._on_provider_field(p, 'name', r))
-        card.add_row(name_row)
-
-        url_row = Adw.EntryRow(title='Base URL')
-        url_row.set_text(prov.get('base_url') or '')
-        url_row.set_show_apply_button(True)
-        url_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
-        url_row.set_tooltip_text('e.g. http://localhost:11434')
-        url_row.connect('apply',
-                        lambda r, p=pid: self._on_provider_field(p, 'base_url', r))
-        card.add_row(url_row)
-
-        key_row = Adw.ActionRow(title='API Key')
-        key = prov.get('api_key') or ''
-        key_row.set_subtitle(f'••••{key[-4:]}' if key else 'Not set')
-        pe = Gtk.PasswordEntry()
-        pe.set_show_peek_icon(True)
-        pe.set_text(key)
-        pe.set_valign(Gtk.Align.CENTER)
-        pe.set_size_request(220, -1)
-        pe.set_tooltip_text('Sent as ANTHROPIC_AUTH_TOKEN')
-        # notify::text (covers paste + typing) WITHOUT rebuilding the card, so
-        # focus is preserved while editing.
-        pe.connect('notify::text',
-                   lambda e, _p, p=pid, r=key_row: self._on_provider_key(p, e, r))
-        key_row.add_suffix(pe)
-        card.add_row(key_row)
-
-        models = prov.get('models') if isinstance(prov.get('models'), list) else []
-        for mid in models:
-            if not isinstance(mid, str):
+        for pid in sorted(self._settings.providers):
+            prov = self._settings.providers.get(pid)
+            if not isinstance(prov, dict):
                 continue
-            m_row = Adw.ActionRow(title=mid)
-            rm = Gtk.Button.new_from_icon_name('list-remove-symbolic')
-            rm.add_css_class('flat')
-            rm.set_valign(Gtk.Align.CENTER)
-            rm.set_tooltip_text('Remove model')
-            rm.connect('clicked', lambda b, p=pid, m=mid: self._on_remove_model(p, m))
-            m_row.add_suffix(rm)
-            card.add_row(m_row)
+            row = self._build_provider_row(pid, prov)
+            self._providers_group.add(row)
+            self._provider_card_rows.append(row)
 
-        add_model_row = Adw.EntryRow(title='Add model')
-        add_model_row.set_show_apply_button(True)
-        add_model_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
-        add_model_row.set_tooltip_text('Free-text id, e.g. glm-5.2:cloud[1m]')
-        add_model_row.connect('apply',
-                              lambda r, p=pid: self._on_add_model(p, r))
-        card.add_row(add_model_row)
+    def _build_provider_row(self, pid, prov):
+        """A slim, one-line row for a provider in the Models page. The row's
+        title is the provider's display name (or pid) — this preserves the gate
+        walk's ``has('Ollama')`` assertion — and the "Models" button opens the
+        full editor sub-window. No tier combos or entries live here, so this
+        row is never the thing being typed into."""
+        name = prov.get('name') or pid
+        row = Adw.ActionRow(title=name, subtitle=pid)
+        models = prov.get('models') if isinstance(prov.get('models'), list) else []
+        n = len([m for m in models if isinstance(m, str)])
+        if n:
+            count = Gtk.Label(label=f'{n} model{"s" if n != 1 else ""}')
+            count.add_css_class('dim-label')
+            count.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(count)
+        btn = Gtk.Button(label='Models')
+        btn.add_css_class('suggested-action')
+        btn.set_valign(Gtk.Align.CENTER)
+        btn.connect('clicked', lambda _b, p=pid: self._open_editor(p))
+        row.add_suffix(btn)
+        return row
 
-        # --- Per-provider Tier Assignments (B2) ---
-        # TA applies to THIS provider regardless of whether it's the default, so
-        # the combos live in the card. Each is populated from this provider's
-        # models and bound to tier_models[pid][tier]. "Default" = the provider's
-        # first model.
-        tier_sub = self._settings.tier_models.get(pid, {}) \
-            if isinstance(self._settings.tier_models, dict) else {}
-        if not isinstance(tier_sub, dict):
-            tier_sub = {}
-        tier_ids, tier_labels = build_tier_options(self._settings.providers, pid)
-        tier_header = Adw.ActionRow(
-            title='Tier assignments',
-            subtitle='Opus/Sonnet/Haiku/Subagent → a model on this provider. '
-                     '"Default" uses the first model.')
-        tier_header.set_sensitive(False)
-        card.add_row(tier_header)
-        for tier, label in (('opus', 'Opus'), ('sonnet', 'Sonnet'),
-                            ('haiku', 'Haiku'), ('subagent', 'Subagent'),
-                            ('fable', 'Fable (future?)')):
-            combo = Adw.ComboRow(title=label)
-            combo.set_model(Gtk.StringList.new(tier_labels))
-            val = tier_sub.get(tier, '')
-            if not isinstance(val, str) or val not in tier_ids:
-                val = ''
-            combo.set_selected(tier_ids.index(val) if val in tier_ids else 0)
-            combo.connect('notify::selected',
-                          lambda r, _p, p=pid, t=tier: self._on_card_tier_changed(p, t, r))
-            if tier == 'fable':
-                # Forward-looking placeholder: CC has a Fable model but no
-                # documented per-tier default env var yet. Wired to the env like
-                # the others (build_spawn_env emits ANTHROPIC_DEFAULT_FABLE_MODEL)
-                # but not user-adjustable until CC honors it.
-                combo.set_sensitive(False)
-            card.add_row(combo)
-
-        rm_row = Adw.ActionRow()
-        rm_btn = Gtk.Button(label='Remove provider')
-        rm_btn.add_css_class('destructive-action')
-        rm_btn.set_valign(Gtk.Align.CENTER)
-        rm_btn.connect('clicked', lambda b, p=pid: self._on_remove_provider(p))
-        rm_row.add_suffix(rm_btn)
-        card.add_row(rm_row)
-        return card
+    def _open_editor(self, pid):
+        """Open the provider editor sub-window. On close it refreshes this page
+        once (the slim row's name/model-count may have changed)."""
+        ProviderEditorWindow(self._settings, self._app, self, pid,
+                             on_close=self._refresh_models_page)
 
     # --- Models page handlers ------------------------------------------
 
@@ -802,98 +1079,9 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._settings.model_default = ids[idx]
         self._settings.save()
         self._app.emit('settings-changed')
-        # Tier assignments are per-provider (in each provider's card), so
+        # Tier assignments are per-provider (in each provider's editor), so
         # changing the default doesn't invalidate any provider's tiers — just
-        # refresh the combo/card layout.
-        self._refresh_models_page()
-
-    def _on_card_tier_changed(self, pid, tier, row):
-        """A tier combo inside a provider's card changed → write the per-provider
-        tier assignment. No card rebuild (the combo already reflects it)."""
-        if self._suppress_combos:
-            return
-        ids, _labels = build_tier_options(self._settings.providers, pid)
-        idx = row.get_selected()
-        if not isinstance(self._settings.tier_models, dict):
-            self._settings.tier_models = {}
-        sub = self._settings.tier_models.setdefault(pid, {})
-        if not isinstance(sub, dict):
-            sub = {}
-            self._settings.tier_models[pid] = sub
-        if 0 <= idx < len(ids):
-            sub[tier] = ids[idx]
-            self._settings.save()
-            self._app.emit('settings-changed')
-
-    def _on_provider_field(self, pid, field, row):
-        prov = self._settings.providers.get(pid)
-        if not isinstance(prov, dict):
-            return
-        prov[field] = row.get_text().strip()
-        self._settings.save()
-        self._app.emit('settings-changed')
-        # name/base_url affect the combo + card; rebuild (apply = Enter, focus
-        # has already left the entry).
-        self._refresh_models_page()
-
-    def _on_provider_key(self, pid, entry, key_row):
-        prov = self._settings.providers.get(pid)
-        if not isinstance(prov, dict):
-            return
-        key = entry.get_text()
-        prov['api_key'] = key
-        key_row.set_subtitle(f'••••{key[-4:]}' if key else 'Not set')
-        # No card rebuild — preserve focus in the password entry while typing.
-        # Save + notify (the env for a running session changes on next spawn).
-        self._settings.save()
-        self._app.emit('settings-changed')
-
-    def _on_add_model(self, pid, row):
-        mid = row.get_text().strip()
-        if not mid:
-            return
-        prov = self._settings.providers.get(pid)
-        if not isinstance(prov, dict):
-            return
-        raw = prov.get('models')
-        models = raw if isinstance(raw, list) else []
-        if mid not in models:
-            prov['models'] = list(models) + [mid]
-        self._settings.save()
-        self._app.emit('settings-changed')
-        self._refresh_models_page()
-
-    def _on_remove_model(self, pid, mid):
-        prov = self._settings.providers.get(pid)
-        if not isinstance(prov, dict):
-            return
-        prov['models'] = [m for m in prov.get('models', []) if m != mid]
-        # Drop this provider's tier pins that referenced the removed model
-        # (per-provider: it's this provider's own tiers, regardless of default).
-        if isinstance(self._settings.tier_models, dict):
-            sub = self._settings.tier_models.get(pid)
-            if isinstance(sub, dict):
-                for tier in TIERS:
-                    if sub.get(tier) == mid:
-                        sub[tier] = ''
-        self._settings.save()
-        self._app.emit('settings-changed')
-        self._refresh_models_page()
-
-    def _on_remove_provider(self, pid):
-        if isinstance(self._settings.providers, dict):
-            self._settings.providers.pop(pid, None)
-        if self._settings.model_default == pid:
-            self._settings.model_default = ''
-        if isinstance(self._settings.model_overrides, dict):
-            self._settings.model_overrides = {
-                p: v for p, v in self._settings.model_overrides.items() if v != pid
-            }
-        # Drop this provider's per-provider tier assignments.
-        if isinstance(self._settings.tier_models, dict):
-            self._settings.tier_models.pop(pid, None)
-        self._settings.save()
-        self._app.emit('settings-changed')
+        # refresh the combo + slim-row layout.
         self._refresh_models_page()
 
     def _on_add_provider(self, button):
@@ -909,6 +1097,9 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._settings.save()
         self._app.emit('settings-changed')
         self._refresh_models_page()
+        # Open the editor on the freshly-added empty provider so the user can
+        # fill it immediately (the flow that lost fields under the ExpanderRow).
+        self._open_editor(pid)
 
     # ------------------------------------------------------------------ #
     #  Extra Pages                                                         #
