@@ -243,6 +243,37 @@ def _explicit_tier_model(settings, pid, tier):
     return ''
 
 
+def resolve_classifier_model(settings, pid, kind):
+    """The explicitly-chosen classifier model id if it is still on the active
+    provider's model list; else ``''``.
+
+    Reads ``classifier_models[pid][kind]`` (per-provider). Like the Subagent
+    tier, this does NOT fall back to the provider's first model — it returns
+    ``''`` when unset or stale, so the spawn path can omit the env var and let
+    Claude Code use its own default. ``kind`` is ``'auto_mode'`` or
+    ``'bg_classifier'``.
+    """
+    models = _provider_models(settings.providers, pid)
+    cm = getattr(settings, 'classifier_models', None)
+    if isinstance(cm, dict):
+        sub = cm.get(pid)
+        if isinstance(sub, dict):
+            v = sub.get(kind, '')
+            if isinstance(v, str) and v and v in models:
+                return v
+    return ''
+
+
+def _format_classifier_temperature(value):
+    """Render a finite temperature value as the string CC expects.
+
+    ``CLAUDE_CODE_AUTO_MODE_TEMPERATURE`` is parsed by CC via ``Number()``,
+    so a plain JSON-style float string is sufficient. Values like 0.0 or 1
+    are emitted verbatim.
+    """
+    return str(float(value))
+
+
 def _maybe_1m(model_id):
     """Append the GLM 1M-context suffix ``[1m]`` to a GLM Opus model id that
     lacks it. Non-GLM ids are returned unchanged — the suffix is GLM-specific
@@ -315,6 +346,31 @@ def build_spawn_env(settings, project_path):
         # A per-call model:"sonnet" then routes image subagents through the
         # Sonnet tier above; default subagents fall to CC's global default.
         env.pop('CLAUDE_CODE_SUBAGENT_MODEL', None)
+
+    # Classifier levers — per-provider, opt-in. Omit when unset so CC falls back
+    # to its own defaults. The user picks the model; PM does not gate it.
+    auto_mode = resolve_classifier_model(settings, pid, 'auto_mode')
+    if auto_mode:
+        env['CLAUDE_CODE_AUTO_MODE_MODEL'] = auto_mode
+    else:
+        env.pop('CLAUDE_CODE_AUTO_MODE_MODEL', None)
+    bg_classifier = resolve_classifier_model(settings, pid, 'bg_classifier')
+    if bg_classifier:
+        env['CLAUDE_CODE_BG_CLASSIFIER_MODEL'] = bg_classifier
+    else:
+        env.pop('CLAUDE_CODE_BG_CLASSIFIER_MODEL', None)
+    ct = getattr(settings, 'classifier_temperature', None)
+    if isinstance(ct, dict) and pid in ct:
+        env['CLAUDE_CODE_AUTO_MODE_TEMPERATURE'] = _format_classifier_temperature(
+            ct[pid])
+    else:
+        env.pop('CLAUDE_CODE_AUTO_MODE_TEMPERATURE', None)
+    c2 = getattr(settings, 'classifier_two_stage', None)
+    if isinstance(c2, dict) and pid in c2:
+        env['CLAUDE_CODE_TWO_STAGE_CLASSIFIER'] = '1' if c2[pid] else '0'
+    else:
+        env.pop('CLAUDE_CODE_TWO_STAGE_CLASSIFIER', None)
+
     env['CLAUDE_CODE_ATTRIBUTION_HEADER'] = '0'
     env['OLLAMA_HOST'] = base_url
     env['DISABLE_AUTOUPDATER'] = '1'

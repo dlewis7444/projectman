@@ -59,6 +59,18 @@ class Settings:
     # first model. Native ('') is never a key (native spawns inject no tier env).
     # See models.resolve_tier_model / build_spawn_env.
     tier_models: dict = field(default_factory=dict)
+    # --- Classifier levers (per-provider, like tier_models) ---
+    # These map to Claude Code env vars. They are per-provider because the
+    # active provider's endpoint must be able to serve the chosen model id.
+    # classifier_models: {provider_id: {'auto_mode': model_id | '',
+    #                                   'bg_classifier': model_id | ''}}
+    # classifier_temperature: {provider_id: float} — only emitted when the pid
+    #   key exists (so 0.0 can be emitted explicitly; missing key = leave unset).
+    # classifier_two_stage: {provider_id: bool} — only emitted when the pid key
+    #   exists (False emits "0", True emits "1"; missing key = leave unset).
+    classifier_models: dict = field(default_factory=dict)
+    classifier_temperature: dict = field(default_factory=dict)
+    classifier_two_stage: dict = field(default_factory=dict)
     # --- Harness binary ---
     # Claude Code is the sole harness. agents['claude']['binary'] is the live
     # value; the legacy ``claude_binary`` key is kept as a fallback for older
@@ -254,6 +266,7 @@ class Settings:
                                 if target else {})
         # Normalize + scrub per-provider (see _normalize_tier_models).
         self._normalize_tier_models()
+        self._normalize_classifier_models()
 
     def _normalize_tier_models(self) -> None:
         """Normalize ``tier_models`` to ``{provider_id: {tier: model_id|''}}``.
@@ -287,6 +300,65 @@ class Settings:
                     v = ''
                 new_sub[tier] = v
             self.tier_models[pid] = new_sub
+
+    def _normalize_classifier_models(self) -> None:
+        """Normalize classifier fields to the per-provider shape.
+
+        ``classifier_models`` becomes ``{provider_id: {'auto_mode': '',
+        'bg_classifier': ''}}`` with stale model ids scrubbed. Temperature
+        and two-stage dicts keep only known providers with sane types.
+        Missing provider keys mean "leave unset" for the spawn path.
+        """
+        if not isinstance(self.providers, dict):
+            self.classifier_models = {}
+            self.classifier_temperature = {}
+            self.classifier_two_stage = {}
+            return
+
+        # Model picks.
+        if not isinstance(self.classifier_models, dict):
+            self.classifier_models = {}
+        for pid in list(self.classifier_models.keys()):
+            if pid not in self.providers:
+                self.classifier_models.pop(pid, None)
+                continue
+            sub = self.classifier_models.get(pid)
+            if not isinstance(sub, dict):
+                sub = {}
+            prov = self.providers.get(pid)
+            models = ([m for m in prov.get('models', []) if isinstance(m, str)]
+                      if isinstance(prov, dict) else [])
+            new_sub = {}
+            for kind in ('auto_mode', 'bg_classifier'):
+                v = sub.get(kind, '')
+                if not isinstance(v, str):
+                    v = ''
+                elif v and v not in models:
+                    v = ''
+                new_sub[kind] = v
+            self.classifier_models[pid] = new_sub
+
+        # Temperature: finite numbers only.
+        if not isinstance(self.classifier_temperature, dict):
+            self.classifier_temperature = {}
+        for pid in list(self.classifier_temperature.keys()):
+            if pid not in self.providers:
+                self.classifier_temperature.pop(pid, None)
+                continue
+            v = self.classifier_temperature[pid]
+            if not isinstance(v, (int, float)) or not __import__('math').isfinite(v):
+                self.classifier_temperature.pop(pid, None)
+
+        # Two-stage: bools only.
+        if not isinstance(self.classifier_two_stage, dict):
+            self.classifier_two_stage = {}
+        for pid in list(self.classifier_two_stage.keys()):
+            if pid not in self.providers:
+                self.classifier_two_stage.pop(pid, None)
+                continue
+            v = self.classifier_two_stage[pid]
+            if not isinstance(v, bool):
+                self.classifier_two_stage.pop(pid, None)
 
     def save(self, path: str | None = None) -> None:
         if path is None:

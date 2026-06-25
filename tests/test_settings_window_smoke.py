@@ -80,10 +80,13 @@ def _ollama_provider(models=('glm-5.2:cloud[1m]',)):
                        'api_key': 'k', 'models': list(models)}}
 
 
-def _tier_combos(widget):
-    """The Adw.ComboRow tier combos inside an editor (or card), keyed by title."""
-    return {w.get_title(): w for w in _walk(widget)
-            if isinstance(w, Adw.ComboRow)}
+def _tier_combos(editor):
+    """The Adw.ComboRow tier combos inside the editor's tier group only."""
+    combos = {}
+    for w in _walk(editor._tier_group):
+        if isinstance(w, Adw.ComboRow):
+            combos[w.get_title()] = w
+    return combos
 
 
 # --- #1: construction smoke (catches crash-on-build) ------------------------
@@ -263,3 +266,83 @@ def test_editor_add_model_does_not_destroy_other_fields():
     editor._add_model_row.emit('apply')
     assert s.providers['ollama']['name'] == 'Ollama'
     assert s.providers['ollama']['models'] == ['glm', 'kimi']
+
+
+# --- #5: classifier levers in the editor -------------------------------
+
+def _find_row(widget, title):
+    for w in _walk(widget):
+        if isinstance(w, Adw.EntryRow) and w.get_title() == title:
+            return w
+        if isinstance(w, Adw.SwitchRow) and w.get_title() == title:
+            return w
+        if isinstance(w, Adw.ComboRow) and w.get_title() == title:
+            return w
+    return None
+
+
+def test_editor_has_classifier_controls():
+    s = Settings(providers=_ollama_provider(models=('glm', 'kimi')),
+                 model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    assert _find_row(editor, 'Auto-mode model') is not None
+    assert _find_row(editor, 'Background classifier') is not None
+    assert _find_row(editor, 'Classifier temperature') is not None
+    assert _find_row(editor, 'Two-stage classifier') is not None
+
+
+def test_editor_classifier_controls_save_on_change():
+    """All four classifier controls mutate settings on change without a full
+    rebuild (regression guard for bug #1)."""
+    import settings as settings_mod
+    s = Settings(providers={'ollama': {'name': '', 'base_url': '',
+                                       'api_key': '', 'models': ['glm', 'kimi']}},
+                 model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+
+    # Auto-mode model combo — select 'kimi' (index 2: Default, glm, kimi).
+    auto_combo = _find_row(editor, 'Auto-mode model')
+    auto_combo.set_selected(2)
+
+    # Background classifier combo — select 'kimi'.
+    bg_combo = _find_row(editor, 'Background classifier')
+    bg_combo.set_selected(2)
+
+    # Temperature — focus-out only.
+    temp_row = _find_row(editor, 'Classifier temperature')
+    temp_row.set_text('0.5')
+    temp_row._focus_ctrl.emit('leave')
+
+    # Two-stage switch — toggle on.
+    ts_row = _find_row(editor, 'Two-stage classifier')
+    ts_row.set_active(True)
+
+    assert s.classifier_models['ollama'] == {
+        'auto_mode': 'kimi', 'bg_classifier': 'kimi'}
+    assert s.classifier_temperature == {'ollama': 0.5}
+    assert s.classifier_two_stage == {'ollama': True}
+
+    # Round-trip through save/load.
+    reloaded = Settings.load(settings_mod.DEFAULT_SETTINGS_PATH)
+    assert reloaded.classifier_models['ollama'] == {
+        'auto_mode': 'kimi', 'bg_classifier': 'kimi'}
+    assert reloaded.classifier_temperature == {'ollama': 0.5}
+    assert reloaded.classifier_two_stage == {'ollama': True}
+
+
+def test_editor_classifier_model_persists_when_adding_model():
+    """Bug-#1 guard for classifier combos: adding a new model must not drop
+    an already-chosen classifier model pick."""
+    s = Settings(providers={'ollama': {'name': '', 'base_url': '',
+                                       'api_key': '', 'models': ['glm']}},
+                 model_default='ollama',
+                 classifier_models={'ollama': {'auto_mode': 'glm'}})
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    # Add a new model; the classifier group is rebuilt but selection is
+    # restored from settings.
+    editor._add_model_row.set_text('kimi')
+    editor._add_model_row.emit('apply')
+    assert s.classifier_models['ollama']['auto_mode'] == 'glm'

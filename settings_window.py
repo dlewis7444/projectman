@@ -112,6 +112,17 @@ class ProviderEditorWindow(Adw.Window):
         self._rebuild_tier_combos()
         outer.append(self._tier_group)
 
+        # -- Classifier levers --
+        self._classifier_group = Adw.PreferencesGroup(
+            title='Classifier',
+            description='Auto-mode classifier tuning. Leave unset to use Claude '
+                        'Code defaults.')
+        self._classifier_combos = {}
+        self._classifier_temp_row = None
+        self._classifier_two_stage_row = None
+        self._rebuild_classifier_group()
+        outer.append(self._classifier_group)
+
         # -- Models --
         self._models_group = Adw.PreferencesGroup(title='Models')
         self._rebuild_models_group()
@@ -182,6 +193,71 @@ class ProviderEditorWindow(Adw.Window):
                 combo.set_sensitive(False)
             self._tier_group.add(combo)
             self._tier_combos[tier] = combo
+
+    def _rebuild_classifier_group(self):
+        """Rebuild the classifier ComboRows + temperature/two-stage widgets,
+        preserving current selections/values. Like tier combos, these are
+        discrete selections so rebuilding when the model list changes is safe."""
+        for combo in self._classifier_combos.values():
+            self._classifier_group.remove(combo)
+        self._classifier_combos = {}
+        if self._classifier_temp_row is not None:
+            self._classifier_group.remove(self._classifier_temp_row)
+            self._classifier_temp_row = None
+        if self._classifier_two_stage_row is not None:
+            self._classifier_group.remove(self._classifier_two_stage_row)
+            self._classifier_two_stage_row = None
+
+        ids, labels = build_tier_options(
+            self._settings.providers, self._pid)
+        cm = self._settings.classifier_models.get(self._pid, {}) \
+            if isinstance(self._settings.classifier_models, dict) else {}
+        if not isinstance(cm, dict):
+            cm = {}
+
+        for kind, title in (('auto_mode', 'Auto-mode model'),
+                            ('bg_classifier', 'Background classifier')):
+            combo = Adw.ComboRow(title=title)
+            combo.set_model(Gtk.StringList.new(labels))
+            val = cm.get(kind, '')
+            if not isinstance(val, str) or val not in ids:
+                val = ''
+            self._suppress = True
+            try:
+                combo.set_selected(ids.index(val) if val in ids else 0)
+            finally:
+                self._suppress = False
+            combo.connect('notify::selected',
+                          lambda r, _p, k=kind: self._on_classifier_model_changed(k, r))
+            self._classifier_group.add(combo)
+            self._classifier_combos[kind] = combo
+
+        temp_val = ''
+        ct = self._settings.classifier_temperature.get(self._pid) \
+            if isinstance(self._settings.classifier_temperature, dict) else None
+        if isinstance(ct, (int, float)):
+            temp_val = str(float(ct))
+        temp_row = Adw.EntryRow(title='Classifier temperature')
+        temp_row.set_text(temp_val)
+        temp_row.set_show_apply_button(True)
+        temp_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+        temp_row.set_tooltip_text('Temperature passed to CLAUDE_CODE_AUTO_MODE_TEMPERATURE')
+        temp_row.connect('apply', lambda _r: self._commit_classifier_temperature())
+        self._wire_focus_commit(temp_row, self._commit_classifier_temperature)
+        self._classifier_group.add(temp_row)
+        self._classifier_temp_row = temp_row
+
+        two_stage = False
+        c2 = self._settings.classifier_two_stage.get(self._pid) \
+            if isinstance(self._settings.classifier_two_stage, dict) else None
+        if isinstance(c2, bool):
+            two_stage = c2
+        ts_row = Adw.SwitchRow(title='Two-stage classifier')
+        ts_row.set_active(two_stage)
+        ts_row.set_tooltip_text('Sets CLAUDE_CODE_TWO_STAGE_CLASSIFIER to 1 or 0')
+        ts_row.connect('notify::active', self._on_classifier_two_stage_changed)
+        self._classifier_group.add(ts_row)
+        self._classifier_two_stage_row = ts_row
 
     def _rebuild_models_group(self):
         """Rebuild the model ActionRows + the Add-model entry. The Name/Base
@@ -263,6 +339,48 @@ class ProviderEditorWindow(Adw.Window):
             sub[tier] = ids[idx]
             self._save_and_notify()
 
+    def _on_classifier_model_changed(self, kind, row):
+        if self._suppress:
+            return
+        ids, _labels = build_tier_options(self._settings.providers, self._pid)
+        idx = row.get_selected()
+        if not isinstance(self._settings.classifier_models, dict):
+            self._settings.classifier_models = {}
+        sub = self._settings.classifier_models.setdefault(self._pid, {})
+        if not isinstance(sub, dict):
+            sub = {}
+            self._settings.classifier_models[self._pid] = sub
+        if 0 <= idx < len(ids):
+            sub[kind] = ids[idx]
+            self._save_and_notify()
+
+    def _commit_classifier_temperature(self):
+        text = self._classifier_temp_row.get_text().strip()
+        if not text:
+            if (isinstance(self._settings.classifier_temperature, dict)
+                    and self._pid in self._settings.classifier_temperature):
+                self._settings.classifier_temperature.pop(self._pid, None)
+                self._save_and_notify()
+            return
+        try:
+            value = float(text)
+        except ValueError:
+            return
+        if not __import__('math').isfinite(value):
+            return
+        if not isinstance(self._settings.classifier_temperature, dict):
+            self._settings.classifier_temperature = {}
+        self._settings.classifier_temperature[self._pid] = value
+        self._save_and_notify()
+
+    def _on_classifier_two_stage_changed(self, row, _param):
+        if self._suppress:
+            return
+        if not isinstance(self._settings.classifier_two_stage, dict):
+            self._settings.classifier_two_stage = {}
+        self._settings.classifier_two_stage[self._pid] = bool(row.get_active())
+        self._save_and_notify()
+
     def _on_add_model(self, row):
         mid = row.get_text().strip()
         if not mid:
@@ -273,6 +391,7 @@ class ProviderEditorWindow(Adw.Window):
             self._prov['models'] = list(models) + [mid]
             self._save_and_notify()
             self._rebuild_tier_combos()   # new model is now a tier option
+            self._rebuild_classifier_group()  # classifier picks see it too
         # Rebuild refreshes the model rows + a fresh Add entry. apply already
         # fired, so no entry the user is editing is destroyed mid-typing.
         self._rebuild_models_group()
@@ -288,8 +407,16 @@ class ProviderEditorWindow(Adw.Window):
                 for tier in TIERS:
                     if sub.get(tier) == mid:
                         sub[tier] = ''
+        # Drop classifier model picks that referenced the removed model.
+        if isinstance(self._settings.classifier_models, dict):
+            sub = self._settings.classifier_models.get(self._pid)
+            if isinstance(sub, dict):
+                for kind in ('auto_mode', 'bg_classifier'):
+                    if sub.get(kind) == mid:
+                        sub[kind] = ''
         self._save_and_notify()
         self._rebuild_tier_combos()
+        self._rebuild_classifier_group()
         self._rebuild_models_group()
 
     def _on_remove_provider(self, _btn):
@@ -304,6 +431,12 @@ class ProviderEditorWindow(Adw.Window):
             }
         if isinstance(self._settings.tier_models, dict):
             self._settings.tier_models.pop(self._pid, None)
+        if isinstance(self._settings.classifier_models, dict):
+            self._settings.classifier_models.pop(self._pid, None)
+        if isinstance(self._settings.classifier_temperature, dict):
+            self._settings.classifier_temperature.pop(self._pid, None)
+        if isinstance(self._settings.classifier_two_stage, dict):
+            self._settings.classifier_two_stage.pop(self._pid, None)
         self._save_and_notify()
         self._teardown()
         self.destroy()
