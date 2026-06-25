@@ -20,7 +20,7 @@ import types
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw
+from gi.repository import Gtk, Adw, Gdk
 
 from settings import Settings
 import settings_window as sw_mod
@@ -203,7 +203,7 @@ def test_override_provider_tiers_honored_and_editor_editable():
 
 # --- #4: save-on-change writes all four fields (the bug-#2 regression guard) -
 
-def test_editor_save_on_change_writes_all_four_fields():
+def test_editor_save_on_change_writes_all_four_fields(monkeypatch, tmp_path):
     """The data-loss bug: under the ExpanderRow, Name/Base URL saved only on
     apply (Enter) and a full rebuild yanked focus mid-fill, so they were lost.
     The editor saves Name on apply, Base URL on focus-out (the focus
@@ -211,6 +211,12 @@ def test_editor_save_on_change_writes_all_four_fields():
     apply — so all four fields persist to settings.json without ever pressing
     Enter on Base URL."""
     import settings as settings_mod
+    # Isolate the round-trip: the editor's save-on-change calls save() with no
+    # path, which defaults to DEFAULT_SETTINGS_PATH — the user's REAL
+    # ~/.ProjectMan/settings.json. Redirect that global to a tmp path so this
+    # test can't clobber real settings.
+    tmp_settings = tmp_path / 'settings.json'
+    monkeypatch.setattr(settings_mod, 'DEFAULT_SETTINGS_PATH', str(tmp_settings))
     s = Settings(providers={'ollama': {'name': '', 'base_url': '',
                                        'api_key': '', 'models': []}},
                  model_default='ollama')
@@ -346,3 +352,43 @@ def test_editor_classifier_model_persists_when_adding_model():
     editor._add_model_row.set_text('kimi')
     editor._add_model_row.emit('apply')
     assert s.classifier_models['ollama']['auto_mode'] == 'glm'
+
+
+# --- #6: Escape commits pending edits (the close-vs-destroy safety net) -----
+
+def test_editor_escape_commits_pending_name_edit(monkeypatch, tmp_path):
+    """Regression guard for the Escape data-loss bug: pressing Escape used to
+    call destroy(), bypassing the close-request handler and _teardown, so a
+    pending Name edit (typed but not applied) was lost. Escape now routes
+    through close() so _teardown commits first."""
+    import settings as settings_mod
+    monkeypatch.setattr(settings_mod, 'DEFAULT_SETTINGS_PATH',
+                        str(tmp_path / 'settings.json'))
+    s = Settings(providers={'ollama': {'name': '', 'base_url': '',
+                                       'api_key': '', 'models': []}},
+                 model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    # Type a name but do NOT emit 'apply' — it's a pending edit held only in
+    # the entry buffer.
+    editor._name_row.set_text('Ollama')
+    # Fire the Escape key handler as the key controller would.
+    assert editor._on_key_pressed(None, Gdk.KEY_Escape, 0, 0) is True
+    # _teardown ran via close()→close-request, so the name was committed.
+    assert s.providers['ollama']['name'] == 'Ollama'
+
+
+def test_editor_probe_result_bails_after_teardown():
+    """Regression guard for the probe use-after-free: the reachability probe
+    runs on a daemon thread and lands via GLib.idle_add. If the editor was
+    closed (and its widgets disposed) before the callback fires, it must bail
+    on the _closed flag rather than touch disposed widgets."""
+    s = Settings(providers={'ollama': {'name': '', 'base_url': '',
+                                       'api_key': '', 'models': ['glm']}},
+                 model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    editor._teardown()
+    assert editor._closed is True
+    # Must not raise and must short-circuit (return False) — no widget access.
+    assert editor._apply_probe_result('glm', True, True) is False

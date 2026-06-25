@@ -31,6 +31,7 @@ class ProviderEditorWindow(Adw.Window):
         self._pid = pid
         self._on_close = on_close
         self._suppress = False
+        self._closed = False           # set in _teardown; guards async probe callbacks
         self._model_row_for = {}      # mid -> Adw.ActionRow
         self._add_model_row = None
 
@@ -176,6 +177,13 @@ class ProviderEditorWindow(Adw.Window):
             combo.set_model(Gtk.StringList.new(tier_labels))
             val = tier_sub.get(tier, '')
             if not isinstance(val, str) or val not in tier_ids:
+                # Stale saved tier (its model was removed from the provider):
+                # align the stored value with the UI's 'Default' selection so
+                # the on-disk file doesn't keep a model id that's no longer
+                # selectable. tier_sub is the real stored dict when the pid
+                # entry exists; a fresh {} (pid absent) has val == '' already.
+                if val:
+                    tier_sub[tier] = ''
                 val = ''
             self._suppress = True
             try:
@@ -458,6 +466,12 @@ class ProviderEditorWindow(Adw.Window):
         threading.Thread(target=work, daemon=True).start()
 
     def _apply_probe_result(self, mid, found, reachable):
+        # The probe runs on a daemon thread; the editor may have been closed
+        # (and its widgets disposed) between firing GLib.idle_add and this
+        # callback landing. Bail before touching any widget to avoid a
+        # use-after-free / disposed-member access.
+        if self._closed:
+            return False
         row = self._model_row_for.get(mid)
         if row is None or row.get_parent() is None:
             return False
@@ -488,6 +502,7 @@ class ProviderEditorWindow(Adw.Window):
     def _teardown(self):
         """Commit any pending field edits as a focus-out safety net, then
         refresh the owning SettingsWindow's slim provider-row list once."""
+        self._closed = True
         self._commit_name()
         self._commit_url()
         if self._on_close is not None:
@@ -498,6 +513,14 @@ class ProviderEditorWindow(Adw.Window):
 
     def _on_key_pressed(self, controller, keyval, _keycode, _state):
         if keyval == Gdk.KEY_Escape:
+            # Commit any pending Name/Base URL edit BEFORE destroying. Escape
+            # used to call destroy() outright, bypassing the close-request
+            # safety net and losing a typed-but-unapplied field (bug #2). We
+            # can't rely on close() to fire close-request for us — it does not
+            # on an unrealized window (verified), and destroy() never emits it
+            # at all — so run _teardown() explicitly, then destroy. Mirrors the
+            # _remove_provider path in this same file.
+            self._teardown()
             self.destroy()
             return True
         return False
