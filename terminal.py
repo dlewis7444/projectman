@@ -297,7 +297,20 @@ class TerminalView(Gtk.Box):
         popover.popup()
 
     def _set_clipboard(self, text):
-        Gdk.Display.get_default().get_clipboard().set(text)
+        """Put ``text`` on the system clipboard.
+
+        ``Gdk.Clipboard.set()`` propagates to other apps while this surface
+        holds the keyboard focus — which it does during a right-click in the
+        terminal. (An earlier revision shelled out to ``wl-copy`` to dodge a
+        focus edge case, but wl-copy pops its own window and didn't reliably
+        take the clipboard from an already-focused app — strictly worse;
+        reverted 2026-06-26.) Never raises — a failed clipboard copy must
+        not kill the context menu.
+        """
+        try:
+            Gdk.Display.get_default().get_clipboard().set(text)
+        except Exception as e:
+            self._debug(f'clipboard set failed: {e!r}')
 
     def _smart_copy(self):
         """Copy selection with TUI-emitted hard-wrap artifacts collapsed.
@@ -323,7 +336,7 @@ class TerminalView(Gtk.Box):
                 f'smart-copy baseline_len={len(baseline)} result_len={len(result)} '
                 f'head={result[:80]!r}'
             )
-            Gdk.Display.get_default().get_clipboard().set(result)
+            self._set_clipboard(result)
         except Exception as e:
             self._debug(f'smart-copy failed: {e!r}; falling back to native copy')
             try:
