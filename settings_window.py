@@ -43,7 +43,16 @@ class ProviderEditorWindow(Adw.Window):
 
         self.set_title(f'{prov.get("name") or pid} Models')
         self.set_default_size(560, 640)
-        if parent is not None:
+        # set_transient_for requires a Gtk.Window parent. In the real app the
+        # parent passed (_open_editor hands the SettingsWindow) is an
+        # Adw.PreferencesDialog — NOT a Gtk.Window — so an unconditional
+        # set_transient_for(parent) raises TypeError and __init__ aborts before
+        # present(), meaning the editor never opens. The headless tests missed
+        # this because they pass parent=None (hitting the old guard). Only set
+        # transient-for for actual Gtk.Window parents; otherwise the editor
+        # opens as an independent top-level. (2ea4d2f editor-open regression,
+        # surfaced by the cg-pmprov-001 persona + a deterministic cage probe.)
+        if parent is not None and isinstance(parent, Gtk.Window):
             self.set_transient_for(parent)
         self.set_modal(False)
 

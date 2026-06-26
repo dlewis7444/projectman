@@ -392,3 +392,26 @@ def test_editor_probe_result_bails_after_teardown():
     assert editor._closed is True
     # Must not raise and must short-circuit (return False) — no widget access.
     assert editor._apply_probe_result('glm', True, True) is False
+
+
+# --- #7: editor opens with a PreferencesDialog parent (the real-app path) ----
+
+def test_editor_constructs_with_preferencesdialog_parent():
+    """Regression for the 2ea4d2f editor-open bug surfaced by the cg-pmprov-001
+    persona + a deterministic cage probe. _open_editor hands the SettingsWindow
+    (an Adw.PreferencesDialog, NOT a Gtk.Window) as the editor's parent. An
+    unconditional set_transient_for(parent) raised TypeError → __init__ aborted
+    before present() → the editor never opened in the real app. The headless
+    tests missed it (they pass parent=None, skipping the call). Constructing the
+    editor with a real PreferencesDialog parent must not raise."""
+    s = Settings(providers={'ollama': {'name': '', 'base_url': '',
+                                       'api_key': '', 'models': ['glm']}},
+                 model_default='ollama')
+    sw = _make_sw(s)  # a real Adw.PreferencesDialog
+    orig = sw_mod.ProviderEditorWindow.present
+    sw_mod.ProviderEditorWindow.present = _no_present_factory()
+    try:
+        editor = sw_mod.ProviderEditorWindow(s, _FAKE_APP, sw, 'ollama')
+    finally:
+        sw_mod.ProviderEditorWindow.present = orig
+    assert editor is not None
