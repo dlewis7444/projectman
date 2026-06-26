@@ -20,7 +20,7 @@ import types
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, Gdk
+from gi.repository import Gtk, Adw
 
 from settings import Settings
 import settings_window as sw_mod
@@ -116,25 +116,29 @@ def test_provider_row_titled_with_name_preserves_walk_assertion():
     row = sw._build_provider_row('ollama', s.providers['ollama'])
     assert row.get_title() == 'Ollama'
     assert row.get_subtitle() == 'ollama'
-    # The row carries a "Models" button that opens the editor.
-    buttons = [w for w in _walk(row)
-               if isinstance(w, Gtk.Button) and w.get_label() == 'Models']
-    assert len(buttons) == 1
+    # The row is activatable (opens the editor on click) and carries a chevron
+    # suffix as the visual affordance — no "Models" button (dropped in the
+    # Adw.Window→Adw.Dialog refactor per David).
+    assert row.get_activatable() is True
+    chevrons = [w for w in _walk(row)
+                if isinstance(w, Gtk.Image)]
+    assert len(chevrons) >= 1
 
 
-def test_models_button_opens_editor_for_pid():
-    """Clicking a provider row's "Models" button routes to _open_editor(pid)
-    — the wiring that lets the parallel cage-gate walk reach the editor. The
-    row is built directly (the unrealized PreferencesDialog doesn't expose its
-    pages' children through the widget walk)."""
+def test_provider_row_activatable_opens_editor_for_pid():
+    """Activating a provider row routes to _open_editor(pid) — the wiring that
+    lets the parallel cage-gate walk reach the editor. The row is built
+    directly (the unrealized PreferencesDialog doesn't expose its pages'
+    children through the widget walk). Replaces the old 'Models' button
+    (dropped per David: a button inside Settings opening another window was the
+    wrong shape; the row itself is the affordance now)."""
     s = Settings(providers=_ollama_provider(), model_default='ollama')
     sw = _make_sw(s)
     opened = []
     sw._open_editor = lambda pid: opened.append(pid)
     row = sw._build_provider_row('ollama', s.providers['ollama'])
-    btn = next(w for w in _walk(row)
-               if isinstance(w, Gtk.Button) and w.get_label() == 'Models')
-    btn.emit('clicked')
+    assert row.get_activatable() is True
+    row.emit('activated')
     assert opened == ['ollama']
 
 
@@ -277,7 +281,10 @@ def test_editor_add_model_does_not_destroy_other_fields():
 # --- #5: classifier levers in the editor -------------------------------
 
 def _find_row(widget, title):
-    for w in _walk(widget):
+    # Adw.Dialog doesn't expose its set_child content via get_first_child (the
+    # content lives in a dialog-internal slot), so walk from the content child.
+    root = widget.get_child() if isinstance(widget, Adw.Dialog) else widget
+    for w in _walk(root or widget):
         if isinstance(w, Adw.EntryRow) and w.get_title() == title:
             return w
         if isinstance(w, Adw.SwitchRow) and w.get_title() == title:
@@ -354,13 +361,13 @@ def test_editor_classifier_model_persists_when_adding_model():
     assert s.classifier_models['ollama']['auto_mode'] == 'glm'
 
 
-# --- #6: Escape commits pending edits (the close-vs-destroy safety net) -----
+# --- #6: close commits pending edits (the close-attempt safety net) ---------
 
-def test_editor_escape_commits_pending_name_edit(monkeypatch, tmp_path):
-    """Regression guard for the Escape data-loss bug: pressing Escape used to
-    call destroy(), bypassing the close-request handler and _teardown, so a
-    pending Name edit (typed but not applied) was lost. Escape now routes
-    through close() so _teardown commits first."""
+def test_editor_close_attempt_commits_pending_name_edit(monkeypatch, tmp_path):
+    """Regression guard for the close data-loss bug: closing the editor (Escape
+    / back / close()) used to bypass the commit safety net and lose a pending
+    Name edit (typed but not applied). Adw.Dialog fires 'close-attempt' before
+    close (entries still alive); the handler runs _teardown → commit."""
     import settings as settings_mod
     monkeypatch.setattr(settings_mod, 'DEFAULT_SETTINGS_PATH',
                         str(tmp_path / 'settings.json'))
@@ -372,9 +379,9 @@ def test_editor_escape_commits_pending_name_edit(monkeypatch, tmp_path):
     # Type a name but do NOT emit 'apply' — it's a pending edit held only in
     # the entry buffer.
     editor._name_row.set_text('Ollama')
-    # Fire the Escape key handler as the key controller would.
-    assert editor._on_key_pressed(None, Gdk.KEY_Escape, 0, 0) is True
-    # _teardown ran via close()→close-request, so the name was committed.
+    # Fire close-attempt as Escape / the back button would.
+    editor.emit('close-attempt')
+    # _teardown ran on close-attempt, so the name was committed before close.
     assert s.providers['ollama']['name'] == 'Ollama'
 
 

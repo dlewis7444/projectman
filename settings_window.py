@@ -4,14 +4,14 @@ import threading
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, GLib, Gdk
+from gi.repository import Gtk, Adw, GLib
 
 from settings import TIERS
 from models import (build_provider_options, build_tier_options,
                     list_provider_models, normalize_model_id)
 
 
-class ProviderEditorWindow(Adw.Window):
+class ProviderEditorWindow(Adw.Dialog):
     """A resizeable sub-window for editing one provider: name, base URL, API
     key, tier assignments, and model list — with save-on-change and an async
     model-reachability indicator.
@@ -42,23 +42,17 @@ class ProviderEditorWindow(Adw.Window):
         self._prov = prov
 
         self.set_title(f'{prov.get("name") or pid} Models')
-        self.set_default_size(560, 640)
-        # set_transient_for requires a Gtk.Window parent. In the real app the
-        # parent passed (_open_editor hands the SettingsWindow) is an
-        # Adw.PreferencesDialog — NOT a Gtk.Window — so an unconditional
-        # set_transient_for(parent) raises TypeError and __init__ aborts before
-        # present(), meaning the editor never opens. The headless tests missed
-        # this because they pass parent=None (hitting the old guard). Only set
-        # transient-for for actual Gtk.Window parents; otherwise the editor
-        # opens as an independent top-level. (2ea4d2f editor-open regression,
-        # surfaced by the cg-pmprov-001 persona + a deterministic cage probe.)
-        if parent is not None and isinstance(parent, Gtk.Window):
-            self.set_transient_for(parent)
-        self.set_modal(False)
-
-        key_ctrl = Gtk.EventControllerKey.new()
-        key_ctrl.connect('key-pressed', self._on_key_pressed)
-        self.add_controller(key_ctrl)
+        # Adw.Dialog (was Adw.Window): a dialog layers above the Settings
+        # PreferencesDialog properly — the Adw.Window version opened BEHIND it
+        # on a real desktop ("Models button does nothing"), and
+        # set_transient_for on the PreferencesDialog parent raised TypeError
+        # (PreferencesDialog is not a Gtk.Window). Adw.Dialog.present() takes any
+        # widget as parent (not just Gtk.Window), dialogs are always modal (so
+        # this stays above Settings — fixes the layering), and Escape/close are
+        # handled by the dialog itself. See libadwaita
+        # migrating-to-adaptive-dialogs.
+        self.set_content_width(560)
+        self.set_content_height(640)
 
         toolbar_view = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -76,7 +70,7 @@ class ProviderEditorWindow(Adw.Window):
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scrolled.set_child(clamp)
         toolbar_view.set_content(scrolled)
-        self.set_content(toolbar_view)
+        self.set_child(toolbar_view)
 
         # -- Identity: Name / Base URL / API Key --
         ident = Adw.PreferencesGroup(title='Provider')
@@ -149,8 +143,12 @@ class ProviderEditorWindow(Adw.Window):
         rm_group.add(rm_row)
         outer.append(rm_group)
 
-        self.connect('close-request', self._on_close_request)
-        self.present()
+        # Adw.Dialog has no close-request; commit pending edits on 'close-attempt'
+        # (fires on Escape / back / close() BEFORE the dialog closes, while the
+        # entries are still alive) — replaces the old close-request handler AND
+        # the manual Escape key handler (Adw.Dialog closes itself on Escape).
+        self.connect('close-attempt', lambda *_a: self._teardown())
+        self.present(parent)
 
     # --- construction helpers -----------------------------------------
 
@@ -455,8 +453,9 @@ class ProviderEditorWindow(Adw.Window):
         if isinstance(self._settings.classifier_two_stage, dict):
             self._settings.classifier_two_stage.pop(self._pid, None)
         self._save_and_notify()
-        self._teardown()
-        self.destroy()
+        # close() fires close-attempt → _teardown (commit + refresh owner), then
+        # closes the dialog. Replaces the old _teardown() + destroy() pair.
+        self.close()
 
     # --- async reachability probe -------------------------------------
 
@@ -517,22 +516,10 @@ class ProviderEditorWindow(Adw.Window):
         if self._on_close is not None:
             self._on_close()
 
-    def _on_close_request(self, _w):
-        self._teardown()
-
-    def _on_key_pressed(self, controller, keyval, _keycode, _state):
-        if keyval == Gdk.KEY_Escape:
-            # Commit any pending Name/Base URL edit BEFORE destroying. Escape
-            # used to call destroy() outright, bypassing the close-request
-            # safety net and losing a typed-but-unapplied field (bug #2). We
-            # can't rely on close() to fire close-request for us — it does not
-            # on an unrealized window (verified), and destroy() never emits it
-            # at all — so run _teardown() explicitly, then destroy. Mirrors the
-            # _remove_provider path in this same file.
-            self._teardown()
-            self.destroy()
-            return True
-        return False
+    # Adw.Dialog has no close-request signal and handles Escape itself; the
+    # close-attempt → _teardown wiring is in __init__. (The old _on_close_request
+    # + _on_key_pressed handlers were removed in the Adw.Window → Adw.Dialog
+    # refactor — see libadwaita migrating-to-adaptive-dialogs.)
 
 
 class SettingsWindow(Adw.PreferencesDialog):
@@ -1207,9 +1194,9 @@ class SettingsWindow(Adw.PreferencesDialog):
     def _build_provider_row(self, pid, prov):
         """A slim, one-line row for a provider in the Models page. The row's
         title is the provider's display name (or pid) — this preserves the gate
-        walk's ``has('Ollama')`` assertion — and the "Models" button opens the
-        full editor sub-window. No tier combos or entries live here, so this
-        row is never the thing being typed into."""
+        walk's ``has('Ollama')`` assertion — and activating the row (click)
+        opens the full editor dialog. No tier combos or entries live here, so
+        this row is never the thing being typed into."""
         name = prov.get('name') or pid
         row = Adw.ActionRow(title=name, subtitle=pid)
         models = prov.get('models') if isinstance(prov.get('models'), list) else []
@@ -1219,15 +1206,19 @@ class SettingsWindow(Adw.PreferencesDialog):
             count.add_css_class('dim-label')
             count.set_valign(Gtk.Align.CENTER)
             row.add_suffix(count)
-        btn = Gtk.Button(label='Models')
-        btn.add_css_class('suggested-action')
-        btn.set_valign(Gtk.Align.CENTER)
-        btn.connect('clicked', lambda _b, p=pid: self._open_editor(p))
-        row.add_suffix(btn)
+        # The row itself opens the editor (click → dialog). A chevron signals
+        # it's actionable — no separate "Models" button (that label was a
+        # misnomer for a full provider editor, and a button inside Settings
+        # opening another window was the wrong shape David flagged).
+        row.set_activatable(True)
+        row.connect('activated', lambda _r, p=pid: self._open_editor(p))
+        chev = Gtk.Image.new_from_icon_name('go-next-symbolic')
+        chev.set_valign(Gtk.Align.CENTER)
+        row.add_suffix(chev)
         return row
 
     def _open_editor(self, pid):
-        """Open the provider editor sub-window. On close it refreshes this page
+        """Open the provider editor dialog. On close it refreshes this page
         once (the slim row's name/model-count may have changed)."""
         ProviderEditorWindow(self._settings, self._app, self, pid,
                              on_close=self._refresh_models_page)
