@@ -115,7 +115,8 @@ def test_provider_row_titled_with_name_preserves_walk_assertion():
     sw = _make_sw(s)
     row = sw._build_provider_row('ollama', s.providers['ollama'])
     assert row.get_title() == 'Ollama'
-    assert row.get_subtitle() == 'ollama'
+    # Subtitle shows the base_url (identifying), not the internal pid.
+    assert row.get_subtitle() == 'http://localhost:11434'
     # The row is activatable (opens the editor on click) and carries a chevron
     # suffix as the visual affordance — no "Models" button (dropped in the
     # Adw.Window→Adw.Dialog refactor per David).
@@ -379,9 +380,12 @@ def test_editor_close_attempt_commits_pending_name_edit(monkeypatch, tmp_path):
     # Type a name but do NOT emit 'apply' — it's a pending edit held only in
     # the entry buffer.
     editor._name_row.set_text('Ollama')
-    # Fire close-attempt as Escape / the back button would.
-    editor.emit('close-attempt')
-    # _teardown ran on close-attempt, so the name was committed before close.
+    # Fire 'closed' as Escape / the back button / close() would — with the
+    # default can-close=True Adw.Dialog emits 'closed' (after-dismiss), not
+    # 'close-attempt' (which only fires when can-close=False).
+    editor.emit('closed')
+    # _teardown ran on 'closed', so the name was committed before the dialog
+    # object goes away.
     assert s.providers['ollama']['name'] == 'Ollama'
 
 

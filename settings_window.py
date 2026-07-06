@@ -107,7 +107,13 @@ class ProviderEditorWindow(Adw.Dialog):
         ident.add(key_row)
         outer.append(ident)
 
-        # -- Tier assignments (ABOVE the models list) --
+        # -- Models (ABOVE tier assignments — David wants the models list first,
+        #    since picking models precedes assigning them to tiers) --
+        self._models_group = Adw.PreferencesGroup(title='Models')
+        self._rebuild_models_group()
+        outer.append(self._models_group)
+
+        # -- Tier assignments --
         self._tier_group = Adw.PreferencesGroup(
             title='Tier assignments',
             description='Opus/Sonnet/Haiku/Subagent → a model on this provider. '
@@ -127,11 +133,6 @@ class ProviderEditorWindow(Adw.Dialog):
         self._rebuild_classifier_group()
         outer.append(self._classifier_group)
 
-        # -- Models --
-        self._models_group = Adw.PreferencesGroup(title='Models')
-        self._rebuild_models_group()
-        outer.append(self._models_group)
-
         # -- Remove provider --
         rm_group = Adw.PreferencesGroup()
         rm_row = Adw.ActionRow()
@@ -143,11 +144,14 @@ class ProviderEditorWindow(Adw.Dialog):
         rm_group.add(rm_row)
         outer.append(rm_group)
 
-        # Adw.Dialog has no close-request; commit pending edits on 'close-attempt'
-        # (fires on Escape / back / close() BEFORE the dialog closes, while the
-        # entries are still alive) — replaces the old close-request handler AND
-        # the manual Escape key handler (Adw.Dialog closes itself on Escape).
-        self.connect('close-attempt', lambda *_a: self._teardown())
+        # Adw.Dialog commits/refreshes on 'closed' (fires AFTER the dialog has
+        # dismissed, on Escape / back / close()). We use 'closed' rather than
+        # 'close-attempt': with the default can-close=True, Adw.Dialog emits
+        # 'closed' on a normal close and only emits 'close-attempt' when
+        # can-close=False — so 'close-attempt' never fired on a real desktop and
+        # the owner's Models page never refreshed. The GObject + its entries
+        # outlive the dismiss, so _teardown can still commit pending edits.
+        self.connect('closed', lambda *_a: self._teardown())
         self.present(parent)
 
     # --- construction helpers -----------------------------------------
@@ -453,8 +457,9 @@ class ProviderEditorWindow(Adw.Dialog):
         if isinstance(self._settings.classifier_two_stage, dict):
             self._settings.classifier_two_stage.pop(self._pid, None)
         self._save_and_notify()
-        # close() fires close-attempt → _teardown (commit + refresh owner), then
-        # closes the dialog. Replaces the old _teardown() + destroy() pair.
+        # close() dismisses the dialog → 'closed' fires → _teardown commits any
+        # pending edits and refreshes the owner's Models page. (Replaces the old
+        # _teardown() + destroy() pair.)
         self.close()
 
     # --- async reachability probe -------------------------------------
@@ -517,7 +522,7 @@ class ProviderEditorWindow(Adw.Dialog):
             self._on_close()
 
     # Adw.Dialog has no close-request signal and handles Escape itself; the
-    # close-attempt → _teardown wiring is in __init__. (The old _on_close_request
+    # 'closed' → _teardown wiring is in __init__. (The old _on_close_request
     # + _on_key_pressed handlers were removed in the Adw.Window → Adw.Dialog
     # refactor — see libadwaita migrating-to-adaptive-dialogs.)
 
@@ -1198,7 +1203,11 @@ class SettingsWindow(Adw.PreferencesDialog):
         opens the full editor dialog. No tier combos or entries live here, so
         this row is never the thing being typed into."""
         name = prov.get('name') or pid
-        row = Adw.ActionRow(title=name, subtitle=pid)
+        # Subtitle shows the provider's base_url (identifying, useful) rather
+        # than the pid — pid is an internal key ('provider', 'provider2', …)
+        # that's meaningless to users and was being read as the row's label.
+        # Empty for a freshly-added provider that has no URL yet.
+        row = Adw.ActionRow(title=name, subtitle=prov.get('base_url') or '')
         models = prov.get('models') if isinstance(prov.get('models'), list) else []
         n = len([m for m in models if isinstance(m, str)])
         if n:
