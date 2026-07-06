@@ -9,8 +9,6 @@ running your chosen coding agent — [Claude Code](https://claude.ai/code), [ope
 or [Grok Build](https://x.ai/cli) — per project. Projects are directories under
 `~/.ProjectMan/projects/` (configurable via Settings).
 
-![Main window](images/screencap_main.jpg)
-
 ## Features
 
 - Per-project agent sessions with automatic session restore
@@ -20,8 +18,6 @@ or [Grok Build](https://x.ai/cli) — per project. Projects are directories unde
 - Session history with expand/collapse per project
 - Zellij multiplexer integration (optional)
 - Project archive with search
-
-  ![Archive window](images/screencap_archive.jpg)
 
 - Ctrl+Tab to switch between recently active projects
 - Multiple color themes: Argonaut, Candyland, Phosphor, Salt Spray

@@ -6,7 +6,7 @@ fork incident — a builder's display-enabled suite runs activated the user's
 live app four times, a duplicate-window bug spawned four extra windows, each
 session-restored three projects, and one of the twelve stray `claude -c`
 children pushed an unauthorized release. Display presence is therefore not
-permission: the bench (bench-vm) exports PM_TEST_DISPLAY_OK=1; nothing else
+permission: the bench (the gated test bench) exports PM_TEST_DISPLAY_OK=1; nothing else
 may.
 """
 import os
