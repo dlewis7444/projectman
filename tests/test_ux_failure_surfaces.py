@@ -18,7 +18,7 @@ Binding tests:
   M-UX.4    scan disabled → ZERO run_ai_checks calls (spy) + toast; enabled →
             result surfaced
   M-UX.3    New Zellij Session with multiplexer≠zellij → toast, no spawn
-  B4        project creation toast names the resolved harness ("harness:")
+  B4        project creation toast names the project (harness suffix dropped, B5)
 """
 import time
 import types
@@ -457,13 +457,15 @@ def _store_for(projects_dir):
 
 
 def test_project_created_toast_follows_default(tmp_path):
-    """BINDING (B4): a new project with no override → toast names the global
-    default harness's display name, exactly one toast."""
+    """BINDING (B4): a new project with no override → toast names the project,
+    exactly one toast. (B5: the "— harness: Claude Code" suffix was dropped —
+    Claude Code is the sole harness, so the suffix was always the same value
+    and read as jargon.)"""
     from window import AppWindow
     s = Settings()
     fake = types.SimpleNamespace(_settings=s, _store=_store_for(str(tmp_path)))
     text = AppWindow._project_created_toast_text(fake, 'shiny')
-    assert text == "New project 'shiny' — harness: Claude Code"
+    assert text == "New project 'shiny'"
 
 
 def test_project_created_toast_claude_default(tmp_path):
@@ -471,28 +473,29 @@ def test_project_created_toast_claude_default(tmp_path):
     s = Settings()
     fake = types.SimpleNamespace(_settings=s, _store=_store_for(str(tmp_path)))
     text = AppWindow._project_created_toast_text(fake, 'thing')
-    assert text == "New project 'thing' — harness: Claude Code"
+    assert text == "New project 'thing'"
 
 
 def test_project_created_toast_names_the_only_harness(tmp_path):
-    """BINDING (B4): Claude Code is the sole harness, so the created toast
-    always resolves to "Claude Code" regardless of any stale id carried in
-    settings (effective_agent always returns 'claude'). The toast fires and
-    names the harness — coverage retained where the old "unknown default"
-    fallback test lived."""
+    """BINDING (B4): the created toast carries just the project name — no
+    harness suffix (B5 dropped it). A stale provider id in model_default
+    never leaks into the toast (it never did — effective_agent ignored it;
+    now there's no suffix to leak into at all). Coverage retained where the
+    old "unknown default" fallback test lived."""
     from window import AppWindow
-    # A Settings with a stale provider id in model_default does NOT change the
-    # harness — effective_agent ignores it and returns 'claude'.
+    # A Settings with a stale provider id in model_default does NOT leak into
+    # the toast — effective_agent ignores it and the suffix is gone anyway.
     s = Settings(model_default='ghost-provider')
     fake = types.SimpleNamespace(_settings=s, _store=_store_for(str(tmp_path)))
     text = AppWindow._project_created_toast_text(fake, 'p')
-    assert text == "New project 'p' — harness: Claude Code"
+    assert text == "New project 'p'"
     assert 'ghost-provider' not in text
 
 
 def test_on_project_create_fires_exactly_one_creation_toast(tmp_path):
-    """BINDING (B4): the create handler emits exactly one toast with the resolved
-    display name (and still refreshes the sidebar / creates the dir)."""
+    """BINDING (B4): the create handler emits exactly one toast naming the
+    project (and still refreshes the sidebar / creates the dir). The harness
+    suffix was dropped in B5."""
     from window import AppWindow
     projects = tmp_path / 'projects'
     projects.mkdir()
@@ -520,7 +523,7 @@ def test_on_project_create_fires_exactly_one_creation_toast(tmp_path):
     assert (projects / 'fresh').is_dir()       # dir created
     assert refreshed == [True]                  # sidebar refreshed
     assert activated == [str(projects / 'fresh')]  # G3: new project activated
-    assert toasts == ["New project 'fresh' — harness: Claude Code"]
+    assert toasts == ["New project 'fresh'"]
 
 
 def test_on_project_create_oserror_emits_no_toast(tmp_path):

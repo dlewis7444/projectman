@@ -1060,19 +1060,14 @@ class AppWindow(Adw.ApplicationWindow):
         self._show_toast(self._project_created_toast_text(name))
 
     def _project_created_toast_text(self, name):
-        """The B4 creation toast: "New project '<name>' — harness: <Display>".
+        """The B4 creation toast: "New project '<name>'".
 
-        Resolves the EFFECTIVE harness for the new (override-free) project — which
-        is the global default — through ``resolve_adapter`` so the named harness is
-        the one that will ACTUALLY run (the fallback, not the requested id, when
-        the default's binary is missing). Pure string builder; unbound-testable.
+        Post-pivot Claude Code is the sole harness, so the old
+        "— harness: <Display>" suffix was always the same value and read as
+        jargon — dropped it. (The effective-harness resolution that fed the
+        suffix is gone with it; reintroduce both if a second harness returns.)
         """
-        import agents
-        path = os.path.join(self._store._projects_dir(), name)
-        effective_id = self._settings.effective_agent(path)
-        adapter, _missing = agents.resolve_adapter(effective_id, self._settings)
-        display = adapter.display_name if adapter is not None else effective_id
-        return f"New project '{name}' — harness: {display}"
+        return f"New project '{name}'"
 
     def _on_project_rename(self, sidebar, old_path, new_name):
         project = self._find_project(old_path)
