@@ -6,32 +6,36 @@ The provider definitions live in ``Settings.providers`` as::
     {provider_id: {"name": str,            # display label
                    "base_url": str,        # Anthropic-compatible API base URL
                    "api_key": str,          # cleartext key (see settings.py)
-                   "models": [str, ...]}}   # free-text model ids (CC strips a
-                                           # trailing ``[1m]`` itself)
+                   "models": [str, ...],   # free-text model ids; trailing
+                                           # ``[1m]`` is a per-model 1M flag
+                                           # (CC strips it before the API call)
+                   "max_context_tokens": int  # optional; injects
+                                           # CLAUDE_CODE_MAX_CONTEXT_TOKENS
+                   }}
 
 A provider is identified by its ``provider_id``; the empty string ``''`` is the
 sentinel for "Anthropic (native)" — no env injection, CC uses its own creds.
+Custom-provider context controls (1M model suffix, max_context_tokens) never
+apply to native Anthropic.
 
-The four Claude Code tiers (Opus/Sonnet/Haiku/Subagent) are each pinnable to
-any model id on the ACTIVE provider. CC's ``ANTHROPIC_BASE_URL`` is
+Claude Code tiers (Opus/Sonnet/Haiku/Subagent/Fable) are each pinnable to any
+model id on the ACTIVE custom provider. CC's ``ANTHROPIC_BASE_URL`` is
 process-wide, so one session can mix model NAMES across tiers but never
 providers — every tier must be reachable from the active provider's endpoint.
-``build_spawn_env`` resolves the four tiers and injects the ollama-style env
-dict at spawn.
+``build_spawn_env`` resolves the tiers and injects the ollama-style env dict
+at spawn for custom providers only.
 """
 
 import os
-import re
 import json
 import urllib.request
 
 NATIVE_LABEL = 'Anthropic (native)'
 
-# GLM cloud models accept a trailing ``[1m]`` suffix to request the 1M-context
-# window (Claude Code strips it before the API call; Ollama receives the base
-# name). The suffix is GLM-specific — other backends reject it — so it is only
-# appended to model ids that look like GLM. Used for the Opus tier only.
-_GLM_RE = re.compile(r'glm', re.IGNORECASE)
+# Claude Code treats a trailing ``[1m]`` on a model id as a 1M-token context
+# window (modelMax = 1_000_000) and strips the suffix before the API call.
+# The provider editor's per-model 1M toggle encodes that flag in the stored id.
+_1M_SUFFIX = '[1m]'
 
 # Sentinel used by the per-project provider menu to mean "follow the global
 # default" (i.e. remove any override). Safe because a real provider id is a
@@ -130,13 +134,32 @@ def build_tier_options(providers, pid):
     return ids, labels
 
 
+def is_1m_model_id(mid):
+    """True when ``mid`` carries the Claude Code 1M-context suffix."""
+    return isinstance(mid, str) and mid.endswith(_1M_SUFFIX)
+
+
+def without_1m_suffix(mid):
+    """Return ``mid`` with a trailing ``[1m]`` stripped, if present."""
+    if is_1m_model_id(mid):
+        return mid[:-len(_1M_SUFFIX)]
+    return mid
+
+
+def with_1m_suffix(mid):
+    """Return ``mid`` with a trailing ``[1m]`` ensured (no double-append)."""
+    if not mid or not isinstance(mid, str):
+        return mid
+    if mid.endswith(_1M_SUFFIX):
+        return mid
+    return f'{mid}{_1M_SUFFIX}'
+
+
 def normalize_model_id(mid):
     """Strip a trailing ``[1m]`` so a probe membership check doesn't
-    false-negative on GLM 1M-context model ids (CC strips ``[1m]`` itself before
+    false-negative on 1M-flagged model ids (CC strips ``[1m]`` itself before
     the API call, so the provider's endpoint never lists the suffixed form)."""
-    if isinstance(mid, str) and mid.endswith('[1m]'):
-        return mid[:-4]
-    return mid
+    return without_1m_suffix(mid)
 
 
 def list_provider_models(provider):
@@ -253,38 +276,50 @@ def _format_classifier_temperature(value):
     return str(float(value))
 
 
-def _maybe_1m(model_id):
-    """Append the GLM 1M-context suffix ``[1m]`` to a GLM Opus model id that
-    lacks it. Non-GLM ids are returned unchanged — the suffix is GLM-specific
-    (CC strips it before the API call; Ollama receives the base name) and
-    other backends would reject it. Mirrors ``claude-ollama``'s ``[1m]`` logic;
-    applied to the Opus tier only, at spawn time, so the UI combo keeps showing
-    the stored id verbatim.
-    """
-    if not model_id or model_id.endswith('[1m]'):
-        return model_id
-    return f'{model_id}[1m]' if _GLM_RE.search(model_id) else model_id
+def _provider_max_context_tokens(prov):
+    """Positive int max_context_tokens from a provider dict, or ``None`` if
+    unset/invalid. Custom providers only; native has no provider dict field."""
+    if not isinstance(prov, dict):
+        return None
+    v = prov.get('max_context_tokens')
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int) and v > 0:
+        return v
+    if isinstance(v, float) and v > 0 and v == int(v):
+        return int(v)
+    if isinstance(v, str):
+        text = v.strip()
+        if text.isdigit():
+            n = int(text)
+            if n > 0:
+                return n
+    return None
 
 
 def build_spawn_env(settings, project_path):
     """Build the env override for a spawn, or report a native fallback.
 
     Returns ``(env_dict, None)`` for a custom provider (the ollama-style env
-    dict, incl. the resolved Opus/Sonnet/Haiku tier models +
+    dict, incl. the resolved Opus/Sonnet/Haiku/Fable tier models +
     ``DISABLE_AUTOUPDATER=1``); ``(None, None)`` for native (no injection — CC
     uses its own creds); or ``(None, reason)`` when a custom provider was
     requested but is unusable (missing or no base_url), so the spawn falls back
     to native and the UI surfaces ``reason`` via the provider-unavailable toast.
 
-    The Opus tier model gets a trailing ``[1m]`` appended at spawn time when it
-    is a GLM id (see :func:`_maybe_1m`); Sonnet/Haiku/Fable never do. The
-    ``CLAUDE_CODE_SUBAGENT_MODEL`` var is **opt-in**: emitted only when the user
-    explicitly assigned a model to the Subagent tier (e.g. kimi for vision);
-    otherwise it is omitted so per-call ``model:"sonnet"`` routes image
+    Tier model ids are emitted **verbatim** (including any trailing ``[1m]``
+    the user set via the per-model 1M toggle). No name-based rewrite at spawn.
+    Anthropic native never receives these vars.
+
+    ``CLAUDE_CODE_SUBAGENT_MODEL`` is **opt-in**: emitted only when the user
+    explicitly assigned a model to the Subagent tier (e.g. a vision-capable
+    model); otherwise it is omitted so per-call ``model:"sonnet"`` routes image
     subagents through the Sonnet tier and default subagents fall to CC's global
-    default. Never force GLM on subagents (vision-less → nested subagent loops).
-    ``ANTHROPIC_DEFAULT_FABLE_MODEL`` is emitted (forward-looking placeholder;
-    CC today doesn't document it, so it's ignored harmlessly).
+    default. Never force a vision-less model on subagents (nested subagent loops).
+
+    Optional provider ``max_context_tokens`` injects
+    ``CLAUDE_CODE_MAX_CONTEXT_TOKENS``; when unset the var is scrubbed from the
+    inherited parent env.
     """
     pid = settings.effective_provider(project_path)
     if not pid:
@@ -303,27 +338,25 @@ def build_spawn_env(settings, project_path):
     env['ANTHROPIC_BASE_URL'] = base_url
     env['ANTHROPIC_AUTH_TOKEN'] = api_key
     env['ANTHROPIC_API_KEY'] = ''   # empty — the anti-3rd-party-block shape
-    env['ANTHROPIC_DEFAULT_OPUS_MODEL'] = _maybe_1m(resolve_tier_model(settings, pid, 'opus'))
+    # Verbatim tier ids (1M flag is stored on the model id by the UI toggle).
+    env['ANTHROPIC_DEFAULT_OPUS_MODEL'] = resolve_tier_model(settings, pid, 'opus')
     env['ANTHROPIC_DEFAULT_SONNET_MODEL'] = resolve_tier_model(settings, pid, 'sonnet')
     env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = resolve_tier_model(settings, pid, 'haiku')
-    # Fable tier placeholder (forward-looking): wired like the others so a
-    # future CC that honors ANTHROPIC_DEFAULT_FABLE_MODEL picks up the resolved
-    # model. CC today doesn't document this var, so it's ignored harmlessly.
+    # Fable tier: wired like the others; CC honors ANTHROPIC_DEFAULT_FABLE_MODEL
+    # (Fable re-launched 2026-07).
     env['ANTHROPIC_DEFAULT_FABLE_MODEL'] = resolve_tier_model(settings, pid, 'fable')
     # Subagent is opt-in force: emit only when the user explicitly assigned a
-    # model to the Subagent tier (e.g. kimi for vision). Otherwise omit — no
-    # forced subagent — so a per-call model:"sonnet" routes image subagents
+    # model to the Subagent tier (e.g. a vision-capable model). Otherwise omit —
+    # no forced subagent — so a per-call model:"sonnet" routes image subagents
     # through the Sonnet tier above and default subagents fall to CC's global
-    # default. Never force GLM here (vision-less → nested subagent loops).
+    # default. Never force a vision-less model here (nested subagent loops).
     subagent = _explicit_tier_model(settings, pid, 'subagent')
     if subagent:
         env['CLAUDE_CODE_SUBAGENT_MODEL'] = subagent
     else:
         # No forced subagent: scrub any value inherited from the parent env
-        # (e.g. a launcher like claude-ollama that set CLAUDE_CODE_SUBAGENT_MODEL)
-        # so the spawned session doesn't inherit a stale forced-subagent model.
-        # A per-call model:"sonnet" then routes image subagents through the
-        # Sonnet tier above; default subagents fall to CC's global default.
+        # (e.g. a launcher that set CLAUDE_CODE_SUBAGENT_MODEL) so the spawned
+        # session doesn't inherit a stale forced-subagent model.
         env.pop('CLAUDE_CODE_SUBAGENT_MODEL', None)
 
     # Classifier temperature — per-provider, opt-in. Omit when unset so CC
@@ -335,6 +368,14 @@ def build_spawn_env(settings, project_path):
             ct[pid])
     else:
         env.pop('CLAUDE_CODE_AUTO_MODE_TEMPERATURE', None)
+
+    # Provider max context tokens — opt-in. Scrub when unset so a parent
+    # launcher cannot leak a stale CLAUDE_CODE_MAX_CONTEXT_TOKENS.
+    max_ctx = _provider_max_context_tokens(prov)
+    if max_ctx is not None:
+        env['CLAUDE_CODE_MAX_CONTEXT_TOKENS'] = str(max_ctx)
+    else:
+        env.pop('CLAUDE_CODE_MAX_CONTEXT_TOKENS', None)
 
     env['CLAUDE_CODE_ATTRIBUTION_HEADER'] = '0'
     env['OLLAMA_HOST'] = base_url
