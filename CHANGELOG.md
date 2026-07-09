@@ -4,8 +4,29 @@ All notable changes to ProjectMan will be documented in this file.
 
 ## [Unreleased]
 
-_Nothing yet. The B4 editor unsaved-changes affordance and the sidebar
-new-project count TODOs are deferred to 1.2.3._
+_Nothing yet. Deferred UX polish TODOs (editor unsaved-changes affordance;
+sidebar new-project count while inline-edit row is visible) remain open._
+
+## [1.3.0] - 2026-07-09
+
+### Added
+- **Per-provider "Max context tokens"** in the Provider editor (Settings →
+  Models → provider card). Sits just below **API Key**. Injects
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS` on Claude custom-provider spawns. Blank
+  leaves the harness default (200k for Claude Code). Tooltip:
+  *"Set the max tokens for non-1M models. If blank, harness will use its
+  default (200k for Claude Code)."*
+- **Per-model 1M toggle** on each model row in the provider editor. Encodes
+  or strips a trailing `[1m]` on the stored model id (Claude Code's long-
+  context flag). Replaces name-based auto-suffixing as the user-visible
+  control for 1M context.
+- **Fable tier activated** (no longer "(future?)") — tier pin + spawn env
+  for `ANTHROPIC_DEFAULT_FABLE_MODEL`; `[1m]` handling broadened beyond
+  GLM-only where applicable.
+
+### Changed
+- Provider editor layout: removed the top standalone **Context window**
+  group; max-context lives in the **Provider** identity group under API Key.
 
 ## [1.2.2] - 2026-07-09
 ### Fixed

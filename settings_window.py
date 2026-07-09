@@ -9,7 +9,8 @@ from gi.repository import Gtk, Adw, GLib
 
 from settings import TIERS
 from models import (build_provider_options, build_tier_options,
-                    list_provider_models, normalize_model_id)
+                    list_provider_models, normalize_model_id,
+                    is_1m_model_id, with_1m_suffix, without_1m_suffix)
 
 
 class ProviderEditorWindow(Adw.Dialog):
@@ -78,7 +79,7 @@ class ProviderEditorWindow(Adw.Dialog):
         toolbar_view.set_content(scrolled)
         self.set_child(toolbar_view)
 
-        # -- Identity: Name / Base URL / API Key --
+        # -- Identity: Name / Base URL / API Key / Max context tokens --
         ident = Adw.PreferencesGroup(title='Provider')
 
         self._name_row = Adw.EntryRow(title='Name')
@@ -111,11 +112,34 @@ class ProviderEditorWindow(Adw.Dialog):
             lambda e, _p, r=key_row: self._on_key_changed(e, r))
         key_row.add_suffix(self._key_entry)
         ident.add(key_row)
+
+        # Max context tokens — just below API Key (not a separate top group).
+        _MAX_CTX_TIP = (
+            'Set the max tokens for non-1M models. If blank, harness will use '
+            'its default (200k for Claude Code).')
+        self._max_ctx_row = Adw.EntryRow(title='Max context tokens')
+        mct = prov.get('max_context_tokens')
+        if isinstance(mct, int) and mct > 0:
+            self._max_ctx_row.set_text(str(mct))
+        else:
+            self._max_ctx_row.set_text('')
+        self._max_ctx_row.set_show_apply_button(True)
+        self._max_ctx_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+        self._max_ctx_row.set_tooltip_text(_MAX_CTX_TIP)
+        self._max_ctx_row.connect(
+            'apply', lambda _r: self._commit_max_context_tokens())
+        self._wire_focus_commit(
+            self._max_ctx_row, self._commit_max_context_tokens)
+        ident.add(self._max_ctx_row)
         outer.append(ident)
 
         # -- Models (ABOVE tier assignments — the maintainer wants the models list first,
         #    since picking models precedes assigning them to tiers) --
-        self._models_group = Adw.PreferencesGroup(title='Models')
+        self._models_group = Adw.PreferencesGroup(
+            title='Models',
+            description='Use the 1M control on each row to mark long-context '
+                        'models (Claude Code [1m] suffix).',
+        )
         self._rebuild_models_group()
         outer.append(self._models_group)
 
@@ -134,8 +158,8 @@ class ProviderEditorWindow(Adw.Dialog):
         # -- Tier assignments --
         self._tier_group = Adw.PreferencesGroup(
             title='Tier assignments',
-            description='Opus/Sonnet/Haiku/Subagent → a model on this provider. '
-                        '"Default" uses the first model.')
+            description='Opus/Sonnet/Haiku/Subagent/Fable → a model on this '
+                        'provider. "Default" uses the first model.')
         self._tier_combos = {}
         self._rebuild_tier_combos()
         outer.append(self._tier_group)
@@ -199,7 +223,7 @@ class ProviderEditorWindow(Adw.Dialog):
 
         for tier, label in (('opus', 'Opus'), ('sonnet', 'Sonnet'),
                             ('haiku', 'Haiku'), ('subagent', 'Subagent'),
-                            ('fable', 'Fable (future?)')):
+                            ('fable', 'Fable')):
             combo = Adw.ComboRow(title=label)
             combo.set_model(Gtk.StringList.new(tier_labels))
             val = tier_sub.get(tier, '')
@@ -219,13 +243,6 @@ class ProviderEditorWindow(Adw.Dialog):
                 self._suppress = False
             combo.connect('notify::selected',
                           lambda r, _p, t=tier: self._on_tier_changed(t, r))
-            if tier == 'fable':
-                # Forward-looking placeholder: CC has a Fable model but no
-                # documented per-tier default env var yet. Wired to the env
-                # like the others (build_spawn_env emits
-                # ANTHROPIC_DEFAULT_FABLE_MODEL) but not user-adjustable until
-                # CC honors it.
-                combo.set_sensitive(False)
             self._tier_group.add(combo)
             self._tier_combos[tier] = combo
 
@@ -274,14 +291,32 @@ class ProviderEditorWindow(Adw.Dialog):
         add_row = Adw.EntryRow(title='Add model')
         add_row.set_show_apply_button(True)
         add_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
-        add_row.set_tooltip_text('Free-text id, e.g. glm-5.2:cloud[1m]')
+        add_row.set_tooltip_text(
+            'Free-text model id (use the 1M toggle on the row for long context)')
         add_row.connect('apply', self._on_add_model)
         self._models_group.add(add_row)
         self._add_model_row = add_row
 
     def _build_model_row(self, mid):
-        row = Adw.ActionRow(title=mid)
+        bare = normalize_model_id(mid) or mid
+        row = Adw.ActionRow(title=bare)
         row.set_tooltip_text(mid)
+        # 1M toggle — left of remove; encodes/strips trailing [1m] on the id.
+        one_m = Gtk.CheckButton(label='1M')
+        one_m.set_valign(Gtk.Align.CENTER)
+        one_m.set_tooltip_text(
+            "Ask Claude Code to treat this model as having a 1M-token context "
+            "window. When off, Claude Code uses its normal default size for "
+            "the provider/model.")
+        self._suppress = True
+        try:
+            one_m.set_active(is_1m_model_id(mid))
+        finally:
+            self._suppress = False
+        one_m.connect(
+            'toggled',
+            lambda btn, m=mid: self._on_model_1m_toggled(m, btn))
+        row.add_suffix(one_m)
         rm = Gtk.Button.new_from_icon_name('list-remove-symbolic')
         rm.add_css_class('flat')
         rm.set_valign(Gtk.Align.CENTER)
@@ -415,6 +450,35 @@ class ProviderEditorWindow(Adw.Dialog):
         self.set_title(f'{name or self._pid} Models')
         self._mark_dirty()
 
+    def _commit_max_context_tokens(self):
+        tip = (
+            'Set the max tokens for non-1M models. If blank, harness will use '
+            'its default (200k for Claude Code).')
+        err = 'Enter a positive whole number, or leave blank'
+        text = self._max_ctx_row.get_text().strip()
+        if not text:
+            if 'max_context_tokens' in self._prov:
+                self._prov.pop('max_context_tokens', None)
+                self._mark_dirty()
+            self._max_ctx_row.remove_css_class('error')
+            self._max_ctx_row.set_tooltip_text(tip)
+            return
+        if not text.isdigit():
+            self._max_ctx_row.add_css_class('error')
+            self._max_ctx_row.set_tooltip_text(err)
+            return
+        value = int(text)
+        if value <= 0:
+            self._max_ctx_row.add_css_class('error')
+            self._max_ctx_row.set_tooltip_text(err)
+            return
+        self._max_ctx_row.remove_css_class('error')
+        self._max_ctx_row.set_tooltip_text(tip)
+        if self._prov.get('max_context_tokens') == value:
+            return
+        self._prov['max_context_tokens'] = value
+        self._mark_dirty()
+
     def _commit_url(self):
         url = self._url_row.get_text().strip()
         if self._prov.get('base_url') == url:
@@ -517,6 +581,38 @@ class ProviderEditorWindow(Adw.Dialog):
         self._rebuild_classifier_group()
         self._rebuild_models_group()
 
+    def _on_model_1m_toggled(self, mid, btn):
+        """Rewrite the stored model id to add/strip trailing [1m], and retarget
+        any tier pins that still name the old id."""
+        if self._suppress:
+            return
+        want_1m = btn.get_active()
+        new_mid = with_1m_suffix(mid) if want_1m else without_1m_suffix(mid)
+        if new_mid == mid:
+            return
+        raw = self._prov.get('models')
+        models = list(raw) if isinstance(raw, list) else []
+        try:
+            idx = models.index(mid)
+        except ValueError:
+            return
+        # Avoid duplicates if both bare and [1m] forms already exist.
+        if new_mid in models:
+            models.pop(idx)
+        else:
+            models[idx] = new_mid
+        self._prov['models'] = models
+        if isinstance(self._settings.tier_models, dict):
+            sub = self._settings.tier_models.get(self._pid)
+            if isinstance(sub, dict):
+                for tier in TIERS:
+                    if sub.get(tier) == mid:
+                        sub[tier] = new_mid if new_mid in models else ''
+        self._mark_dirty()
+        self._rebuild_tier_combos()
+        self._rebuild_classifier_group()
+        self._rebuild_models_group()
+
     def _on_remove_provider(self, _btn):
         if isinstance(self._settings.providers, dict):
             self._settings.providers.pop(self._pid, None)
@@ -597,6 +693,8 @@ class ProviderEditorWindow(Adw.Dialog):
         self._closed = True
         self._commit_name()
         self._commit_url()
+        self._commit_max_context_tokens()
+        self._commit_classifier_temperature()
         if self._dirty:
             self._save_and_notify()
         if self._on_close is not None:

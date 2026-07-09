@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import tempfile
 from dataclasses import dataclass, asdict, field
@@ -6,11 +7,14 @@ from dataclasses import dataclass, asdict, field
 
 DEFAULT_SETTINGS_PATH = os.path.expanduser('~/.ProjectMan/settings.json')
 
+# One-shot migration only: legacy spawn auto-appended ``[1m]`` for model ids
+# matching this pattern when used on Opus/Fable. After migration the UI toggle
+# owns the flag; this regex must not be used at spawn time.
+_LEGACY_1M_MODEL_RE = re.compile(r'glm|deepseek', re.IGNORECASE)
+
 # The Claude Code model tiers. PM can pin each independently to any model
 # defined on the active provider (free-text ids), or leave a tier on '' to use
-# the provider's first/default model. See models.build_spawn_env. 'fable' is a
-# forward-looking placeholder tier (CC has a Fable model; a per-tier default env
-# var is not yet documented) — the Models tab shows it disabled as "(future?)".
+# the provider's first/default model. See models.build_spawn_env.
 TIERS = ('opus', 'sonnet', 'haiku', 'subagent', 'fable')
 
 
@@ -41,9 +45,14 @@ class Settings:
     ntfy_topic: str = ''
     # --- Model layer (Claude-Only + first-class model axis, 2026-06) ---
     # providers: {provider_id: {"name": str, "base_url": str, "api_key": str,
-    #                           "models": [str, ...]}}
-    #   ``models`` is a LIST of free-text model-id strings (CC strips a trailing
-    #   ``[1m]`` itself, so ids like ``glm-5.2:cloud[1m]`` are valid verbatim).
+    #                           "models": [str, ...],
+    #                           "max_context_tokens": int  # optional
+    #                          }}
+    #   ``models`` is a LIST of free-text model-id strings. A trailing ``[1m]``
+    #   is the per-model 1M-context flag (CC strips it before the API call);
+    #   the provider editor's 1M toggle encodes/strips that suffix. Optional
+    #   ``max_context_tokens`` injects CLAUDE_CODE_MAX_CONTEXT_TOKENS on spawn
+    #   for that custom provider only (native Anthropic is untouched).
     providers: dict = field(default_factory=dict)
     # model_default: provider_id | ''  — '' = Anthropic (native). The active
     # provider whose base_url receives every tier's model id (CC's
@@ -216,6 +225,24 @@ class Settings:
             else:
                 prov['models'] = []
             prov.pop('transformer', None)
+            # Normalize optional max_context_tokens (positive int or drop).
+            mct = prov.get('max_context_tokens', None)
+            if mct is None or mct == '':
+                prov.pop('max_context_tokens', None)
+            elif isinstance(mct, bool):
+                prov.pop('max_context_tokens', None)
+            elif isinstance(mct, int) and mct > 0:
+                prov['max_context_tokens'] = mct
+            elif isinstance(mct, float) and mct > 0 and mct == int(mct):
+                prov['max_context_tokens'] = int(mct)
+            elif isinstance(mct, str) and mct.strip().isdigit():
+                n = int(mct.strip())
+                if n > 0:
+                    prov['max_context_tokens'] = n
+                else:
+                    prov.pop('max_context_tokens', None)
+            else:
+                prov.pop('max_context_tokens', None)
 
         # model_default: 'provider/model' → provider; ''/bare-id stay.
         if isinstance(self.model_default, str) and '/' in self.model_default:
@@ -263,6 +290,12 @@ class Settings:
                                 if target else {})
         # Normalize + scrub per-provider (see _normalize_tier_models).
         self._normalize_tier_models()
+        # One-shot: preserve the old spawn-time auto-[1m] for bare ids that
+        # matched glm|deepseek (Opus/Fable only at the time). Runs after tier
+        # scrub so pins still match the pre-suffix model list, then both the
+        # models list and matching tier pins are rewritten together. After
+        # this, the UI 1M toggle owns the flag; spawn emits stored ids verbatim.
+        self._migrate_legacy_1m_model_ids()
         self._normalize_classifier_temperature()
 
     def _normalize_tier_models(self) -> None:
@@ -297,6 +330,54 @@ class Settings:
                     v = ''
                 new_sub[tier] = v
             self.tier_models[pid] = new_sub
+
+    def _migrate_legacy_1m_model_ids(self) -> None:
+        """Append ``[1m]`` to bare model ids that the old spawn hardcode would
+        have rewritten for Opus/Fable (ids matching glm|deepseek).
+
+        Idempotent: already-suffixed ids and non-matching ids are left alone.
+        Rewrites tier_models pins that still name the bare id so they keep
+        resolving after the models list is updated.
+        """
+        if not isinstance(self.providers, dict):
+            return
+        for pid, prov in self.providers.items():
+            if not isinstance(prov, dict):
+                continue
+            models = prov.get('models')
+            if not isinstance(models, list):
+                continue
+            rewritten = {}
+            new_models = []
+            for mid in models:
+                if not isinstance(mid, str):
+                    continue
+                if (not mid.endswith('[1m]')
+                        and _LEGACY_1M_MODEL_RE.search(mid)):
+                    new_mid = f'{mid}[1m]'
+                    rewritten[mid] = new_mid
+                    new_models.append(new_mid)
+                else:
+                    new_models.append(mid)
+            if not rewritten:
+                continue
+            # Deduplicate while preserving order (bare + already-suffixed → one).
+            seen = set()
+            deduped = []
+            for m in new_models:
+                if m not in seen:
+                    seen.add(m)
+                    deduped.append(m)
+            prov['models'] = deduped
+            if not isinstance(self.tier_models, dict):
+                continue
+            sub = self.tier_models.get(pid)
+            if not isinstance(sub, dict):
+                continue
+            for tier in TIERS:
+                v = sub.get(tier, '')
+                if isinstance(v, str) and v in rewritten:
+                    sub[tier] = rewritten[v]
 
     def _normalize_classifier_temperature(self) -> None:
         """Normalize the per-provider classifier-temperature dict.
