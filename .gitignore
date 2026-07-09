@@ -7,6 +7,9 @@ docs/
 visual-companion/
 paa/project-snapshot.md
 /CLAUDE.md
-# The GUI test framework was extracted to cage-gate (GitLab cage-gate project) on
-# 2026-06-24. This repo ships no harness scripts; keep any local scratch out of git.
-/scripts-local/
+.claude/
+scripts-local/evidence/
+# Private testing tooling (deterministic release gate, etc.) lives in
+# scripts-local/. Committed to the private repo; purged from the public
+# transfer via publish/paths-to-purge.txt — so it's tracked here, not gitignored.
+# (The GUI test framework itself was extracted to release gate on 2026-06-24.)

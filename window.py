@@ -529,7 +529,7 @@ class AppWindow(Adw.ApplicationWindow):
         The Active Only filter is NOT touched here. An earlier version dropped
         the filter when the active project died so its row wouldn't vanish
         behind it — but that auto-toggled a filter the user had set, which was
-        worse (David 2026-06-18: closing a session should leave the filter
+        worse (the maintainer 2026-06-18: closing a session should leave the filter
         alone). The row going inactive hides as the filter intends; the user
         toggles it off themselves.
         """

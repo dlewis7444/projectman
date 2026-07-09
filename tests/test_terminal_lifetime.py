@@ -1,4 +1,4 @@
-"""P3.5e FB-9 (David's reveal #2, C8-amended): sticky-agent lifetime = SESSION
+"""P3.5e FB-9 (the maintainer's reveal #2, C8-amended): sticky-agent lifetime = SESSION
 lifetime.
 
 A restored session's TerminalView carries a construction-time ``_explicit_agent``
@@ -43,7 +43,7 @@ def _fake_tv(*, child_pid=4242, explicit_agent='grok', is_zellij=False,
     return t
 
 
-# ── T-a / the David repro (clearing half): a true END drops the restore agent ──
+# ── T-a / the the maintainer repro (clearing half): a true END drops the restore agent ──
 
 def test_natural_exit_clears_explicit_agent():
     """T-d/T-a: a non-zellij child exit (natural quit OR deactivate-via-SIGTERM)

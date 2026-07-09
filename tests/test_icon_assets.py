@@ -1,4 +1,4 @@
-"""P3.5f Item 1 (C9, David's second reveal): bundled-icon PLACEMENT pin.
+"""P3.5f Item 1 (C9, the maintainer's second reveal): bundled-icon PLACEMENT pin.
 
 Bench-proven: GTK4's unthemed ``IconTheme.add_search_path`` lookup resolves
 files at the search-path ROOT and does NOT descend the freedesktop

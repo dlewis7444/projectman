@@ -210,7 +210,7 @@ def test_explicit_agent_spawn_uses_that_adapter(monkeypatch):
     assert captured['argv'] == ['fake-agent']
 
 
-# ── FB-9 (P3.5e): sticky-agent lifetime = SESSION lifetime (the David repro) ───
+# ── FB-9 (P3.5e): sticky-agent lifetime = SESSION lifetime (the the maintainer repro) ───
 # Construction-time _explicit_agent (A2) is cleared when the child TRULY ends and
 # re-resolved at the next spawn, so a deactivate→reactivate honors a pending
 # per-project override; a detach/reattach keeps it. Full round-trip here (real

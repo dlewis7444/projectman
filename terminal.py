@@ -648,7 +648,7 @@ class TerminalView(Gtk.Box):
                 return False
             self._is_zellij = False
             self._zellij_session = None
-        # FB-9 (David's reveal #2, C8-amended): sticky-agent lifetime = SESSION
+        # FB-9 (the maintainer's reveal #2, C8-amended): sticky-agent lifetime = SESSION
         # lifetime. We are past the detach early-return, so the child has TRULY
         # ended (natural exit, deactivate via SIGTERM, zellij-kill, or spawn
         # failure) — not detached. Drop the construction-time restore agent so a
