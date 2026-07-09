@@ -4,6 +4,35 @@ All notable changes to ProjectMan will be documented in this file.
 
 ## [Unreleased]
 
+_Nothing yet. The B4 editor unsaved-changes affordance and the sidebar
+new-project count TODOs are deferred to 1.2.3._
+
+## [1.2.2] - 2026-07-09
+### Fixed
+- **Settings → General → Projects → "Choose Folder…" no longer throws a
+  `TypeError`.** The folder `FileDialog` was being given the `SettingsWindow`
+  (an `Adw.PreferencesDialog`, which is not a `Gtk.Window`) as its parent; it
+  now receives the stored `AppWindow` parent (a `Gtk.Window`) so the dialog
+  opens. _(Pre-existing since the Settings rework; surfaced by the 1.2.1
+  release gate persona battery.)_
+
+## [1.2.1] - 2026-07-07
+### Added
+- **Provider editor sub-window** (Settings → Models) with save-on-change, a
+  reachability probe, and per-provider classifier env levers (auto-mode model,
+  background classifier, temperature, two-stage toggle).
+- **Server-fed "Select Models" picker (C6)** — the per-project Model submenu
+  lists each provider's actual models from its `/v1/models` endpoint instead
+  of a static list.
+- **Classifier-group pruning** — only `AUTO_MODE_TEMPERATURE` classifier levers
+  are emitted; stale classifier keys no longer leak into the spawn env.
+- **`base_url` input validation** in the provider editor.
+### Fixed
+- Provider editor never opened (`set_transient_for` on the
+  `PreferencesDialog` parent), editor refresh on close, and the
+  Escape-commit / stale-tier-scrub polish cluster.
+
+## [1.2.0] - 2026-07-06
 ### Added
 - **Grok Build is now a first-class agent.** Drive xAI's
   [Grok Build](https://x.ai/cli) CLI (`grok`) per project alongside Claude Code
@@ -19,7 +48,7 @@ All notable changes to ProjectMan will be documented in this file.
   `~/.grok/config.toml` (any non-empty value) — without it grok forces a browser
   sign-in even for custom endpoints. Documented in the README.
 - **`Ctrl+,` opens Settings.** Previously the gear was the only route. _(Found
-  by the Experience Gate pilot.)_
+  by the release gate pilot.)_
 - **Settings → Agents now answers "is my account connected?" per agent.** Each
   agent gets a read-only **Account** line, presence-based (the **Check** button
   stays the live probe): claude shows "Signed in (credentials present)" or
@@ -28,21 +57,21 @@ All notable changes to ProjectMan will be documented in this file.
   recipe), or "Not signed in — `grok login`"; opencode reports what's provable
   from its config — "Providers configured: &lt;n&gt; (&lt;path&gt;)" or "No
   providers found". Token files are checked for presence only; their contents
-  are never read. _(Experience Gate round-1 yield.)_
+  are never read. _(release gate round-1 yield.)_
 - **The grok section shows the Claude-hooks compat state.** A read-only
   "Claude-hooks compat" line reads `[compat.claude] hooks` from
   `~/.grok/config.toml`: "disabled ✓ (status dots fire once)" when set false,
   otherwise "⚠ enabled — Claude's hooks may double-fire on grok events (fixed by
   Install/Update bridge)". Closes the gap where a file-driven behavior had no UI.
-  _(Experience Gate round-1 yield.)_
+  _(release gate round-1 yield.)_
 - **Creating a project tells you which agent it got.** The `+` flow now fires a
   one-shot "New project '&lt;name&gt;' — agent: &lt;Display&gt;" toast naming the
   resolved effective agent (including the missing-binary fallback), so a fresh
-  project's agent is never a silent surprise. _(Experience Gate round-1 yield.)_
+  project's agent is never a silent surprise. _(release gate round-1 yield.)_
 - **Creating a project opens it straight away.** The `+` flow now activates the
   new project through the normal open path the moment it's created — dropping you
   into its agent instead of leaving you on an empty pane. The creation toast
-  (above) still fires, naming the agent that just spawned. _(David's withheld
+  (above) still fires, naming the agent that just spawned. _(the maintainer's withheld
   round-3 finding #3.)_
 - **Grok `waiting` dot via phase aging.** Grok fires no hook event while its
   permission prompt is on screen (the wire goes silent — bench mini-probe), so
@@ -63,11 +92,11 @@ All notable changes to ProjectMan will be documented in this file.
   `-m <value>`, exactly as the adapters already expect (so the README's promise
   to "set the per-project model to pool-qwen in ProjectMan" finally works). The
   config-declared default is marked `• default`; claude's submenu is unchanged.
-  _(Experience Gate round 2 — noob/subscriber S7.)_
+  _(release gate round 2 — noob/subscriber S7.)_
 - **README/install notes for `dbus-x11`.** The package table and `install.sh`
   now name the `dbus-x11` package (providing `dbus-launch`); `install.sh` warns
   when it's missing, since a minimal install crashes hard with no session bus.
-  _(Experience Gate round 2 — noob S1.)_
+  _(release gate round 2 — noob S1.)_
 
 ### Changed
 - **Settings → Models now surfaces grok's and opencode's native model configs
@@ -75,11 +104,11 @@ All notable changes to ProjectMan will be documented in this file.
   grok's `~/.grok/config.toml`, opencode's `opencode.json` — gets a read-only
   section headed with the source path and an "edited in the agent's own config"
   note (the default model is marked). Closes the gap where grok ran Qwen from a
-  file no ProjectMan surface showed. _(Found by the Experience Gate pilot.)_
+  file no ProjectMan surface showed. _(Found by the release gate pilot.)_
 - **PAA "Enable AI Scans" copy is honest about Anthropic.** It now states the
   scans use the `claude` CLI and Anthropic credentials regardless of your
   default agent (they never route through grok/opencode/ccr). _(Found by the
-  Experience Gate pilot.)_
+  release gate pilot.)_
 - **README and the About page are now agent-neutral.** The headline/intro no
   longer call ProjectMan a Claude-only app ("desktop cockpit for AI coding
   agents"), `claude` moved from a hard requirement into an optional **Agents**
@@ -93,17 +122,17 @@ All notable changes to ProjectMan will be documented in this file.
   when claude is installed", no more warn-then-"registered!" contradiction); the
   grok compat note is rewritten for someone who's never seen grok's config; and
   the unused `GROK_*_DEST` shell vars (SC2034) were removed. _(Found by the
-  Experience Gate pilot.)_
+  release gate pilot.)_
 - **Selecting a per-project agent gives feedback.** Picking an agent from the
   sidebar **Agent** submenu now fires a one-shot "Agent for &lt;project&gt;:
-  &lt;agent&gt;" toast. _(Found by the Experience Gate pilot.)_
+  &lt;agent&gt;" toast. _(Found by the release gate pilot.)_
 - **The Claude Code Router (ccr) block no longer frightens people who don't use
   it.** When no custom Claude models are configured (no providers and no
   custom model overrides), the Models page collapses ccr to a single row —
   "Claude Code Router: not in use (only needed for custom Claude models)" —
   instead of showing service-state controls for a router you don't use. When in
   use, the full controls show as before, and the status line now adds "(routes
-  custom Claude models)". _(Experience Gate round-1 yield.)_
+  custom Claude models)". _(release gate round-1 yield.)_
 - **install.sh disables grok's Claude-compat hooks (load-bearing).** grok reads
   `~/.claude/settings.json` hooks by default, so Claude's ProjectMan hook would
   double-fire on grok events. The grok install step now sets
@@ -119,7 +148,7 @@ All notable changes to ProjectMan will be documented in this file.
   default resolves to a listed native model). The redundant entry is now
   suppressed, so "follow the default" and an explicit pin read as distinct
   choices again; a pin you actually took stays visible and checked.
-  _(David's withheld round-3 finding #1.)_
+  _(the maintainer's withheld round-3 finding #1.)_
 - **Pending PAA findings no longer hide behind an inert button after a restart.**
   The find-indicator throb was edge-triggered (it fired only when the count
   *grew*) while its meaning is level-based ("findings await you") — so the 18
@@ -127,13 +156,13 @@ All notable changes to ProjectMan will be documented in this file.
   mid-session, showed the count and never lit up. The indicator now arms whenever
   there are unseen pending findings and the PAA window is closed, and goes quiet
   once you open the window; genuine new findings still re-arm it.
-  _(David's withheld round-3 finding #2.)_
+  _(the maintainer's withheld round-3 finding #2.)_
 - **Opening Settings no longer logs a Pango-markup warning.** The Provider
   Definitions row's subtitle is a literal JSON-shape hint with a `<id>`
   placeholder, but AdwActionRow parses subtitles as markup by default — so every
   Settings open emitted a `Gtk-WARNING` (`Element "markup" closed but open
   element is "id"`) and the subtitle rendered broken. The row now disables markup
-  parsing. _(David's withheld round-3 finding #6.)_
+  parsing. _(the maintainer's withheld round-3 finding #6.)_
 - **Ending a session and starting a new one honors a pending agent change.** A
   restored session pinned the agent it was running so an incidental global default
   change couldn't swap it mid-flight — but that pin outlived the session: after
@@ -142,7 +171,7 @@ All notable changes to ProjectMan will be documented in this file.
   deactivate, reactivate → it came back as Grok Build). The pin's lifetime is now
   the SESSION's: it is dropped when the child truly ends (natural exit, deactivate,
   or the session being killed) and re-resolved on the next launch, while a zellij
-  detach/reattach still keeps it. _(David's withheld round-2 finding #2.)_
+  detach/reattach still keeps it. _(the maintainer's withheld round-2 finding #2.)_
 - **A failed restore can no longer erase the last good session.** A session that
   died the instant it restored (e.g. a zellij/no-auth project) left nothing
   running, and the close-time save then wrote an empty session over the last good
@@ -162,18 +191,18 @@ All notable changes to ProjectMan will be documented in this file.
 - **The "agent not installed" toast waits to be read.** The spawn-failure toast
   (missing agent binary) is now persistent until dismissed, like the ccr fallback
   toast — previously it auto-dismissed after five seconds, so an unfocused user
-  could miss the install hint entirely. _(Experience Gate round 2 — RB-1.)_
+  could miss the install hint entirely. _(release gate round 2 — RB-1.)_
 - **The Projects Admin Agent button is a real icon on every font stack.** The
   sparkle button shipped as a bare ✨ (`U+2728`) text label, which rendered as a
   Unicode "tofu" box on any host without an emoji font. It is now a bundled
   symbolic icon (`pm-sparkle-symbolic`), drawn with `currentColor` so it follows
   the theme; the pending-count and scanning indicator moved to a small adjacent
-  label. _(David's withheld round-2 finding.)_
+  label. _(the maintainer's withheld round-2 finding.)_
 - **The Default-Model label no longer infers a model that isn't running.** When
   a grok config declares no `[models] default`, the label now reads "built-in
   default (managed by Grok Build)" instead of promoting a lone `[model.*]` block
   as if it were active — the real default in that case is grok's built-in model,
-  invisible to the config. _(Experience Gate round 2 — the cross-instrument
+  invisible to the config. _(release gate round 2 — the cross-instrument
   correction: a coherence-sweep candidate fix was disproven by a subscriber's
   live turn.)_
 - **First-launch papercuts.** A fresh install now writes `settings.json` on the
@@ -182,7 +211,7 @@ All notable changes to ProjectMan will be documented in this file.
   Filter entry and remaining header controls all carry tooltips. The PAA window's
   disabled state points at "Settings → PAA (Ctrl+comma)", and the README's PAA
   filesystem checks are "always on while PAA is enabled" (they don't run when PAA
-  is off). _(Experience Gate round 2 — power #1/#2, noob S8.)_
+  is off). _(release gate round 2 — power #1/#2, noob S8.)_
 - **The sidebar subtitle now tells the truth about what's running.** When a
   restored session kept running one agent while the row was already configured
   for a *different* next-session agent (e.g. a live opencode session under a row
@@ -190,13 +219,13 @@ All notable changes to ProjectMan will be documented in this file.
   backend that wasn't actually running. It now leads with what's live:
   "&lt;Running&gt; (next: &lt;Configured&gt;)" while a mismatch exists, and is
   unchanged (the configured agent, with any model suffix) otherwise. _(Found by
-  the Experience Gate flow-audit-0.)_
+  the release gate flow-audit-0.)_
 - **A failed spawn no longer leaves you with less UI than before.** Restoring a
   session arms the "Active Only" filter; if a restored project's agent binary was
   missing, the just-failed row was correctly kept but then **hidden** behind that
   filter — the recovery toast pointed at a row you couldn't see. A spawn failure
   now always drops the filter, revealing the board so the failed project (and its
-  install hint) stays in view. _(Experience Gate known-edge.)_
+  install hint) stays in view. _(release gate known-edge.)_
 - **The Settings "debug logging" toggle is no longer a dead knob.** Launching
   without `--debug` unconditionally forced debug logging **off**, and the next
   settings save persisted that — so the Settings-window toggle never stuck.
@@ -210,7 +239,7 @@ All notable changes to ProjectMan will be documented in this file.
   the session back **still running Grok**. An explicit per-project pick now drops
   the stickiness before the restart re-resolves the backend, so the new agent
   spawns; an incidental global/default change still leaves a restored session
-  untouched. _(Found by Experience Gate subscriber-walk S8; confirmed by David.)_
+  untouched. _(Found by release gate subscriber-walk S8; confirmed by the maintainer.)_
 - **PAA "Haiku Check" no longer bills Anthropic when scans are disabled
   (billing leak).** The on-demand AI scan called the `claude` CLI
   unconditionally — with PAA disabled, one click silently spent ~298 Anthropic
@@ -218,7 +247,7 @@ All notable changes to ProjectMan will be documented in this file.
   the "Enable AI Scans" toggle) *before* any model call: disabled → zero calls
   and a "AI scans are disabled (Settings → PAA)" toast; enabled → the scan runs
   and its result is shown. The PAA copy that claimed "no API cost" is gone.
-  _(Found by the Experience Gate pilot.)_
+  _(Found by the release gate pilot.)_
 - **A missing agent binary no longer wrecks the UI (the first-run
   triple-whammy).** Activating a project whose agent isn't installed used to
   show a raw bash error, drop the project row entirely, and auto-enable the
@@ -227,22 +256,22 @@ All notable changes to ProjectMan will be documented in this file.
   one-shot toast names the binary and how to install it ("<binary> not found —
   <agent> isn't installed. <install hint>"). The "Active Only" auto-filter now
   engages only when a session actually starts, never on a failed attempt.
-  _(Found by the Experience Gate pilot.)_
+  _(Found by the release gate pilot.)_
 - **"New Zellij Session" explains itself when zellij is off.** With the
   multiplexer set to anything but zellij, the action silently no-oped (a brief
   spinner, then nothing). It now shows "Zellij is disabled (Settings → Terminal
-  → Multiplexer)" and doesn't spin. _(Found by the Experience Gate pilot.)_
+  → Multiplexer)" and doesn't spin. _(Found by the release gate pilot.)_
 - **"Default Model" tells the truth for the active default agent.** The row and
   the sidebar **Model** submenu's "Default (…)" item used to claim "Anthropic
   (native Claude)" even when grok was the default agent running Qwen. They now
   show the effective agent's real model story — for grok/opencode, "Managed by
   &lt;agent&gt; (&lt;config path&gt;)" plus the resolved default model name.
-  _(Found by the Experience Gate pilot.)_
+  _(Found by the release gate pilot.)_
 - **The Settings → Agents bridge button reflects the installed state.** It
   showed "Install bridge" even when the bridge was already installed and current
   (C5). It now reads the F12a manifest and shows **Bridge installed ✓ /
   Reinstall**, **Update bridge**, or **Install bridge** accordingly. _(Found by
-  the Experience Gate pilot.)_
+  the release gate pilot.)_
 - **The Settings → Agents "Install bridge" button now installs the WHOLE grok
   bridge.** The GUI path previously copied only the hook JSON — the status
   script it points at never landed. Bridge installs are now manifest-driven and
@@ -284,14 +313,14 @@ All notable changes to ProjectMan will be documented in this file.
   resolves files at the search-path ROOT and ignores the freedesktop
   `scalable/<context>/` tree — so the icon never loaded. The SVG now sits at
   `icons/pm-sparkle-symbolic.svg`, where the lookup finds it (the placement rule
-  is documented at the `add_search_path` site). _(David's second reveal.)_
+  is documented at the `add_search_path` site). _(the maintainer's second reveal.)_
 - **A project's Model submenu "Default (…)" label now tells THAT project's
   story.** The label was computed once from the global default agent and pushed
   to every row, so a project that overrode its agent to Claude Code on a
   Grok-default machine read "Default (Managed by Grok Build … — Qwen3.5 9B)" —
   naming an agent it doesn't run. Each row now derives its own label from its
   effective agent, so a Claude-override row shows Claude's native model story and
-  a follow-default row still shows the global default's. _(David's second
+  a follow-default row still shows the global default's. _(the maintainer's second
   reveal.)_
 
 ## [1.1.1] - 2026-06-10

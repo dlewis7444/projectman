@@ -10,7 +10,7 @@ and the shared zellij.kill_session helper are covered headless.
 Binding tests:
   FB-2  should_save_session decision table; _save_session guard skips/saves
   FB-3  _handle_late_death feeds the code; the Active Only filter is NOT
-        touched on any death (David 2026-06-18: closing a session must leave
+        touched on any death (the maintainer 2026-06-18: closing a session must leave
         the user's filter alone)
   FB-4  zellij.kill_session only kills a live session; spawn-path decision
   FB-10 the spawn-failure toast call pins timeout=0
@@ -137,7 +137,7 @@ def test_late_death_feeds_exit_code():
 
 def test_late_death_active_project_leaves_filter_alone():
     """BINDING (FB-3b): the dying project IS the active one, but the Active Only
-    filter is NOT touched (David 2026-06-18: closing a session must leave the
+    filter is NOT touched (the maintainer 2026-06-18: closing a session must leave the
     user's filter alone — the row hiding is the filter doing its job). The banner
     still feeds."""
     fake, calls = _latedeath_fake('/p')

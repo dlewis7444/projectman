@@ -119,7 +119,7 @@ def test_provider_row_titled_with_name_preserves_walk_assertion():
     assert row.get_subtitle() == 'http://localhost:11434'
     # The row is activatable (opens the editor on click) and carries a chevron
     # suffix as the visual affordance — no "Models" button (dropped in the
-    # Adw.Window→Adw.Dialog refactor per David).
+    # Adw.Window→Adw.Dialog refactor per the maintainer).
     assert row.get_activatable() is True
     chevrons = [w for w in _walk(row)
                 if isinstance(w, Gtk.Image)]
@@ -128,10 +128,10 @@ def test_provider_row_titled_with_name_preserves_walk_assertion():
 
 def test_provider_row_activatable_opens_editor_for_pid():
     """Activating a provider row routes to _open_editor(pid) — the wiring that
-    lets the parallel cage-gate walk reach the editor. The row is built
+    lets the parallel release gate walk reach the editor. The row is built
     directly (the unrealized PreferencesDialog doesn't expose its pages'
     children through the widget walk). Replaces the old 'Models' button
-    (dropped per David: a button inside Settings opening another window was the
+    (dropped per the maintainer: a button inside Settings opening another window was the
     wrong shape; the row itself is the affordance now)."""
     s = Settings(providers=_ollama_provider(), model_default='ollama')
     sw = _make_sw(s)
@@ -208,13 +208,13 @@ def test_override_provider_tiers_honored_and_editor_editable():
 
 # --- #4: save-on-change writes all four fields (the bug-#2 regression guard) -
 
-def test_editor_save_on_change_writes_all_four_fields(monkeypatch, tmp_path):
+def test_editor_writes_all_four_fields_on_close(monkeypatch, tmp_path):
     """The data-loss bug: under the ExpanderRow, Name/Base URL saved only on
     apply (Enter) and a full rebuild yanked focus mid-fill, so they were lost.
-    The editor saves Name on apply, Base URL on focus-out (the focus
-    controller's 'leave'), API key on every keystroke, and a model on Add
-    apply — so all four fields persist to settings.json without ever pressing
-    Enter on Base URL."""
+    The editor mutates the live in-memory Settings on apply / focus-out /
+    keystroke / Add-apply, then persists all four fields to settings.json once
+    on close — so they survive a save()→load() round-trip without ever
+    pressing Enter on Base URL."""
     import settings as settings_mod
     # Isolate the round-trip: the editor's save-on-change calls save() with no
     # path, which defaults to DEFAULT_SETTINGS_PATH — the user's REAL
@@ -250,13 +250,56 @@ def test_editor_save_on_change_writes_all_four_fields(monkeypatch, tmp_path):
     assert prov['api_key'] == 'sekret'
     assert prov['models'] == ['glm-5.2:cloud[1m]']
 
-    # And it round-trips through save()→load() (the isolated settings.json).
+    # The disk write is deferred to close — flush it, then round-trip through
+    # save()→load() (the isolated settings.json).
+    editor.emit('closed')
     reloaded = Settings.load(settings_mod.DEFAULT_SETTINGS_PATH)
     r = reloaded.providers['ollama']
     assert r['name'] == 'Ollama'
     assert r['base_url'] == 'http://localhost:11434'
     assert r['api_key'] == 'sekret'
     assert r['models'] == ['glm-5.2:cloud[1m]']
+
+
+def test_editor_defers_disk_write_to_close(monkeypatch, tmp_path):
+    """B4: edits mutate the live in-memory Settings immediately, but the
+    settings.json disk write is deferred to close — one write per editing
+    session, not one per keystroke (the API-key notify::text path was the
+    worst offender). Guards against a silent revert to save-on-change."""
+    import settings as settings_mod
+    monkeypatch.setattr(settings_mod, 'DEFAULT_SETTINGS_PATH',
+                        str(tmp_path / 'settings.json'))
+    s = Settings(providers={'ollama': {'name': '', 'base_url': '',
+                                       'api_key': '', 'models': []}},
+                 model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    # Patch save AFTER construction so build-time saves use the real path;
+    # we only want to count edit-time writes.
+    saves = []
+    monkeypatch.setattr(s, 'save', lambda *a, **k: saves.append(1))
+
+    # Several edits across fields, including two API-key "keystrokes" (the
+    # notify::text path that used to fire a write per character).
+    editor._name_row.set_text('Ollama')
+    editor._name_row.emit('apply')
+    editor._url_row.set_text('http://localhost:11434')
+    editor._url_row._focus_ctrl.emit('leave')
+    editor._key_entry.set_text('sekret')
+    editor._key_entry.set_text('sekret2')
+    editor._add_model_row.set_text('glm-5.2:cloud[1m]')
+    editor._add_model_row.emit('apply')
+
+    # Edits landed in-memory immediately...
+    assert s.providers['ollama']['name'] == 'Ollama'
+    assert s.providers['ollama']['api_key'] == 'sekret2'
+    assert s.providers['ollama']['models'] == ['glm-5.2:cloud[1m]']
+    # ...but NOT ONE disk write fired mid-edit.
+    assert saves == []
+
+    # The single write happens on close.
+    editor.emit('closed')
+    assert saves == [1]
 
 
 def test_editor_add_model_does_not_destroy_other_fields():
@@ -300,15 +343,17 @@ def test_editor_has_classifier_controls():
                  model_default='ollama')
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
-    assert _find_row(editor, 'Auto-mode model') is not None
-    assert _find_row(editor, 'Background classifier') is not None
     assert _find_row(editor, 'Classifier temperature') is not None
-    assert _find_row(editor, 'Two-stage classifier') is not None
+    # The other classifier env vars are inert in Claude Code v2.1.190+ and
+    # their UI rows were pruned.
+    assert _find_row(editor, 'Auto-mode model') is None
+    assert _find_row(editor, 'Background classifier') is None
+    assert _find_row(editor, 'Two-stage classifier') is None
 
 
-def test_editor_classifier_controls_save_on_change():
-    """All four classifier controls mutate settings on change without a full
-    rebuild (regression guard for bug #1)."""
+def test_editor_classifier_temperature_persists_on_close():
+    """The classifier temperature control mutates the live in-memory Settings
+    on change and persists to settings.json once on close."""
     import settings as settings_mod
     s = Settings(providers={'ollama': {'name': '', 'base_url': '',
                                        'api_key': '', 'models': ['glm', 'kimi']}},
@@ -316,50 +361,128 @@ def test_editor_classifier_controls_save_on_change():
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
 
-    # Auto-mode model combo — select 'kimi' (index 2: Default, glm, kimi).
-    auto_combo = _find_row(editor, 'Auto-mode model')
-    auto_combo.set_selected(2)
-
-    # Background classifier combo — select 'kimi'.
-    bg_combo = _find_row(editor, 'Background classifier')
-    bg_combo.set_selected(2)
-
     # Temperature — focus-out only.
     temp_row = _find_row(editor, 'Classifier temperature')
     temp_row.set_text('0.5')
     temp_row._focus_ctrl.emit('leave')
 
-    # Two-stage switch — toggle on.
-    ts_row = _find_row(editor, 'Two-stage classifier')
-    ts_row.set_active(True)
-
-    assert s.classifier_models['ollama'] == {
-        'auto_mode': 'kimi', 'bg_classifier': 'kimi'}
     assert s.classifier_temperature == {'ollama': 0.5}
-    assert s.classifier_two_stage == {'ollama': True}
 
-    # Round-trip through save/load.
+    # The disk write is deferred to close — flush it, then round-trip through save/load.
+    editor.emit('closed')
     reloaded = Settings.load(settings_mod.DEFAULT_SETTINGS_PATH)
-    assert reloaded.classifier_models['ollama'] == {
-        'auto_mode': 'kimi', 'bg_classifier': 'kimi'}
     assert reloaded.classifier_temperature == {'ollama': 0.5}
-    assert reloaded.classifier_two_stage == {'ollama': True}
 
 
-def test_editor_classifier_model_persists_when_adding_model():
-    """Bug-#1 guard for classifier combos: adding a new model must not drop
-    an already-chosen classifier model pick."""
+def test_editor_classifier_temperature_persists_when_adding_model():
+    """Bug-#1 guard: adding a new model must not drop an already-chosen
+    classifier temperature."""
     s = Settings(providers={'ollama': {'name': '', 'base_url': '',
                                        'api_key': '', 'models': ['glm']}},
                  model_default='ollama',
-                 classifier_models={'ollama': {'auto_mode': 'glm'}})
+                 classifier_temperature={'ollama': 0.7})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
-    # Add a new model; the classifier group is rebuilt but selection is
-    # restored from settings.
+    # Add a new model; the classifier group is rebuilt but the temperature
+    # value is restored from settings.
     editor._add_model_row.set_text('kimi')
     editor._add_model_row.emit('apply')
-    assert s.classifier_models['ollama']['auto_mode'] == 'glm'
+    assert s.classifier_temperature == {'ollama': 0.7}
+
+
+def test_editor_select_models_picker_merges_server_and_manual(monkeypatch):
+    """C6: the server-fed picker fetches models asynchronously, merges them
+    with manually-added ones (which are kept and flagged), and mutates the
+    live provider on toggle without writing to disk until close (B4 contract)."""
+    import threading
+    from gi.repository import GLib
+    import settings_window as sw_mod
+    from models import normalize_model_id
+
+    # Patch the import binding in settings_window, not the models module, because
+    # ProviderEditorWindow uses the locally-imported name.
+    monkeypatch.setattr(
+        sw_mod, 'list_provider_models',
+        lambda _provider: {'server-glm', 'server-kimi'})
+    # Make the daemon-thread + GLib.idle_add path run synchronously in this
+    # headless test (no main loop).
+    monkeypatch.setattr(
+        threading, 'Thread',
+        lambda target, daemon=False, *a, **k:
+            type('_FakeThread', (), {'start': lambda _self: target(*a, **k)})())
+    monkeypatch.setattr(GLib, 'idle_add',
+                        lambda func, *args: func(*args) or 0)
+
+    s = Settings(providers={'ollama': {'name': 'Ollama',
+                                       'base_url': 'http://localhost:11434',
+                                       'api_key': 'k',
+                                       'models': ['manual-model']}},
+                 model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+
+    # Opening the expander triggers the fetch; with the synchronous patches
+    # above the rows are built immediately.
+    editor._picker_expander.set_expanded(True)
+
+    assert set(editor._picker_rows) == {
+        normalize_model_id('manual-model'), 'server-glm', 'server-kimi'}
+
+    manual_row = editor._picker_rows[normalize_model_id('manual-model')]
+    assert manual_row.get_active() is True
+    assert manual_row.get_subtitle() == 'manually added'
+
+    server_row = editor._picker_rows['server-glm']
+    assert server_row.get_active() is False
+    server_row.set_active(True)
+    assert 'server-glm' in s.providers['ollama']['models']
+    assert editor._dirty is True
+
+    # No disk write mid-edit (B4 deferred-write contract).
+    saves = []
+    monkeypatch.setattr(s, 'save', lambda *a, **k: saves.append(1))
+    assert saves == []
+
+    # The single write happens on close.
+    editor.emit('closed')
+    assert saves == [1]
+
+
+def test_editor_select_models_picker_offline_falls_back_to_add_row(monkeypatch):
+    """C6: when the provider is unreachable, list_provider_models returns None
+    and the picker falls back to the free-text Add-model row. The manual
+    models are still shown in the picker so the user can uncheck them."""
+    import threading
+    from gi.repository import GLib
+    import settings_window as sw_mod
+    from models import normalize_model_id
+
+    monkeypatch.setattr(sw_mod, 'list_provider_models', lambda _provider: None)
+    monkeypatch.setattr(
+        threading, 'Thread',
+        lambda target, daemon=False, *a, **k:
+            type('_FakeThread', (), {'start': lambda _self: target(*a, **k)})())
+    monkeypatch.setattr(GLib, 'idle_add',
+                        lambda func, *args: func(*args) or 0)
+
+    s = Settings(providers={'ollama': {'name': 'Ollama',
+                                       'base_url': 'http://offline:11434',
+                                       'api_key': 'k',
+                                       'models': ['manual-model']}},
+                 model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    editor._picker_expander.set_expanded(True)
+
+    # Only the manual model appears; server list is empty.
+    assert set(editor._picker_rows) == {normalize_model_id('manual-model')}
+    manual_row = editor._picker_rows[normalize_model_id('manual-model')]
+    assert manual_row.get_active() is True
+
+    # The free-text Add row is still present and functional (offline fallback).
+    editor._add_model_row.set_text('offline-model')
+    editor._add_model_row.emit('apply')
+    assert s.providers['ollama']['models'] == ['manual-model', 'offline-model']
 
 
 # --- #6: close commits pending edits (the close-attempt safety net) ---------
@@ -408,7 +531,7 @@ def test_editor_probe_result_bails_after_teardown():
 # --- #7: editor opens with a PreferencesDialog parent (the real-app path) ----
 
 def test_editor_constructs_with_preferencesdialog_parent():
-    """Regression for the 2ea4d2f editor-open bug surfaced by the cg-pmprov-001
+    """Regression for the 2ea4d2f editor-open bug surfaced by the 
     persona + a deterministic cage probe. _open_editor hands the SettingsWindow
     (an Adw.PreferencesDialog, NOT a Gtk.Window) as the editor's parent. An
     unconditional set_transient_for(parent) raised TypeError → __init__ aborted
@@ -426,3 +549,80 @@ def test_editor_constructs_with_preferencesdialog_parent():
     finally:
         sw_mod.ProviderEditorWindow.present = orig
     assert editor is not None
+
+
+# --- #8: base_url validation ----------------------------------------------
+
+def test_editor_bad_url_rejected_on_apply():
+    """Invalid schemes or unparseable URLs must not overwrite the stored
+    base_url, and the row must show an inline error."""
+    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    prior = s.providers['ollama']['base_url']
+
+    editor._url_row.set_text('ftp://x')
+    editor._url_row.emit('apply')
+    assert s.providers['ollama']['base_url'] == prior
+    assert editor._url_row.has_css_class('error') is True
+    assert 'http:// or https://' in (editor._url_row.get_tooltip_text() or '')
+
+    editor._url_row.set_text('not a url')
+    editor._url_row.emit('apply')
+    assert s.providers['ollama']['base_url'] == prior
+    assert editor._url_row.has_css_class('error') is True
+
+
+def test_editor_bad_url_rejected_on_focus_out():
+    """Focus-out (the type-and-move-on path B4 fixed) must also validate."""
+    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    prior = s.providers['ollama']['base_url']
+
+    editor._url_row.set_text('ftp://x')
+    editor._url_row._focus_ctrl.emit('leave')
+    assert s.providers['ollama']['base_url'] == prior
+    assert editor._url_row.has_css_class('error') is True
+
+
+def test_editor_good_url_committed_on_apply():
+    """A valid http/https URL with a host commits and clears any prior error."""
+    s = Settings(providers={'ollama': {'name': '', 'base_url': '',
+                                       'api_key': '', 'models': []}},
+                 model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+
+    editor._url_row.set_text('http://localhost:11434')
+    editor._url_row.emit('apply')
+    assert s.providers['ollama']['base_url'] == 'http://localhost:11434'
+    assert editor._url_row.has_css_class('error') is False
+    assert editor._url_row.get_tooltip_text() == 'e.g. http://localhost:11434'
+
+
+def test_editor_empty_url_clears_base_url():
+    """Empty base_url is valid: it means "no base_url, provider skipped"."""
+    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+
+    editor._url_row.set_text('')
+    editor._url_row.emit('apply')
+    assert s.providers['ollama']['base_url'] == ''
+    assert editor._url_row.has_css_class('error') is False
+
+
+def test_editor_bad_url_discarded_on_close():
+    """B4+validation coordination: closing with a pending bad URL must not
+    persist it. _teardown calls _commit_url(); validation rejects it, leaving
+    the prior valid value in _prov and therefore in settings.json."""
+    import settings as settings_mod
+    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    prior = s.providers['ollama']['base_url']
+
+    editor._url_row.set_text('ftp://x')
+    editor.emit('closed')
+    assert s.providers['ollama']['base_url'] == prior

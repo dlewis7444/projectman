@@ -442,7 +442,7 @@ def _find_button_with_tooltip(widget, tooltip):
 
 
 # ===========================================================================
-# P3.5f (C2, David's second reveal): the "Default (…)" label is PER-ROW —
+# P3.5f (C2, the maintainer's second reveal): the "Default (…)" label is PER-ROW —
 # computed from THIS row's effective provider, not the single global label
 # the window pushes (which a per-project-override row would wear as the global
 # default's story).

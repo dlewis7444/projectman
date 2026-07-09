@@ -221,6 +221,10 @@ class Sidebar(Gtk.Box):
                     if row._process_state in ('attached', 'detached'))
             self._count_label.set_label(f'{n} active')
         else:
+            # TODO: also count the pending new-project inline-edit row so the
+            # label doesn't read "0 projects" while that row is visible — it's
+            # prepended to the listbox in _populate but intentionally kept out
+            # of _rows until commit. (release gate engineer, )
             n = len(self._rows)
             self._count_label.set_label(f'{n} projects')
 
@@ -781,7 +785,7 @@ class ProjectRow(Gtk.ListBoxRow):
         global_label: label of the global default provider, shown on the
                  Default entry (fallback for settings-less/legacy rows).
 
-        P3.5f (C2, David's second reveal): the "Default (…)" label is PER-ROW —
+        P3.5f (C2, the maintainer's second reveal): the "Default (…)" label is PER-ROW —
         computed from THIS row's effective provider, not the single global label
         the window pushes (which a per-project-override row would wear as the
         global default's story). ``global_label`` is the fallback for
