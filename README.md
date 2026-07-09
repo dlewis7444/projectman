@@ -346,8 +346,6 @@ python -m pytest
 
 ## Configuration
 
-![Settings](images/screencap_settings.jpg)
-
 | Path | Purpose |
 |------|---------|
 | `~/.ProjectMan/settings.json` | App settings |

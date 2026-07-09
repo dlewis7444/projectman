@@ -8,7 +8,7 @@ enabled mid-session, showed the count and sat inert. The unseen-pending rule
 fixes it via a pure decision in ``session.py`` (precedent: ``should_quit_app``).
 
 Binding tests:
-  T-G2a unseen=True, prev=18, count=18, closed → throb (the David repro)
+  T-G2a unseen=True, prev=18, count=18, closed → throb (the the maintainer repro)
   T-G2b after open (unseen=False), count=18, prev=18 → no re-throb
   T-G2c unseen=False, 18→19 → throb AND unseen re-arms True
   T-G2d window OPEN, any count → no throb (over-arming guard; T-G2a's pair)
@@ -31,7 +31,7 @@ from window import AppWindow
 # ── pure decision (the contract) ──────────────────────────────────────────────
 
 def test_g2a_unseen_standing_pending_throbs():
-    """T-G2a (the David repro): fresh launch (unseen=True), the very first
+    """T-G2a (the the maintainer repro): fresh launch (unseen=True), the very first
     emission delivers the 18 standing pending findings with prev==count (the
     ledger-seeded prev), window closed → throb. The edge rule missed this."""
     throb, unseen_after = paa_throb_decision(18, 18, True, False)

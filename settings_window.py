@@ -1,5 +1,6 @@
 import os
 import threading
+from urllib.parse import urlparse
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -13,15 +14,19 @@ from models import (build_provider_options, build_tier_options,
 
 class ProviderEditorWindow(Adw.Dialog):
     """A resizeable sub-window for editing one provider: name, base URL, API
-    key, tier assignments, and model list — with save-on-change and an async
-    model-reachability indicator.
+    key, tier assignments, and model list — with save-on-close (one disk write
+    per editing session) and an async model-reachability indicator.
 
-    Replaces the in-page ``Adw.ExpanderRow`` card and fixes the two bugs that
-    card had: (1) no full rebuild mid-edit, so adding a model or saving a field
-    never collapses/closes the editor or yanks focus out of the entry being
-    typed; (2) Name/Base URL save on apply AND focus-out (not apply-only), so a
-    type-and-move-on doesn't lose them. On close it calls back into the owning
-    SettingsWindow once to refresh the slim provider-row list.
+    Edits mutate the shared live ``Settings`` object immediately, so the owning
+    window sees changes as they're made; the ``settings.json`` disk write is
+    deferred to ``closed`` (``_teardown``) — one write per session instead of
+    one per keystroke. Replaces the in-page ``Adw.ExpanderRow`` card and fixes
+    the two bugs that card had: (1) no full rebuild mid-edit, so adding a model
+    or saving a field never collapses/closes the editor or yanks focus out of
+    the entry being typed; (2) Name/Base URL commit on apply AND focus-out (not
+    apply-only), so a type-and-move-on doesn't lose them. On close it calls
+    back into the owning SettingsWindow once to refresh the slim provider-row
+    list.
     """
 
     def __init__(self, settings, app, parent, pid, on_close=None):
@@ -32,6 +37,7 @@ class ProviderEditorWindow(Adw.Dialog):
         self._on_close = on_close
         self._suppress = False
         self._closed = False           # set in _teardown; guards async probe callbacks
+        self._dirty = False           # in-memory Settings mutated; flushed to disk once on close
         self._model_row_for = {}      # mid -> Adw.ActionRow
         self._add_model_row = None
 
@@ -107,11 +113,23 @@ class ProviderEditorWindow(Adw.Dialog):
         ident.add(key_row)
         outer.append(ident)
 
-        # -- Models (ABOVE tier assignments — David wants the models list first,
+        # -- Models (ABOVE tier assignments — the maintainer wants the models list first,
         #    since picking models precedes assigning them to tiers) --
         self._models_group = Adw.PreferencesGroup(title='Models')
         self._rebuild_models_group()
         outer.append(self._models_group)
+
+        # -- Server-fed model picker --
+        self._picker_group = Adw.PreferencesGroup(
+            title='Server models',
+            description='Pick from the models advertised by the provider. '
+                        'Manually added models are kept even when the server is offline.')
+        self._picker_expander = Adw.ExpanderRow(title='Select Models…')
+        self._picker_expander.connect('notify::expanded', self._on_picker_expanded)
+        self._picker_group.add(self._picker_expander)
+        self._picker_rows = {}
+        self._picker_loading_row = None
+        outer.append(self._picker_group)
 
         # -- Tier assignments --
         self._tier_group = Adw.PreferencesGroup(
@@ -122,14 +140,12 @@ class ProviderEditorWindow(Adw.Dialog):
         self._rebuild_tier_combos()
         outer.append(self._tier_group)
 
-        # -- Classifier levers --
+        # -- Classifier temperature (the only live lever) --
         self._classifier_group = Adw.PreferencesGroup(
             title='Classifier',
-            description='Auto-mode classifier tuning. Leave unset to use Claude '
-                        'Code defaults.')
-        self._classifier_combos = {}
+            description='Auto-mode classifier temperature. Leave unset to use '
+                        "Claude Code's default.")
         self._classifier_temp_row = None
-        self._classifier_two_stage_row = None
         self._rebuild_classifier_group()
         outer.append(self._classifier_group)
 
@@ -214,42 +230,13 @@ class ProviderEditorWindow(Adw.Dialog):
             self._tier_combos[tier] = combo
 
     def _rebuild_classifier_group(self):
-        """Rebuild the classifier ComboRows + temperature/two-stage widgets,
-        preserving current selections/values. Like tier combos, these are
-        discrete selections so rebuilding when the model list changes is safe."""
-        for combo in self._classifier_combos.values():
-            self._classifier_group.remove(combo)
-        self._classifier_combos = {}
+        """Rebuild the classifier temperature entry, preserving the current
+        value. The only live classifier lever is
+        ``CLAUDE_CODE_AUTO_MODE_TEMPERATURE``; the other env vars are inert in
+        Claude Code v2.1.190+ and are no longer exposed."""
         if self._classifier_temp_row is not None:
             self._classifier_group.remove(self._classifier_temp_row)
             self._classifier_temp_row = None
-        if self._classifier_two_stage_row is not None:
-            self._classifier_group.remove(self._classifier_two_stage_row)
-            self._classifier_two_stage_row = None
-
-        ids, labels = build_tier_options(
-            self._settings.providers, self._pid)
-        cm = self._settings.classifier_models.get(self._pid, {}) \
-            if isinstance(self._settings.classifier_models, dict) else {}
-        if not isinstance(cm, dict):
-            cm = {}
-
-        for kind, title in (('auto_mode', 'Auto-mode model'),
-                            ('bg_classifier', 'Background classifier')):
-            combo = Adw.ComboRow(title=title)
-            combo.set_model(Gtk.StringList.new(labels))
-            val = cm.get(kind, '')
-            if not isinstance(val, str) or val not in ids:
-                val = ''
-            self._suppress = True
-            try:
-                combo.set_selected(ids.index(val) if val in ids else 0)
-            finally:
-                self._suppress = False
-            combo.connect('notify::selected',
-                          lambda r, _p, k=kind: self._on_classifier_model_changed(k, r))
-            self._classifier_group.add(combo)
-            self._classifier_combos[kind] = combo
 
         temp_val = ''
         ct = self._settings.classifier_temperature.get(self._pid) \
@@ -260,23 +247,11 @@ class ProviderEditorWindow(Adw.Dialog):
         temp_row.set_text(temp_val)
         temp_row.set_show_apply_button(True)
         temp_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
-        temp_row.set_tooltip_text('Temperature passed to CLAUDE_CODE_AUTO_MODE_TEMPERATURE')
+        temp_row.set_tooltip_text('Passed to CLAUDE_CODE_AUTO_MODE_TEMPERATURE')
         temp_row.connect('apply', lambda _r: self._commit_classifier_temperature())
         self._wire_focus_commit(temp_row, self._commit_classifier_temperature)
         self._classifier_group.add(temp_row)
         self._classifier_temp_row = temp_row
-
-        two_stage = False
-        c2 = self._settings.classifier_two_stage.get(self._pid) \
-            if isinstance(self._settings.classifier_two_stage, dict) else None
-        if isinstance(c2, bool):
-            two_stage = c2
-        ts_row = Adw.SwitchRow(title='Two-stage classifier')
-        ts_row.set_active(two_stage)
-        ts_row.set_tooltip_text('Sets CLAUDE_CODE_TWO_STAGE_CLASSIFIER to 1 or 0')
-        ts_row.connect('notify::active', self._on_classifier_two_stage_changed)
-        self._classifier_group.add(ts_row)
-        self._classifier_two_stage_row = ts_row
 
     def _rebuild_models_group(self):
         """Rebuild the model ActionRows + the Add-model entry. The Name/Base
@@ -316,11 +291,121 @@ class ProviderEditorWindow(Adw.Dialog):
         self._model_row_for[mid] = row
         return row
 
+    # --- server-fed model picker --------------------------------------
+
+    def _on_picker_expanded(self, expander, _param):
+        """Refresh the picker each time it is opened."""
+        if not expander.get_expanded():
+            return
+        self._fetch_server_models()
+
+    def _fetch_server_models(self):
+        """Populate the picker asynchronously so the UI never blocks on the
+        network probe. Re-fetch every time the picker opens."""
+        self._clear_picker_rows()
+        loading = Adw.ActionRow(title='Loading models…')
+        self._picker_expander.add_row(loading)
+        self._picker_loading_row = loading
+
+        prov_snap = dict(self._prov)
+
+        def work():
+            offered = list_provider_models(prov_snap)
+            GLib.idle_add(self._populate_picker, offered)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _clear_picker_rows(self):
+        for row in list(self._picker_rows.values()):
+            self._picker_expander.remove(row)
+        self._picker_rows = {}
+        if self._picker_loading_row is not None:
+            self._picker_expander.remove(self._picker_loading_row)
+            self._picker_loading_row = None
+
+    def _populate_picker(self, offered):
+        """Build the checkbox list from the server result merged with the user's
+        current model list. Runs on the main thread via GLib.idle_add."""
+        if self._closed:
+            return False
+        self._clear_picker_rows()
+
+        raw_models = self._prov.get('models') \
+            if isinstance(self._prov.get('models'), list) else []
+        current = {}
+        for m in raw_models:
+            if isinstance(m, str):
+                current.setdefault(normalize_model_id(m), []).append(m)
+
+        server_ids = offered if offered is not None else set()
+        union = {}
+        for mid in server_ids:
+            nid = normalize_model_id(mid)
+            union[nid] = (mid, False)
+        for raw in raw_models:
+            nid = normalize_model_id(raw)
+            if nid not in union:
+                union[nid] = (raw, True)
+
+        if offered is None:
+            info = Adw.ActionRow(title='Provider unreachable')
+            info.set_subtitle('Use Add model below while offline')
+            self._picker_expander.add_row(info)
+
+        for nid in sorted(union):
+            display, manual = union[nid]
+            row = Adw.SwitchRow(title=display)
+            if manual:
+                row.set_subtitle('manually added')
+            active = nid in current
+            self._suppress = True
+            try:
+                row.set_active(active)
+            finally:
+                self._suppress = False
+            row.connect('notify::active',
+                        lambda r, _p, n=nid: self._on_picker_model_toggled(n, r))
+            self._picker_expander.add_row(row)
+            self._picker_rows[nid] = row
+        return False
+
+    def _on_picker_model_toggled(self, nid, row):
+        """Add or remove a model from the provider when its picker checkbox
+        toggles, then rebuild tier/classifier combos so the new selection is
+        immediately selectable elsewhere in the editor."""
+        if self._suppress:
+            return
+        raw_models = self._prov.get('models') \
+            if isinstance(self._prov.get('models'), list) else []
+        active = row.get_active()
+        new_models = [m for m in raw_models if normalize_model_id(m) != nid]
+        if active:
+            new_models.append(row.get_title())
+        if new_models != list(raw_models):
+            self._prov['models'] = new_models
+            self._mark_dirty()
+            self._rebuild_tier_combos()
+            self._rebuild_classifier_group()
+            self._rebuild_models_group()
+
     # --- save + notify ------------------------------------------------
 
     def _save_and_notify(self):
         self._settings.save()
         self._app.emit('settings-changed')
+
+    def _mark_dirty(self):
+        """Note that the shared live Settings was mutated; the settings.json
+        disk write is deferred to dialog close (_teardown). Editor edits
+        mutate the in-memory Settings object immediately, so the owning
+        window sees changes as they're made — only the persistence is
+        batched to one write per editing session (was: one write per
+        keystroke in the API-key field)."""
+        # TODO: surface an "unsaved changes" affordance (Apply sensitivity / a
+        # dirty dot) — edits persist only on dialog close, with no visible signal
+        # that Apply/Enter didn't already write to disk. (release gate mission-
+        # provider, )
+        self._dirty = True
 
     def _commit_name(self):
         name = self._name_row.get_text().strip()
@@ -328,20 +413,44 @@ class ProviderEditorWindow(Adw.Dialog):
             return
         self._prov['name'] = name
         self.set_title(f'{name or self._pid} Models')
-        self._save_and_notify()
+        self._mark_dirty()
 
     def _commit_url(self):
         url = self._url_row.get_text().strip()
         if self._prov.get('base_url') == url:
+            # Same as stored value: if it's valid, no-op; if it's somehow
+            # invalid it cannot have gotten into _prov through this path.
+            self._clear_url_error()
+            return
+        if url == '':
+            # Empty means "no base URL" — models.py skips the provider
+            # gracefully, so treat it as valid (clears the field).
+            self._prov['base_url'] = ''
+            self._clear_url_error()
+            self._mark_dirty()
+            return
+        parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+            self._show_url_error(
+                'Base URL must be http:// or https:// with a valid host')
             return
         self._prov['base_url'] = url
-        self._save_and_notify()
+        self._clear_url_error()
+        self._mark_dirty()
+
+    def _show_url_error(self, message):
+        self._url_row.add_css_class('error')
+        self._url_row.set_tooltip_text(message)
+
+    def _clear_url_error(self):
+        self._url_row.remove_css_class('error')
+        self._url_row.set_tooltip_text('e.g. http://localhost:11434')
 
     def _on_key_changed(self, entry, key_row):
         key = entry.get_text()
         self._prov['api_key'] = key
         key_row.set_subtitle(f'••••{key[-4:]}' if key else 'Not set')
-        self._save_and_notify()
+        self._mark_dirty()
 
     def _on_tier_changed(self, tier, row):
         if self._suppress:
@@ -356,22 +465,7 @@ class ProviderEditorWindow(Adw.Dialog):
             self._settings.tier_models[self._pid] = sub
         if 0 <= idx < len(ids):
             sub[tier] = ids[idx]
-            self._save_and_notify()
-
-    def _on_classifier_model_changed(self, kind, row):
-        if self._suppress:
-            return
-        ids, _labels = build_tier_options(self._settings.providers, self._pid)
-        idx = row.get_selected()
-        if not isinstance(self._settings.classifier_models, dict):
-            self._settings.classifier_models = {}
-        sub = self._settings.classifier_models.setdefault(self._pid, {})
-        if not isinstance(sub, dict):
-            sub = {}
-            self._settings.classifier_models[self._pid] = sub
-        if 0 <= idx < len(ids):
-            sub[kind] = ids[idx]
-            self._save_and_notify()
+            self._mark_dirty()
 
     def _commit_classifier_temperature(self):
         text = self._classifier_temp_row.get_text().strip()
@@ -379,7 +473,7 @@ class ProviderEditorWindow(Adw.Dialog):
             if (isinstance(self._settings.classifier_temperature, dict)
                     and self._pid in self._settings.classifier_temperature):
                 self._settings.classifier_temperature.pop(self._pid, None)
-                self._save_and_notify()
+                self._mark_dirty()
             return
         try:
             value = float(text)
@@ -390,15 +484,7 @@ class ProviderEditorWindow(Adw.Dialog):
         if not isinstance(self._settings.classifier_temperature, dict):
             self._settings.classifier_temperature = {}
         self._settings.classifier_temperature[self._pid] = value
-        self._save_and_notify()
-
-    def _on_classifier_two_stage_changed(self, row, _param):
-        if self._suppress:
-            return
-        if not isinstance(self._settings.classifier_two_stage, dict):
-            self._settings.classifier_two_stage = {}
-        self._settings.classifier_two_stage[self._pid] = bool(row.get_active())
-        self._save_and_notify()
+        self._mark_dirty()
 
     def _on_add_model(self, row):
         mid = row.get_text().strip()
@@ -408,7 +494,7 @@ class ProviderEditorWindow(Adw.Dialog):
         models = raw if isinstance(raw, list) else []
         if mid not in models:
             self._prov['models'] = list(models) + [mid]
-            self._save_and_notify()
+            self._mark_dirty()
             self._rebuild_tier_combos()   # new model is now a tier option
             self._rebuild_classifier_group()  # classifier picks see it too
         # Rebuild refreshes the model rows + a fresh Add entry. apply already
@@ -426,14 +512,7 @@ class ProviderEditorWindow(Adw.Dialog):
                 for tier in TIERS:
                     if sub.get(tier) == mid:
                         sub[tier] = ''
-        # Drop classifier model picks that referenced the removed model.
-        if isinstance(self._settings.classifier_models, dict):
-            sub = self._settings.classifier_models.get(self._pid)
-            if isinstance(sub, dict):
-                for kind in ('auto_mode', 'bg_classifier'):
-                    if sub.get(kind) == mid:
-                        sub[kind] = ''
-        self._save_and_notify()
+        self._mark_dirty()
         self._rebuild_tier_combos()
         self._rebuild_classifier_group()
         self._rebuild_models_group()
@@ -450,16 +529,12 @@ class ProviderEditorWindow(Adw.Dialog):
             }
         if isinstance(self._settings.tier_models, dict):
             self._settings.tier_models.pop(self._pid, None)
-        if isinstance(self._settings.classifier_models, dict):
-            self._settings.classifier_models.pop(self._pid, None)
         if isinstance(self._settings.classifier_temperature, dict):
             self._settings.classifier_temperature.pop(self._pid, None)
-        if isinstance(self._settings.classifier_two_stage, dict):
-            self._settings.classifier_two_stage.pop(self._pid, None)
-        self._save_and_notify()
-        # close() dismisses the dialog → 'closed' fires → _teardown commits any
-        # pending edits and refreshes the owner's Models page. (Replaces the old
-        # _teardown() + destroy() pair.)
+        self._mark_dirty()
+        # close() dismisses the dialog → 'closed' fires → _teardown persists
+        # the (now dirty) removal and refreshes the owner's Models page.
+        # (Replaces the old _teardown() + destroy() pair.)
         self.close()
 
     # --- async reachability probe -------------------------------------
@@ -513,11 +588,17 @@ class ProviderEditorWindow(Adw.Dialog):
     # --- lifecycle ----------------------------------------------------
 
     def _teardown(self):
-        """Commit any pending field edits as a focus-out safety net, then
-        refresh the owning SettingsWindow's slim provider-row list once."""
+        """Commit any pending field edits to the in-memory Settings, then
+        persist once on close. The editor mutates the shared live Settings
+        object on each edit but defers the settings.json disk write to here —
+        one write per editing session (was: one per keystroke in the API-key
+        field). Finally refresh the owning SettingsWindow's slim provider-row
+        list once."""
         self._closed = True
         self._commit_name()
         self._commit_url()
+        if self._dirty:
+            self._save_and_notify()
         if self._on_close is not None:
             self._on_close()
 
@@ -532,6 +613,11 @@ class SettingsWindow(Adw.PreferencesDialog):
         super().__init__()
         self._settings = settings
         self._app = app
+        # `parent` is the owning AppWindow (a Gtk.Window). Store it: we are an
+        # Adw.PreferencesDialog (an Adw.Dialog, NOT a Gtk.Window), and
+        # Gtk.FileDialog.select_folder() requires a Gtk.Window parent — passing
+        # `self` raises TypeError and the folder picker silently does nothing.
+        self._parent = parent
         self.set_title('Settings')
         # Guards so programmatic set_selected() during a refresh doesn't
         # re-enter the change handlers and recurse.
@@ -903,7 +989,7 @@ class SettingsWindow(Adw.PreferencesDialog):
     def _on_choose_folder(self, button):
         dialog = Gtk.FileDialog()
         dialog.set_title('Choose Projects Folder')
-        dialog.select_folder(self, None, self._on_folder_chosen)
+        dialog.select_folder(self._parent, None, self._on_folder_chosen)
 
     def _on_folder_chosen(self, dialog, result):
         try:
@@ -1218,7 +1304,7 @@ class SettingsWindow(Adw.PreferencesDialog):
         # The row itself opens the editor (click → dialog). A chevron signals
         # it's actionable — no separate "Models" button (that label was a
         # misnomer for a full provider editor, and a button inside Settings
-        # opening another window was the wrong shape David flagged).
+        # opening another window was the wrong shape the maintainer flagged).
         row.set_activatable(True)
         row.connect('activated', lambda _r, p=pid: self._open_editor(p))
         chev = Gtk.Image.new_from_icon_name('go-next-symbolic')
