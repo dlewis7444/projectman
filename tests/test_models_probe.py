@@ -45,7 +45,7 @@ def _patch_open(monkeypatch, dispatch):
     monkeypatch.setattr('urllib.request.urlopen', fake_urlopen)
 
 
-# --- normalize_model_id ------------------------------------------------------
+# --- normalize_model_id / 1m helpers -----------------------------------------
 
 def test_normalize_model_id_strips_1m():
     assert normalize_model_id('glm-5.2:cloud[1m]') == 'glm-5.2:cloud'
@@ -54,6 +54,16 @@ def test_normalize_model_id_strips_1m():
 def test_normalize_model_id_passes_through_non_1m():
     assert normalize_model_id('claude-opus-4-8') == 'claude-opus-4-8'
     assert normalize_model_id('') == ''
+
+
+def test_1m_suffix_helpers():
+    from models import is_1m_model_id, with_1m_suffix, without_1m_suffix
+    assert is_1m_model_id('m[1m]') is True
+    assert is_1m_model_id('m') is False
+    assert with_1m_suffix('m') == 'm[1m]'
+    assert with_1m_suffix('m[1m]') == 'm[1m]'
+    assert without_1m_suffix('m[1m]') == 'm'
+    assert without_1m_suffix('m') == 'm'
 
 
 # --- /v1/models (Anthropic-compatible) ---------------------------------------
