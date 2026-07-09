@@ -161,32 +161,66 @@ def test_subagent_stale_value_is_omitted():
         del os.environ['CLAUDE_CODE_SUBAGENT_MODEL']
 
 
-# --- Opus [1m] auto-suffix (GLM-aware) --------------------------------------
+# --- [1m] is stored on the model id (UI toggle); spawn is verbatim -----------
 
-def test_opus_glm_gets_1m_suffix():
-    s = Settings(providers=_provider(models=['glm-5.2:cloud']),
+def test_tier_model_ids_emitted_verbatim_including_1m():
+    """Spawn no longer name-matches glm|deepseek; [1m] must already be stored."""
+    s = Settings(providers=_provider(models=['glm-5.2:cloud[1m]', 'other']),
                  model_default='ollama',
-                 tier_models={'ollama': {'opus': 'glm-5.2:cloud'}})
+                 tier_models={'ollama': {
+                     'opus': 'glm-5.2:cloud[1m]',
+                     'sonnet': 'glm-5.2:cloud[1m]',
+                     'haiku': 'other',
+                 }})
     env, _ = build_spawn_env(s, '/p')
     assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'glm-5.2:cloud[1m]'
+    # Same stored id on Sonnet also keeps [1m] (no tier-specific rewrite).
+    assert env['ANTHROPIC_DEFAULT_SONNET_MODEL'] == 'glm-5.2:cloud[1m]'
+    assert env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] == 'other'
 
 
-def test_opus_already_1m_unchanged():
-    s = Settings(providers=_provider(models=['glm-5.2:cloud[1m]']),
+def test_bare_model_id_not_auto_suffixed_at_spawn():
+    """Without the stored [1m] flag, spawn leaves the id bare (migration may
+    have rewritten load-time settings; in-memory fixtures stay as given)."""
+    s = Settings(providers=_provider(models=['qwen-max', 'some-model']),
                  model_default='ollama',
-                 tier_models={'ollama': {'opus': 'glm-5.2:cloud[1m]'}})
+                 tier_models={'ollama': {'opus': 'qwen-max', 'sonnet': 'some-model'}})
     env, _ = build_spawn_env(s, '/p')
-    assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'glm-5.2:cloud[1m]'
+    assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'qwen-max'
+    assert env['ANTHROPIC_DEFAULT_SONNET_MODEL'] == 'some-model'
 
 
-def test_opus_non_glm_no_suffix():
-    s = Settings(providers=_provider(models=['qwen-max', 'glm-mini']),
-                 model_default='ollama',
-                 tier_models={'ollama': {'opus': 'qwen-max', 'sonnet': 'glm-mini'}})
+# --- CLAUDE_CODE_MAX_CONTEXT_TOKENS (per custom provider) --------------------
+
+def test_max_context_tokens_injected_when_set():
+    prov = _provider()
+    prov['ollama']['max_context_tokens'] = 200000
+    s = Settings(providers=prov, model_default='ollama')
     env, _ = build_spawn_env(s, '/p')
-    assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'qwen-max'  # no [1m]
-    # Only Opus gets [1m]; a GLM id on the Sonnet tier is left verbatim.
-    assert env['ANTHROPIC_DEFAULT_SONNET_MODEL'] == 'glm-mini'
+    assert env['CLAUDE_CODE_MAX_CONTEXT_TOKENS'] == '200000'
+
+
+def test_max_context_tokens_omitted_when_unset():
+    s = Settings(providers=_provider(), model_default='ollama')
+    env, _ = build_spawn_env(s, '/p')
+    assert 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' not in env
+
+
+def test_max_context_tokens_scrubs_inherited_parent_env():
+    os.environ['CLAUDE_CODE_MAX_CONTEXT_TOKENS'] = '999'
+    try:
+        s = Settings(providers=_provider(), model_default='ollama')
+        env, _ = build_spawn_env(s, '/p')
+        assert 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' not in env
+    finally:
+        del os.environ['CLAUDE_CODE_MAX_CONTEXT_TOKENS']
+
+
+def test_native_still_injects_nothing_including_max_context():
+    s = Settings()  # Anthropic native
+    env, reason = build_spawn_env(s, '/p')
+    assert env is None
+    assert reason is None
 
 
 # --- misconfiguration fallback ----------------------------------------------
@@ -241,15 +275,14 @@ def test_all_tiers_canonical():
 
 
 def test_fable_tier_env_emitted():
-    """The Fable placeholder tier is wired like the others: build_spawn_env
-    emits ANTHROPIC_DEFAULT_FABLE_MODEL (CC today doesn't document it, so it's
-    ignored harmlessly). Unset → the provider's first model, like the others."""
+    """The Fable tier is wired like the others: build_spawn_env emits
+    ANTHROPIC_DEFAULT_FABLE_MODEL. Unset → the provider's first model."""
     s = Settings(providers=_provider(models=['glm-5.2:cloud[1m]', 'kimi']),
                  model_default='ollama')
     env, _ = build_spawn_env(s, '/p')
     assert env['ANTHROPIC_DEFAULT_FABLE_MODEL'] == 'glm-5.2:cloud[1m]'
-    # An explicit Fable assignment is honored verbatim (no [1m] — only Opus).
-    s2 = Settings(providers=_provider(models=['glm-5.2:cloud', 'kimi']),
+    # Explicit Fable assignment is honored verbatim.
+    s2 = Settings(providers=_provider(models=['glm-5.2:cloud[1m]', 'kimi']),
                   model_default='ollama', tier_models={'ollama': {'fable': 'kimi'}})
     e2, _ = build_spawn_env(s2, '/p')
     assert e2['ANTHROPIC_DEFAULT_FABLE_MODEL'] == 'kimi'

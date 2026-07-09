@@ -28,9 +28,10 @@ def test_old_model_default_slashes_split_into_provider_and_tiers():
     }, model_default='ollama/glm')
     s._migrate_old_model_shape()
     assert s.model_default == 'ollama'
-    # The split tier pin lands in the per-provider sub-dict.
+    # Legacy glm|deepseek auto-[1m] migration rewrites the list + tier pins.
+    assert s.providers['ollama']['models'] == ['glm[1m]']
     for tier in TIERS:
-        assert s.tier_models['ollama'][tier] == 'glm'
+        assert s.tier_models['ollama'][tier] == 'glm[1m]'
 
 
 def test_old_model_overrides_slashes_keep_provider_only():
@@ -51,8 +52,10 @@ def test_tier_models_scrubbed_when_not_on_active_provider():
         tier_models={'opus': 'gone', 'sonnet': 'glm', 'haiku': 'glm',
                      'subagent': 'glm'})
     s._migrate_old_model_shape()
-    assert s.tier_models['ollama']['opus'] == ''   # 'gone' not in ['glm']
-    assert s.tier_models['ollama']['sonnet'] == 'glm'
+    assert s.tier_models['ollama']['opus'] == ''   # 'gone' not in models
+    # glm matched legacy 1M heuristic → stored as glm[1m] on list + pins.
+    assert s.providers['ollama']['models'] == ['glm[1m]']
+    assert s.tier_models['ollama']['sonnet'] == 'glm[1m]'
 
 
 def test_tier_models_dropped_when_native_default_and_no_providers():
@@ -75,7 +78,7 @@ def test_legacy_global_tier_models_fold_into_default_when_custom():
         tier_models={'opus': 'glm', 'sonnet': '', 'haiku': '', 'subagent': ''})
     s._migrate_old_model_shape()
     assert set(s.tier_models.keys()) == {'ollama'}   # not spread to openrouter
-    assert s.tier_models['ollama']['opus'] == 'glm'
+    assert s.tier_models['ollama']['opus'] == 'glm[1m]'
     assert s.tier_models['ollama']['sonnet'] == ''
 
 
@@ -92,8 +95,8 @@ def test_legacy_global_tier_models_fold_into_first_custom_when_native_default():
                      'subagent': ''})
     s._migrate_old_model_shape()
     assert set(s.tier_models.keys()) == {'ollama'}   # sorted-first custom
-    assert s.tier_models['ollama']['opus'] == 'glm'
-    assert s.tier_models['ollama']['sonnet'] == 'glm'
+    assert s.tier_models['ollama']['opus'] == 'glm[1m]'
+    assert s.tier_models['ollama']['sonnet'] == 'glm[1m]'
     assert 'openrouter' not in s.tier_models
 
 
@@ -128,7 +131,8 @@ def test_new_shape_passes_through_unchanged():
         tier_models={'ollama': {'opus': 'qwen', 'sonnet': '', 'haiku': '',
                                 'subagent': '', 'fable': ''}})
     s._migrate_old_model_shape()
-    assert s.providers['ollama']['models'] == ['glm', 'qwen']
+    # Bare glm still gets the one-shot legacy [1m] migration; qwen does not.
+    assert s.providers['ollama']['models'] == ['glm[1m]', 'qwen']
     assert s.model_default == 'ollama'
     assert s.model_overrides == {'/p': 'ollama'}
     assert s.tier_models['ollama']['opus'] == 'qwen'
@@ -160,7 +164,51 @@ def test_load_runs_migration_on_old_file(tmp_path):
         'model_overrides': {'/p': 'ollama/glm'},
     }))
     s = Settings.load(str(p))
-    assert s.providers['ollama']['models'] == ['glm']
+    assert s.providers['ollama']['models'] == ['glm[1m]']
     assert s.model_default == 'ollama'
     assert s.model_overrides == {'/p': 'ollama'}
-    assert s.tier_models['ollama']['opus'] == 'glm'
+    assert s.tier_models['ollama']['opus'] == 'glm[1m]'
+
+
+def test_legacy_1m_migration_appends_suffix_and_rewrites_tiers():
+    s = Settings(providers={
+        'ollama': {'name': 'O', 'base_url': 'http://x', 'api_key': 'k',
+                   'models': ['glm-5.2:cloud', 'deepseek-v3', 'kimi']}},
+        model_default='ollama',
+        tier_models={'ollama': {
+            'opus': 'glm-5.2:cloud', 'sonnet': 'kimi', 'haiku': '',
+            'subagent': '', 'fable': 'deepseek-v3',
+        }})
+    s._migrate_old_model_shape()
+    assert s.providers['ollama']['models'] == [
+        'glm-5.2:cloud[1m]', 'deepseek-v3[1m]', 'kimi']
+    assert s.tier_models['ollama']['opus'] == 'glm-5.2:cloud[1m]'
+    assert s.tier_models['ollama']['fable'] == 'deepseek-v3[1m]'
+    assert s.tier_models['ollama']['sonnet'] == 'kimi'
+
+
+def test_legacy_1m_migration_idempotent_when_already_suffixed():
+    s = Settings(providers={
+        'ollama': {'name': 'O', 'base_url': 'http://x', 'api_key': 'k',
+                   'models': ['glm-5.2:cloud[1m]']}},
+        model_default='ollama',
+        tier_models={'ollama': {
+            'opus': 'glm-5.2:cloud[1m]', 'sonnet': '', 'haiku': '',
+            'subagent': '', 'fable': '',
+        }})
+    s._migrate_old_model_shape()
+    assert s.providers['ollama']['models'] == ['glm-5.2:cloud[1m]']
+    assert s.tier_models['ollama']['opus'] == 'glm-5.2:cloud[1m]'
+
+
+def test_max_context_tokens_normalized_on_migrate():
+    s = Settings(providers={
+        'ollama': {'name': 'O', 'base_url': 'http://x', 'api_key': 'k',
+                   'models': ['m'], 'max_context_tokens': '128000'}})
+    s._migrate_old_model_shape()
+    assert s.providers['ollama']['max_context_tokens'] == 128000
+    s2 = Settings(providers={
+        'ollama': {'name': 'O', 'base_url': 'http://x', 'api_key': 'k',
+                   'models': ['m'], 'max_context_tokens': 0}})
+    s2._migrate_old_model_shape()
+    assert 'max_context_tokens' not in s2.providers['ollama']

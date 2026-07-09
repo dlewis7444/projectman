@@ -150,15 +150,15 @@ def test_editor_has_five_tier_combos():
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     combos = _tier_combos(editor)
-    assert set(combos) == {'Opus', 'Sonnet', 'Haiku', 'Subagent', 'Fable (future?)'}
+    assert set(combos) == {'Opus', 'Sonnet', 'Haiku', 'Subagent', 'Fable'}
 
 
-def test_editor_fable_combo_disabled():
+def test_editor_fable_combo_enabled():
     s = Settings(providers=_ollama_provider(), model_default='ollama')
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     combos = _tier_combos(editor)
-    assert combos['Fable (future?)'].get_sensitive() is False
+    assert combos['Fable'].get_sensitive() is True
     # The real tiers are editable.
     assert combos['Opus'].get_sensitive() is True
 
@@ -175,7 +175,7 @@ def test_editor_tier_combos_sensitive_even_when_default_is_native():
     assert combos['Opus'].get_sensitive() is True
     assert combos['Sonnet'].get_sensitive() is True
     assert combos['Subagent'].get_sensitive() is True
-    assert combos['Fable (future?)'].get_sensitive() is False  # placeholder
+    assert combos['Fable'].get_sensitive() is True  # active tier
 
 
 # --- #3: UI↔spawn editability invariant --------------------------------------
@@ -626,3 +626,65 @@ def test_editor_bad_url_discarded_on_close():
     editor._url_row.set_text('ftp://x')
     editor.emit('closed')
     assert s.providers['ollama']['base_url'] == prior
+
+
+# --- #9: context window + per-model 1M toggle --------------------------------
+
+def test_editor_tier_description_includes_fable():
+    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    desc = editor._tier_group.get_description() or ''
+    assert 'Fable' in desc
+
+
+def test_editor_max_context_tokens_field_commits():
+    s = Settings(providers={'ollama': {'name': 'O', 'base_url': 'http://x',
+                                       'api_key': '', 'models': []}},
+                 model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    assert hasattr(editor, '_max_ctx_row')
+    editor._max_ctx_row.set_text('200000')
+    editor._max_ctx_row.emit('apply')
+    assert s.providers['ollama']['max_context_tokens'] == 200000
+    editor._max_ctx_row.set_text('')
+    editor._max_ctx_row.emit('apply')
+    assert 'max_context_tokens' not in s.providers['ollama']
+
+
+def test_editor_1m_toggle_rewrites_model_id_and_tier_pin():
+    class _FakeBtn:
+        def __init__(self, active):
+            self._active = active
+
+        def get_active(self):
+            return self._active
+
+    s = Settings(providers={'ollama': {'name': 'O', 'base_url': 'http://x',
+                                       'api_key': '', 'models': ['my-model']}},
+                 model_default='ollama',
+                 tier_models={'ollama': {
+                     'opus': 'my-model', 'sonnet': '', 'haiku': '',
+                     'subagent': '', 'fable': '',
+                 }})
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    assert editor._model_row_for['my-model'].get_title() == 'my-model'
+    editor._on_model_1m_toggled('my-model', _FakeBtn(True))
+    assert s.providers['ollama']['models'] == ['my-model[1m]']
+    assert s.tier_models['ollama']['opus'] == 'my-model[1m]'
+    editor._on_model_1m_toggled('my-model[1m]', _FakeBtn(False))
+    assert s.providers['ollama']['models'] == ['my-model']
+    assert s.tier_models['ollama']['opus'] == 'my-model'
+
+
+def test_editor_model_row_shows_bare_title_when_1m_stored():
+    s = Settings(providers={'ollama': {'name': 'O', 'base_url': 'http://x',
+                                       'api_key': '',
+                                       'models': ['my-model[1m]']}},
+                 model_default='ollama')
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    row = editor._model_row_for['my-model[1m]']
+    assert row.get_title() == 'my-model'
