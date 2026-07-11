@@ -54,14 +54,19 @@ class Settings:
     #   ``max_context_tokens`` injects CLAUDE_CODE_MAX_CONTEXT_TOKENS on spawn
     #   for that custom provider only (native Anthropic is untouched).
     providers: dict = field(default_factory=dict)
-    # model_default: provider_id | ''  — '' = Anthropic (native). The active
-    # provider whose base_url receives every tier's model id (CC's
-    # ANTHROPIC_BASE_URL is process-wide, so a session mixes model NAMES across
-    # tiers but never providers).
+    # model_default: provider_id | ''  — global default provider ('' = native).
+    # Historical name; this is the default *provider* axis, not a model id.
     model_default: str = ''
-    # model_overrides: {project_path: provider_id | ''}  — per-project provider
-    # override ('' pins that project to native; absent = follow model_default).
-    model_overrides: dict = field(default_factory=dict)
+    # --- Dual axes (1.4.1): provider vs model, harness-agnostic storage ---
+    # provider_overrides: {project_path: provider_id | ''}
+    #   Absent → follow model_default. '' → explicit native. Custom id →
+    #   Settings.providers[id]. Today Claude uses this heavily; future: all
+    #   harnesses may honor custom providers.
+    provider_overrides: dict = field(default_factory=dict)
+    # model_pins: {project_path: model_id}
+    #   Absent → harness/provider default model. Present → adapters may pass
+    #   -m (Grok/OpenCode today). Shared shape for future multi-harness picks.
+    model_pins: dict = field(default_factory=dict)
     # tier_models: {provider_id: {tier: model_id | ''}}  — per-provider tier
     # assignments. Each custom provider carries its own Opus/Sonnet/Haiku/
     # Subagent/Fable mapping against ITS model list; '' = use the provider's
@@ -78,10 +83,25 @@ class Settings:
     #   key exists (so 0.0 can be emitted explicitly; missing key = leave unset).
     classifier_temperature: dict = field(default_factory=dict)
     # --- Harness binary ---
-    # Claude Code is the sole harness. agents['claude']['binary'] is the live
-    # value; the legacy ``claude_binary`` key is kept as a fallback for older
-    # settings files (mirrored on load by _migrate_claude_binary).
-    agents: dict = field(default_factory=dict)
+    # Multi-harness: harnesses map + default/overrides. claude_binary migrates
+    # into harnesses['claude']['binary'] on load. Legacy settings.json keys
+    # agents / agent_default / agent_overrides are dual-read in load().
+    harnesses: dict = field(default_factory=dict)
+    harness_default: str = 'claude'
+    harness_overrides: dict = field(default_factory=dict)
+    # --- Host axis (remote SSH projects) ---
+    # hosts: {host_id: HostProfile-as-dict} — remotes only; localhost is built-in.
+    hosts: dict = field(default_factory=dict)
+    # host_section_expanded: {host_id: bool} — legacy expand state (migrated to mode).
+    host_section_expanded: dict = field(default_factory=dict)
+    # host_section_mode: {host_id: 'all'|'active'|'hidden'}
+    #   all    — section expanded, all projects visible
+    #   active — section expanded, only attached/detached projects
+    #   hidden — section collapsed (header only)
+    # Clicking the host title cycles hidden → active → all → hidden.
+    host_section_mode: dict = field(default_factory=dict)
+    # remote_health_interval_sec: poll interval for remote health; 0 = off.
+    remote_health_interval_sec: int = 30
 
     @property
     def resolved_projects_dir(self) -> str:
@@ -89,34 +109,77 @@ class Settings:
 
     @property
     def resolved_claude_binary(self) -> str:
-        """The claude binary path: agents['claude']['binary'] wins when set,
+        """The claude binary path: harnesses['claude']['binary'] wins when set,
         otherwise the legacy ``claude_binary`` key, otherwise 'claude'."""
-        claude_cfg = self.agents.get('claude') if isinstance(self.agents, dict) else None
+        claude_cfg = self.harnesses.get('claude') if isinstance(self.harnesses, dict) else None
         if isinstance(claude_cfg, dict):
-            from_agents = (claude_cfg.get('binary') or '').strip()
-            if from_agents:
-                return from_agents
+            from_harnesses = (claude_cfg.get('binary') or '').strip()
+            if from_harnesses:
+                return from_harnesses
         return self.claude_binary.strip() or 'claude'
 
-    def effective_agent(self, project_path: str = '') -> str:
+    def effective_harness(self, project_path: str = '', host_id: str = 'localhost') -> str:
         """Return the harness id for a project.
 
-        Claude Code is the sole harness, so this is always ``'claude'``. Kept as
-        a method (not a constant) so terminal.py/window.py/sidebar.py callers
-        keep working unchanged — the agent concept is renamed "harness" in
-        user-facing UI, but the Python symbol stays (don't rename symbols).
+        Per-project override wins over the global default. Empty override means
+        use the default. Keys may be bare paths (legacy) or project_ref form.
         """
-        return 'claude'
+        from hosts import lookup_override, LOCALHOST_ID
+        hid = host_id or LOCALHOST_ID
+        val, found = lookup_override(self.harness_overrides, hid, project_path)
+        if found:
+            return val or self.harness_default
+        return self.harness_default
 
-    def effective_provider(self, project_path: str = '') -> str:
-        """Return the active provider_id for a project ('' = Anthropic native).
+    def effective_provider(self, project_path: str = '', host_id: str = 'localhost') -> str:
+        """Return the active provider_id for a project ('' = native).
 
-        A per-project override takes precedence over the global default. An
-        override stored as '' explicitly pins that project to native.
+        Per-project ``provider_overrides`` wins when the key is present.
+        ``''`` explicitly pins native. A non-empty pin that is not a known
+        provider id is treated as stale (fall back to ``model_default``).
         """
-        if project_path and project_path in self.model_overrides:
-            return self.model_overrides[project_path] or ''
+        from hosts import lookup_override, LOCALHOST_ID
+        hid = host_id or LOCALHOST_ID
+        val, found = lookup_override(
+            self.provider_overrides if isinstance(self.provider_overrides, dict)
+            else None,
+            hid, project_path,
+        )
+        if found:
+            if not isinstance(val, str):
+                return self.model_default or ''
+            if val == '':
+                return ''
+            if isinstance(self.providers, dict) and val in self.providers:
+                return val
+            return self.model_default or ''
         return self.model_default or ''
+
+    def effective_model(self, project_path: str = '', host_id: str = 'localhost') -> str:
+        """Per-project model pin (Grok/OpenCode ``-m`` today; harness-agnostic).
+
+        Reads ``model_pins`` only — never the provider axis.
+        """
+        from hosts import lookup_override, LOCALHOST_ID
+        hid = host_id or LOCALHOST_ID
+        val, found = lookup_override(
+            self.model_pins if isinstance(self.model_pins, dict) else None,
+            hid, project_path,
+        )
+        if found and isinstance(val, str) and val:
+            return val
+        return ''
+
+    def model_axis_signature(self, project_path: str = '') -> str:
+        """Opaque spawn-time signature for restart-staleness checks.
+
+        Claude today is provider-shaped; Grok/OpenCode are model-pin-shaped.
+        Storage remains dual-axis so future multi-harness custom providers can
+        use both without another settings rewrite.
+        """
+        if self.effective_harness(project_path) == 'claude':
+            return self.effective_provider(project_path)
+        return self.effective_model(project_path)
 
     def uses_custom_provider(self, project_path: str = '') -> bool:
         """True if the effective provider for this project has a base_url
@@ -128,11 +191,11 @@ class Settings:
         return isinstance(prov, dict) and bool(prov.get('base_url'))
 
     def any_custom_provider_active(self) -> bool:
-        """True if the global default or any per-project override names a
-        provider that has a base_url (env injection will run on its spawns)."""
+        """True if the global default or any per-project provider override
+        names a provider that has a base_url (env injection on its spawns)."""
         candidates = [self.model_default]
-        if isinstance(self.model_overrides, dict):
-            candidates.extend(self.model_overrides.values())
+        if isinstance(self.provider_overrides, dict):
+            candidates.extend(self.provider_overrides.values())
         for pid in candidates:
             if pid and isinstance(self.providers, dict):
                 prov = self.providers.get(pid)
@@ -147,11 +210,25 @@ class Settings:
         try:
             with open(path, 'r') as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                return cls()
+            # Dual-read legacy multi-harness key names (agent → harness).
+            if 'harnesses' not in data and 'agents' in data:
+                data['harnesses'] = data['agents']
+            if 'harness_default' not in data and 'agent_default' in data:
+                data['harness_default'] = data['agent_default']
+            if 'harness_overrides' not in data and 'agent_overrides' in data:
+                data['harness_overrides'] = data['agent_overrides']
+            # Legacy dual-use model_overrides (pre-1.4.1) — migrate after construct.
+            legacy_mo = data.get('model_overrides')
             known = {k: v for k, v in data.items()
                      if k in cls.__dataclass_fields__}
             inst = cls(**known)
+            if isinstance(legacy_mo, dict):
+                inst._legacy_model_overrides = legacy_mo
             inst._migrate_claude_binary()
             inst._migrate_old_model_shape()
+            inst._migrate_host_axis()
             return inst
         except FileNotFoundError:
             # FB-7 (power #2): on a genuine first run (no settings.json yet),
@@ -170,23 +247,23 @@ class Settings:
             return cls()
 
     def _migrate_claude_binary(self) -> None:
-        """Mirror a legacy ``claude_binary`` into ``agents['claude']['binary']``.
+        """Mirror a legacy ``claude_binary`` into ``harnesses['claude']['binary']``.
 
-        Idempotent and conservative: only fills the agents entry when the
-        legacy key holds a non-empty value AND the agents entry isn't already
+        Idempotent and conservative: only fills the harnesses entry when the
+        legacy key holds a non-empty value AND the harnesses entry isn't already
         set, so we never forge a misleading binary path or clobber a newer
-        agents-side value. The old key is left intact (still honored when the
-        agents map is absent — back-compat for any code/file that reads it).
+        harnesses-side value. The old key is left intact (still honored when the
+        harnesses map is absent — back-compat for any code/file that reads it).
         """
-        if not isinstance(self.agents, dict):
-            self.agents = {}
+        if not isinstance(self.harnesses, dict):
+            self.harnesses = {}
         legacy = (self.claude_binary or '').strip()
         if not legacy:
             return
-        claude_cfg = self.agents.get('claude')
+        claude_cfg = self.harnesses.get('claude')
         if not isinstance(claude_cfg, dict):
             claude_cfg = {}
-            self.agents['claude'] = claude_cfg
+            self.harnesses['claude'] = claude_cfg
         if not (claude_cfg.get('binary') or '').strip():
             claude_cfg['binary'] = legacy
 
@@ -197,12 +274,13 @@ class Settings:
           * providers[*]['models'] was a dict ``{model_id: {"name": str}}`` with
             a sibling ``transformer``; now ``models`` is a list of free-text
             strings and ``transformer`` is gone.
-          * model_default / model_overrides held ``'provider/model'`` strings;
-            now they hold bare provider ids ('' = native).
+          * model_default held ``'provider/model'`` strings; now bare provider
+            ids ('' = native). Legacy ``model_overrides`` dual-use map is split
+            into ``provider_overrides`` + ``model_pins`` (1.4.1).
           * tier_models did not exist; a pre-pivot ``'provider/model'`` default
             is split into ``model_default=provider`` + a global tier pin.
-          * ccr_* / agent_default / agent_overrides fields existed; they are no
-            longer dataclass fields, so the ``known``-field filter already
+          * ccr_* fields existed; dropped by known-field filter. harness_default /
+            harness_overrides are retained for multi-harness, so the ``known``-field filter already
             dropped them — nothing to do here for those.
 
         Defensive throughout: a malformed old shape degrades to the new default
@@ -259,16 +337,8 @@ class Settings:
         elif not isinstance(self.model_default, str):
             self.model_default = ''
 
-        # model_overrides: 'provider/model' → provider; '' stays; non-str dropped.
-        if isinstance(self.model_overrides, dict):
-            new_overrides = {}
-            for path, val in self.model_overrides.items():
-                if not isinstance(val, str):
-                    continue
-                new_overrides[path] = val.split('/', 1)[0] if '/' in val else val
-            self.model_overrides = new_overrides
-        else:
-            self.model_overrides = {}
+        # Split legacy dual-use model_overrides → provider_overrides + model_pins.
+        self._migrate_provider_model_axes()
 
         # tier_models: migrate the legacy GLOBAL shape {tier: model_id} → the
         # per-provider shape {provider_id: {tier: model_id}}. The legacy dict is
@@ -297,6 +367,57 @@ class Settings:
         # this, the UI 1M toggle owns the flag; spawn emits stored ids verbatim.
         self._migrate_legacy_1m_model_ids()
         self._normalize_classifier_temperature()
+
+    def _migrate_provider_model_axes(self) -> None:
+        """Normalize provider_overrides + model_pins; split legacy model_overrides.
+
+        Legacy ``model_overrides`` mixed Claude provider ids and Grok/OC ``-m``
+        strings. Split rule (after providers are list-normalized):
+
+          * ``''`` or value in ``providers`` → ``provider_overrides``
+          * else → ``model_pins`` (model-shaped ids, including ``provider/model``)
+
+        Also accepts a temporary ``_legacy_model_overrides`` attr set by
+        :meth:`load` (not a dataclass field). Idempotent.
+        """
+        if not isinstance(self.provider_overrides, dict):
+            self.provider_overrides = {}
+        if not isinstance(self.model_pins, dict):
+            self.model_pins = {}
+
+        def _str_map(raw):
+            out = {}
+            if not isinstance(raw, dict):
+                return out
+            for path, val in raw.items():
+                if isinstance(val, str):
+                    out[path] = val
+            return out
+
+        self.provider_overrides = _str_map(self.provider_overrides)
+        self.model_pins = _str_map(self.model_pins)
+
+        legacy = getattr(self, '_legacy_model_overrides', None)
+        if isinstance(legacy, dict) and legacy:
+            providers = self.providers if isinstance(self.providers, dict) else {}
+            # Prefer explicit new-map keys; only fill paths still unset.
+            for path, val in legacy.items():
+                if not isinstance(val, str):
+                    continue
+                if path in self.provider_overrides or path in self.model_pins:
+                    continue
+                if val == '' or val in providers:
+                    self.provider_overrides[path] = val
+                else:
+                    # Model-shaped (incl. opencode ``provider/model`` -m ids).
+                    # Ancient Claude ``provider/model`` slash forms land here
+                    # too if never re-saved as bare provider ids — re-pick once.
+                    self.model_pins[path] = val
+        if hasattr(self, '_legacy_model_overrides'):
+            del self._legacy_model_overrides
+
+        # Drop empty model pins; keep '' only on provider_overrides (native pin).
+        self.model_pins = {p: v for p, v in self.model_pins.items() if v}
 
     def _normalize_tier_models(self) -> None:
         """Normalize ``tier_models`` to ``{provider_id: {tier: model_id|''}}``.
@@ -398,6 +519,94 @@ class Settings:
             v = self.classifier_temperature[pid]
             if not isinstance(v, (int, float)) or not __import__('math').isfinite(v):
                 self.classifier_temperature.pop(pid, None)
+
+    def _migrate_host_axis(self) -> None:
+        """Normalize host-axis fields and project_ref keys on override maps.
+
+        * ``hosts`` — keep only valid HostProfile dicts (via hosts.parse_hosts_map).
+        * ``host_section_expanded`` — bool map; drop non-str keys / non-bool values.
+        * ``remote_health_interval_sec`` — int >= 0; default 30 if garbage.
+        * Override maps (harness/provider/model) — normalize to project_ref keys.
+        """
+        from hosts import (
+            parse_hosts_map, hosts_to_settings_dict, migrate_override_map,
+            LOCALHOST_ID,
+        )
+        parsed = parse_hosts_map(self.hosts)
+        self.hosts = hosts_to_settings_dict(parsed)
+
+        if not isinstance(self.host_section_expanded, dict):
+            self.host_section_expanded = {}
+        else:
+            cleaned = {}
+            for k, v in self.host_section_expanded.items():
+                if isinstance(k, str) and isinstance(v, bool):
+                    cleaned[k] = v
+            self.host_section_expanded = cleaned
+
+        try:
+            iv = int(self.remote_health_interval_sec)
+            if iv < 0:
+                iv = 30
+            self.remote_health_interval_sec = iv
+        except (TypeError, ValueError):
+            self.remote_health_interval_sec = 30
+
+        self.harness_overrides = migrate_override_map(self.harness_overrides)
+        self.provider_overrides = migrate_override_map(self.provider_overrides)
+        self.model_pins = migrate_override_map(self.model_pins)
+
+        if LOCALHOST_ID not in self.host_section_expanded:
+            self.host_section_expanded[LOCALHOST_ID] = True
+
+        # Migrate expand bools → section mode when mode map is empty/missing keys.
+        if not isinstance(self.host_section_mode, dict):
+            self.host_section_mode = {}
+        cleaned_modes = {}
+        for k, v in self.host_section_mode.items():
+            if isinstance(k, str) and v in ('all', 'active', 'hidden'):
+                cleaned_modes[k] = v
+        self.host_section_mode = cleaned_modes
+        for hid, expanded in self.host_section_expanded.items():
+            if isinstance(hid, str) and hid not in self.host_section_mode:
+                self.host_section_mode[hid] = 'all' if expanded else 'hidden'
+        if LOCALHOST_ID not in self.host_section_mode:
+            self.host_section_mode[LOCALHOST_ID] = 'all'
+
+    def host_profiles(self) -> dict:
+        """Return ``{id: HostProfile}`` for configured remotes (not localhost)."""
+        from hosts import parse_hosts_map
+        return parse_hosts_map(self.hosts)
+
+    def section_mode(self, host_id: str) -> str:
+        """``all`` | ``active`` | ``hidden`` for a host section (default ``all``)."""
+        if not isinstance(self.host_section_mode, dict):
+            return 'all'
+        mode = self.host_section_mode.get(host_id, 'all')
+        return mode if mode in ('all', 'active', 'hidden') else 'all'
+
+    def set_section_mode(self, host_id: str, mode: str) -> None:
+        if mode not in ('all', 'active', 'hidden'):
+            mode = 'all'
+        if not isinstance(self.host_section_mode, dict):
+            self.host_section_mode = {}
+        self.host_section_mode[host_id] = mode
+        # Keep legacy expand map in sync for older readers.
+        if not isinstance(self.host_section_expanded, dict):
+            self.host_section_expanded = {}
+        self.host_section_expanded[host_id] = mode != 'hidden'
+
+    def section_expanded(self, host_id: str) -> bool:
+        """Whether the sidebar section for host_id shows any projects."""
+        return self.section_mode(host_id) != 'hidden'
+
+    def set_section_expanded(self, host_id: str, expanded: bool) -> None:
+        """Legacy API: map bool expand onto all/hidden (preserves active)."""
+        if expanded:
+            if self.section_mode(host_id) == 'hidden':
+                self.set_section_mode(host_id, 'all')
+        else:
+            self.set_section_mode(host_id, 'hidden')
 
     def save(self, path: str | None = None) -> None:
         if path is None:

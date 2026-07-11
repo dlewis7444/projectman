@@ -33,7 +33,7 @@ def test_native_returns_none_env_and_no_reason():
 
 def test_per_project_override_to_native_returns_none():
     s = Settings(providers=_provider(), model_default='ollama',
-                 model_overrides={'/p': ''})
+                 provider_overrides={'/p': ''})
     env, reason = build_spawn_env(s, '/p')
     assert env is None
     assert reason is None
@@ -97,7 +97,7 @@ def test_per_project_override_to_provider_uses_it():
                             **_provider('mistral', base_url='http://b',
                                         models=['m'])},
                  model_default='ollama',
-                 model_overrides={'/p': 'mistral'})
+                 provider_overrides={'/p': 'mistral'})
     env, _ = build_spawn_env(s, '/p')
     assert env['ANTHROPIC_BASE_URL'] == 'http://b'
 
@@ -112,7 +112,7 @@ def test_per_provider_tiers_resolve_against_override_provider():
                             **_provider('openrouter', base_url='http://b',
                                         models=['or-opus', 'or-sonnet'])},
                  model_default='',  # native default — TA still applies to overrides
-                 model_overrides={'/p': 'openrouter'},
+                 provider_overrides={'/p': 'openrouter'},
                  tier_models={
                      'ollama': {'opus': 'glm', 'sonnet': 'kimi'},
                      'openrouter': {'opus': 'or-opus', 'sonnet': 'or-sonnet'},

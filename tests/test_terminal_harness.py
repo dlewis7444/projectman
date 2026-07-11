@@ -21,12 +21,12 @@ from display_gate import requires_display
 pytestmark = requires_display
 
 
-def _make_tv(settings=None, path='/tmp/test', agent_id=None):
+def _make_tv(settings=None, path='/tmp/test', harness_id=None):
     from settings import Settings
     from model import Project
     from terminal import TerminalView
     proj = Project(name=os.path.basename(path), path=path)
-    return TerminalView(proj, settings or Settings(), agent_id=agent_id)
+    return TerminalView(proj, settings or Settings(), harness_id=harness_id)
 
 
 # Goldens — identical to tests/test_agent_seam.py (the pre-seam argv).
@@ -71,7 +71,7 @@ def test_spawn_claude_resume_routes_to_resume_mode():
     assert captured['argv'] == ['claude', '--resume', 'sess-xyz']
 
 
-def test_spawn_agent_sets_fallback_reason_from_plan():
+def test_spawn_harness_sets_fallback_reason_from_plan():
     """A custom-model project with ccr missing → env None, fallback surfaced."""
     from settings import Settings
     s = Settings(
@@ -84,7 +84,7 @@ def test_spawn_agent_sets_fallback_reason_from_plan():
     with patch('ccr.available', return_value=False), \
          patch.object(tv, '_spawn',
                       side_effect=lambda argv, env=None: captured.update(argv=argv, env=env)):
-        tv.spawn_agent('continue')
+        tv.spawn_harness('continue')
     assert captured['env'] is None
     assert tv._fallback_reason  # explanatory string set for window.py's toast
 
@@ -129,22 +129,22 @@ def test_zellij_flag_file_contains_continue_command(tmp_path, monkeypatch):
     assert 'claude' not in body  # generalized — no hardcoded agent
 
 
-# ── A2: explicit construction-time agent overrides effective_agent ────────────
+# ── A2: explicit construction-time agent overrides effective_harness ────────────
 
 class _FakeAdapter:
     """A stand-in second adapter so A2's override can be proven before opencode
-    exists. Registered into agents.ADAPTERS for the duration of a test."""
+    exists. Registered into harnesses.ADAPTERS for the duration of a test."""
     id = 'fake'
     display_name = 'Fake'
 
     def __init__(self):
-        import agents
-        self.caps = agents.AgentCaps(continue_=True, resume_by_id=True,
+        import harnesses
+        self.caps = harnesses.HarnessCaps(continue_=True, resume_by_id=True,
                                      sessions=True, model_select=True)
 
     def spawn_plan(self, settings, project, mode, session_id=None):
-        import agents
-        return agents.SpawnPlan(argv=['fake-agent'], env=None, fallback_reason=None)
+        import harnesses
+        return harnesses.SpawnPlan(argv=['fake-agent'], env=None, fallback_reason=None)
 
     def zellij_continue_command(self, settings):
         return 'fake-agent -c || fake-agent'
@@ -153,56 +153,56 @@ class _FakeAdapter:
         return (None, None)
 
 
-def test_explicit_agent_overrides_settings(monkeypatch):
-    """saved-agent-wins (A2): an explicit agent_id at construction beats
-    settings.effective_agent (which says claude here)."""
-    import agents
+def test_explicit_harness_overrides_settings(monkeypatch):
+    """saved-harness-wins (A2): an explicit harness_id at construction beats
+    settings.effective_harness (which says claude here)."""
+    import harnesses
     from settings import Settings
-    monkeypatch.setitem(agents.ADAPTERS, 'fake', _FakeAdapter())
-    s = Settings(agent_default='claude')   # settings say claude
-    tv = _make_tv(settings=s, path='/tmp/restored', agent_id='fake')
+    monkeypatch.setitem(harnesses.ADAPTERS, 'fake', _FakeAdapter())
+    s = Settings(harness_default='claude')   # settings say claude
+    tv = _make_tv(settings=s, path='/tmp/restored', harness_id='fake')
     assert tv._adapter.id == 'fake'        # the saved agent won
 
 
-def test_no_explicit_agent_follows_settings(monkeypatch):
-    """settings-wins on a new activation (A2): no agent_id → effective_agent."""
-    import agents
+def test_no_explicit_harness_follows_settings(monkeypatch):
+    """settings-wins on a new activation (A2): no harness_id → effective_harness."""
+    import harnesses
     from settings import Settings
-    monkeypatch.setitem(agents.ADAPTERS, 'fake', _FakeAdapter())
-    s = Settings(agent_default='fake')     # settings default is the fake agent
-    tv = _make_tv(settings=s, path='/tmp/new', agent_id=None)
+    monkeypatch.setitem(harnesses.ADAPTERS, 'fake', _FakeAdapter())
+    s = Settings(harness_default='fake')     # settings default is the fake agent
+    tv = _make_tv(settings=s, path='/tmp/new', harness_id=None)
     assert tv._adapter.id == 'fake'
 
 
 def test_v1_session_no_agent_restores_claude():
-    """A v1 (agent-less) restore yields agent_id='claude' upstream; constructing
+    """A v1 (harness-less) restore yields harness_id='claude' upstream; constructing
     with that id resolves the claude adapter."""
     from settings import Settings
-    tv = _make_tv(settings=Settings(agent_default='claude'),
-                  path='/tmp/legacy', agent_id='claude')
+    tv = _make_tv(settings=Settings(harness_default='claude'),
+                  path='/tmp/legacy', harness_id='claude')
     assert tv._adapter.id == 'claude'
 
 
-def test_explicit_agent_sticky_across_apply_settings(monkeypatch):
+def test_explicit_harness_sticky_across_apply_settings(monkeypatch):
     """A restored agent must not silently swap when settings change later."""
-    import agents
+    import harnesses
     from settings import Settings
-    monkeypatch.setitem(agents.ADAPTERS, 'fake', _FakeAdapter())
-    tv = _make_tv(settings=Settings(agent_default='claude'),
-                  path='/tmp/sticky', agent_id='fake')
+    monkeypatch.setitem(harnesses.ADAPTERS, 'fake', _FakeAdapter())
+    tv = _make_tv(settings=Settings(harness_default='claude'),
+                  path='/tmp/sticky', harness_id='fake')
     assert tv._adapter.id == 'fake'
     # Settings now default to claude with no override for this path.
-    tv.apply_settings(Settings(agent_default='claude'))
+    tv.apply_settings(Settings(harness_default='claude'))
     assert tv._adapter.id == 'fake'       # still the restored agent
 
 
-def test_explicit_agent_spawn_uses_that_adapter(monkeypatch):
+def test_explicit_harness_spawn_uses_that_adapter(monkeypatch):
     """The override actually drives the spawn argv (not just the stored id)."""
-    import agents
+    import harnesses
     from settings import Settings
-    monkeypatch.setitem(agents.ADAPTERS, 'fake', _FakeAdapter())
-    tv = _make_tv(settings=Settings(agent_default='claude'),
-                  path='/tmp/spawn', agent_id='fake')
+    monkeypatch.setitem(harnesses.ADAPTERS, 'fake', _FakeAdapter())
+    tv = _make_tv(settings=Settings(harness_default='claude'),
+                  path='/tmp/spawn', harness_id='fake')
     captured = {}
     with patch.object(tv, '_spawn',
                       side_effect=lambda argv, env=None: captured.update(argv=argv)):
@@ -211,7 +211,7 @@ def test_explicit_agent_spawn_uses_that_adapter(monkeypatch):
 
 
 # ── FB-9 (P3.5e): sticky-agent lifetime = SESSION lifetime (the the maintainer repro) ───
-# Construction-time _explicit_agent (A2) is cleared when the child TRULY ends and
+# Construction-time _explicit_harness (A2) is cleared when the child TRULY ends and
 # re-resolved at the next spawn, so a deactivate→reactivate honors a pending
 # per-project override; a detach/reattach keeps it. Full round-trip here (real
 # TerminalView, display-gated); the clear/preserve funnel is unit-tested headless
@@ -220,20 +220,20 @@ def test_explicit_agent_spawn_uses_that_adapter(monkeypatch):
 def test_fb9_deactivate_reactivate_honors_pending_override(monkeypatch):
     """T-a (THE DAVID REPRO): a restored-grok session (explicit agent 'fake')
     whose project is NOW overridden to claude, deactivated then reactivated, must
-    spawn CLAUDE. Reverting the FB-9 clear leaves _explicit_agent='fake' and the
+    spawn CLAUDE. Reverting the FB-9 clear leaves _explicit_harness='fake' and the
     reactivation re-spawns the fake agent → this FAILS with the verbatim repro."""
-    import agents
+    import harnesses
     from settings import Settings
-    monkeypatch.setitem(agents.ADAPTERS, 'fake', _FakeAdapter())
+    monkeypatch.setitem(harnesses.ADAPTERS, 'fake', _FakeAdapter())
     # Restored as the fake agent, but settings now OVERRIDE this project → claude.
-    s = Settings(agent_default='claude', agent_overrides={'/tmp/react': 'claude'})
-    tv = _make_tv(settings=s, path='/tmp/react', agent_id='fake')
+    s = Settings(harness_default='claude', harness_overrides={'/tmp/react': 'claude'})
+    tv = _make_tv(settings=s, path='/tmp/react', harness_id='fake')
     assert tv._adapter.id == 'fake'            # restored agent at construction
-    assert s.effective_agent('/tmp/react') == 'claude'   # override is pending
+    assert s.effective_harness('/tmp/react') == 'claude'   # override is pending
     # --- deactivate: the child ends (SIGTERM → exit). Simulate the exit funnel.
     tv._child_pid = 4242
     tv._fire_exit_if_current(4242, 0)
-    assert tv._explicit_agent is None          # FB-9: the dead session's agent dropped
+    assert tv._explicit_harness is None          # FB-9: the dead session's agent dropped
     # --- reactivate: spawn_continue. It must re-resolve to the pending override.
     captured = {}
     with patch.object(tv, '_spawn',
@@ -243,34 +243,34 @@ def test_fb9_deactivate_reactivate_honors_pending_override(monkeypatch):
     assert captured['argv'] != ['fake-agent']  # NOT the dead restore agent
 
 
-def test_fb9_detach_reattach_keeps_explicit_agent(monkeypatch):
+def test_fb9_detach_reattach_keeps_explicit_harness(monkeypatch):
     """T-b: a zellij DETACH preserves the restore agent — a reattach resumes the
     same agent. Over-clearing on detach FAILS this."""
-    import agents
+    import harnesses
     from settings import Settings
-    monkeypatch.setitem(agents.ADAPTERS, 'fake', _FakeAdapter())
-    s = Settings(agent_default='claude', agent_overrides={'/tmp/det': 'claude'})
-    tv = _make_tv(settings=s, path='/tmp/det', agent_id='fake')
+    monkeypatch.setitem(harnesses.ADAPTERS, 'fake', _FakeAdapter())
+    s = Settings(harness_default='claude', harness_overrides={'/tmp/det': 'claude'})
+    tv = _make_tv(settings=s, path='/tmp/det', harness_id='fake')
     tv._child_pid = 4242
     tv._is_zellij = True
     tv._zellij_session = 'pm-det'
     with patch('terminal.zellij.session_alive', return_value=True):
         tv._fire_exit_if_current(4242, 0)      # session still alive → DETACH
-    assert tv._explicit_agent == 'fake'        # preserved through detach
+    assert tv._explicit_harness == 'fake'        # preserved through detach
 
 
 def test_fb9_a2_restore_pin_unchanged(monkeypatch):
     """T-c: A2 is intact — a restored session that is NEVER ended keeps its
     explicit agent across an incidental settings change (the original A2 pin)."""
-    import agents
+    import harnesses
     from settings import Settings
-    monkeypatch.setitem(agents.ADAPTERS, 'fake', _FakeAdapter())
-    tv = _make_tv(settings=Settings(agent_default='claude'),
-                  path='/tmp/a2', agent_id='fake')
-    tv.apply_settings(Settings(agent_default='claude'))
+    monkeypatch.setitem(harnesses.ADAPTERS, 'fake', _FakeAdapter())
+    tv = _make_tv(settings=Settings(harness_default='claude'),
+                  path='/tmp/a2', harness_id='fake')
+    tv.apply_settings(Settings(harness_default='claude'))
     assert tv._adapter.id == 'fake'            # still sticky (no end occurred)
     # And a spawn (e.g. an explicit restart of the SAME restored session) still
-    # uses the restored agent — A2 saved-agent-wins on restart.
+    # uses the restored agent — A2 saved-harness-wins on restart.
     captured = {}
     with patch.object(tv, '_spawn',
                       side_effect=lambda argv, env=None: captured.update(argv=argv)):
@@ -278,23 +278,23 @@ def test_fb9_a2_restore_pin_unchanged(monkeypatch):
     assert captured['argv'] == ['fake-agent']
 
 
-def test_fb9_natural_exit_then_reactivate_follows_effective_agent(monkeypatch):
+def test_fb9_natural_exit_then_reactivate_follows_effective_harness(monkeypatch):
     """T-d: a natural exit (no override pending) → the next activation follows
-    settings.effective_agent (here claude), proving the clear+re-resolve is the
+    settings.effective_harness (here claude), proving the clear+re-resolve is the
     general behavior, not a special-case of the override path."""
-    import agents
+    import harnesses
     from settings import Settings
-    monkeypatch.setitem(agents.ADAPTERS, 'fake', _FakeAdapter())
-    s = Settings(agent_default='claude')       # no per-project override
-    tv = _make_tv(settings=s, path='/tmp/nat', agent_id='fake')
+    monkeypatch.setitem(harnesses.ADAPTERS, 'fake', _FakeAdapter())
+    s = Settings(harness_default='claude')       # no per-project override
+    tv = _make_tv(settings=s, path='/tmp/nat', harness_id='fake')
     tv._child_pid = 4242
     tv._fire_exit_if_current(4242, 0)          # natural exit
-    assert tv._explicit_agent is None
+    assert tv._explicit_harness is None
     captured = {}
     with patch.object(tv, '_spawn',
                       side_effect=lambda argv, env=None: captured.update(argv=argv)):
         tv.spawn_continue(project_name='nat')
-    assert tv._adapter.id == 'claude'          # follows effective_agent now
+    assert tv._adapter.id == 'claude'          # follows effective_harness now
 
 
 # ── A3: zellij env comes through the adapter, including custom-model fallback ──

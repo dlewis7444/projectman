@@ -1,15 +1,13 @@
-.worktrees/
-__pycache__/
+.claude/
+/CLAUDE.md
+/AGENTS.md
+# Local gate-run dumps (if present); keep scripts-local/ source tracked.
+scripts-local/evidence/
+docs/
+paa/project-snapshot.md
 *.pyc
+__pycache__/
 .pytest_cache/
 .superpowers/
-docs/
 visual-companion/
-paa/project-snapshot.md
-/CLAUDE.md
-.claude/
-scripts-local/evidence/
-# Private testing tooling (deterministic release gate, etc.) lives in
-# scripts-local/. Committed to the private repo; purged from the public
-# transfer via publish/paths-to-purge.txt — so it's tracked here, not gitignored.
-# (The GUI test framework itself was extracted to release gate on 2026-06-24.)
+.worktrees/

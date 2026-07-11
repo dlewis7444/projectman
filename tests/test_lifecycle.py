@@ -1,7 +1,7 @@
 """P2.1 — lifecycle hardening: signal-safe shutdown + the three incident bugs.
 
 All window/app methods are tested UNBOUND against duck-typed SimpleNamespace
-recorders (the established A2/A5 pattern, see test_session_agents.py). Pure
+recorders (the established A2/A5 pattern, see test_session_harnesses.py). Pure
 decisions live in ``session.py`` and are tested directly. ``ProjectManApp`` is
 CONSTRUCTED (only) for T7 — the spec sanctions headless construction; it is
 never registered/run/activated.
@@ -72,8 +72,8 @@ def test_plan_emergency_kill_zellij_with_no_child_skipped():
 
 def test_emergency_shutdown_saves_before_kill_and_skips_zellij():
     """T2 — save_session is recorded BEFORE any _kill_child; the zellij
-    terminal's _kill_child is NEVER called; the killed direct paths are
-    returned."""
+    terminal's _kill_child is NEVER called; the killed
+    direct paths are returned."""
     calls = []
     terminals = {
         '/direct': _term(111, is_zellij=False, calls=calls, path='/direct'),
@@ -86,7 +86,7 @@ def test_emergency_shutdown_saves_before_kill_and_skips_zellij():
     killed = AppWindow.emergency_shutdown(fake)
 
     assert killed == ['/direct']
-    # save first, exactly one kill (the direct one).
+    # save first, exactly one kill (the direct one), ccr stop last.
     assert calls == [('save', None), ('kill', '/direct')]
     # zellij _kill_child never fired.
     assert ('kill', '/zellij') not in calls
@@ -160,11 +160,12 @@ def test_should_quit_app_decision_table():
 # ── T6: _quit gates app.quit on primary-window identity ───────────────────────
 
 def _quit_fake(app):
-    """Fake AppWindow self for _quit: destroy recorded; get_application returns
-    the given fake app. (_quit no longer stops a managed service — the ccr
-    teardown was removed in the Claude-Only pivot.)"""
+    """Fake AppWindow self for _quit: destroy recorded;
+    get_application returns the given fake app."""
     calls = []
-    fake = types.SimpleNamespace()
+    fake = types.SimpleNamespace(
+        _settings=types.SimpleNamespace(),
+    )
     fake.destroy = lambda: calls.append('destroy')
     fake.get_application = lambda: app
     return fake, calls
@@ -247,7 +248,7 @@ def test_conftest_pins_test_app_id():
 #
 # Creating a project dropped the user on a dead pane. _on_project_create now
 # routes through the CANONICAL activation path (_on_project_activated, the
-# restore precedent) so the new project opens straight into its agent — while
+# restore precedent) so the new project opens straight into its harness — while
 # the B4 creation toast STAYS (it names the resolved agent). Unbound-method
 # idiom against duck-typed recorders, as elsewhere in this file.
 
@@ -281,7 +282,7 @@ def test_g3a_create_activates_new_project_canonically():
     Neutering the activation call FAILS this. Order: create → refresh →
     activate (then toast)."""
     fake, calls = _create_fake(projects_dir='/tmp/projects')
-    AppWindow._on_project_create(fake, fake._sidebar, 'newproj')
+    AppWindow._on_project_create(fake, fake._sidebar, 'localhost', 'newproj')
     expected_path = os.path.join('/tmp/projects', 'newproj')
     assert ('activate', fake._sidebar, expected_path) in calls
     # canonical ordering: create, then refresh, then activate.
@@ -292,11 +293,11 @@ def test_g3a_create_activates_new_project_canonically():
 
 def test_g3b_creation_toast_still_fires():
     """T-G3b (regression pin on B4): the creation toast still fires AFTER the new
-    activation — adding G3 did not displace the agent-naming toast."""
+    activation — adding G3 did not displace the harness-naming toast."""
     fake, calls = _create_fake()
-    AppWindow._on_project_create(fake, fake._sidebar, 'newproj')
+    AppWindow._on_project_create(fake, fake._sidebar, 'localhost', 'newproj')
     assert ('toast', 'toast::newproj') in calls
-    # toast comes after the activation (the spawn makes the named agent concrete).
+    # toast comes after the activation (the spawn makes the named harness concrete).
     expected_path = os.path.join('/tmp/projects', 'newproj')
     assert calls.index(('activate', fake._sidebar, expected_path)) < calls.index(
         ('toast', 'toast::newproj'))
@@ -306,7 +307,7 @@ def test_g3c_create_failure_skips_activation_and_toast():
     """T-G3c: create raising OSError returns early — no activation, no toast.
     The pre-existing clean early-return is preserved."""
     fake, calls = _create_fake(create_raises=OSError('boom'))
-    AppWindow._on_project_create(fake, fake._sidebar, 'newproj')
+    AppWindow._on_project_create(fake, fake._sidebar, 'localhost', 'newproj')
     assert ('create', 'newproj') in calls
     assert not any(c[0] == 'activate' for c in calls)
     assert not any(c[0] == 'toast' for c in calls)
