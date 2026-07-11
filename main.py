@@ -14,7 +14,7 @@ from window import AppWindow
 from settings import Settings
 
 
-VERSION = '1.3.0'
+VERSION = '1.4.2'
 
 # Single source of truth for the real DBus application id. A test or harness
 # overrides it via PM_APP_ID so it can never share identity with the user's
@@ -153,7 +153,12 @@ class ProjectManApp(Adw.Application):
         self._projects_watcher.connect('projects-changed', self._on_projects_changed)
         self.connect('settings-changed', self._on_settings_changed)
         self._window.present()
-        self._window._restore_session()
+        # Kick async remote list; restore on idle so the window is realized
+        # and so a remote spawn fault cannot block first paint. Locals are
+        # restored before remotes inside _restore_session.
+        self._window._refresh_remote_hosts()
+        from gi.repository import GLib
+        GLib.idle_add(self._window._restore_session_idle)
         if self._settings.paa_enabled:
             self._paa_monitor.start()
 

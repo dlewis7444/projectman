@@ -13,8 +13,8 @@ from archive_window import ArchiveWindow
 from shutdown_window import ShutdownWindow
 from model import Project
 from session import (
-    save_session, load_session, load_agents, filter_active_paths,
-    collect_session_state, collect_agents_map, plan_restore,
+    save_session, load_session, load_harnesses, filter_active_paths,
+    collect_session_state, collect_harnesses_map, plan_restore,
     plan_emergency_kill, should_quit_app, should_save_session, SESSION_FILE,
 )
 
@@ -29,16 +29,16 @@ class AppWindow(Adw.ApplicationWindow):
         self._version = version
         self._terminals = {}
         self._active_path = None
-        # Per-project agent map populated from session.json during a restore
-        # pass (saved-agent-wins, A2). _get_or_create_terminal consults it when
-        # no explicit agent_id is passed, so the focused project — activated via
+        # Per-project harness map populated from session.json during a restore
+        # pass (saved-harness-wins, A2). _get_or_create_terminal consults it when
+        # no explicit harness_id is passed, so the focused project — activated via
         # the normal _on_project_activated path — still recreates its saved
         # agent. Empty outside a restore; new activations fall through to
-        # settings.effective_agent.
-        self._restore_agents: dict = {}
-        # Distinct missing-agent ids already toasted (A6 one-shot dedup).
-        self._warned_agents: set = set()
-        # (project_path, agent_id) pairs already toasted for a spawn failure
+        # settings.effective_harness.
+        self._restore_harnesses: dict = {}
+        # Distinct missing-harness ids already toasted (A6 one-shot dedup).
+        self._warned_harnesses: set = set()
+        # (project_path, harness_id) pairs already toasted for a spawn failure
         # (M-UX.10a one-shot dedup — a restore storm of the same miss is one toast).
         self._warned_spawn_fail: set = set()
         # FB-2 (C7/C8): did ANY agent child actually start this run? Set in the
@@ -122,11 +122,13 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.connect('project-ntfy-toggle', self._on_ntfy_toggle)
         self._sidebar.connect('project-haiku-check', self._on_project_haiku_check)
         self._sidebar.connect('project-model-change', self._on_project_model_change)
+        self._sidebar.connect('project-harness-change', self._on_project_harness_change)
         self._sidebar.connect('show-archive-window', self._on_show_archive_window)
         self._sidebar.connect('show-settings',       self._on_open_settings)
         self._sidebar.connect('project-create', self._on_project_create)
         self._sidebar.connect('project-rename', self._on_project_rename)
         self._sidebar.connect('show-paa-window', self._on_show_paa_window)
+        self._sidebar.connect('host-section-toggled', self._on_host_section_toggled)
         self._paned.set_start_child(self._sidebar)
 
         self._stack = Gtk.Stack()
@@ -146,9 +148,8 @@ class AppWindow(Adw.ApplicationWindow):
         toolbar_view.set_content(self._toast_overlay)
         self.set_content(toolbar_view)
 
-        # Provider-fallback toast aggregation state: pending (project_name,
-        # reason) events batched for ~2s before display; at most ONE provider
-        # toast shown at a time.
+        # Provider-fallback toast aggregation state: pending (project_name, reason) events
+        # batched for ~2s before display; at most ONE provider toast shown at a time.
         self._provider_pending: list = []    # buffered (name, reason) pairs
         self._provider_toast_timer = None    # GLib.timeout_add source id | None
         self._provider_toast: Adw.Toast | None = None  # currently displayed toast
@@ -162,8 +163,227 @@ class AppWindow(Adw.ApplicationWindow):
         # This poll exists as belt-and-suspenders if both ever miss, and
         # should rarely fire.
         GLib.timeout_add_seconds(5, self._sweep_dead_terminals)
+        self._health_timer_id = None
+        self._status_timer_id = None
+        self._remote_status_busy = False
         self._setup_shortcuts()
         self._refresh_sidebar_models()
+        self._arm_remote_health_timer()
+        self._arm_remote_status_timer()
+        # Initial remote project list / health (async).
+        GLib.idle_add(self._refresh_remote_hosts)
+
+    def _arm_remote_health_timer(self):
+        if self._health_timer_id is not None:
+            GLib.source_remove(self._health_timer_id)
+            self._health_timer_id = None
+        interval = int(getattr(self._settings, 'remote_health_interval_sec', 30) or 0)
+        if interval > 0:
+            self._health_timer_id = GLib.timeout_add_seconds(
+                interval, self._on_remote_health_tick)
+
+    def _arm_remote_status_timer(self):
+        """Fast poll for rich-status project dots (separate from slow health).
+
+        Health interval defaults to 30s — fine for host reachability, useless
+        for a 15s Grok turn (session_start→done, then working never observed).
+        """
+        if self._status_timer_id is not None:
+            GLib.source_remove(self._status_timer_id)
+            self._status_timer_id = None
+        # 1.5s: snappy dots, still cheap (one cat of status/*.json per host).
+        self._status_timer_id = GLib.timeout_add(
+            1500, self._on_remote_status_tick)
+
+    def _on_remote_health_tick(self):
+        self._refresh_remote_hosts()
+        return GLib.SOURCE_CONTINUE
+
+    def _rich_status_hosts(self):
+        """Hosts with rich-status on + cached project lists."""
+        out = []
+        for hid, prof in self._settings.host_profiles().items():
+            if not getattr(prof, 'rich_status_opt_in', False):
+                continue
+            projects = list(
+                getattr(self._sidebar, '_remote_projects', {}).get(hid, [])
+            )
+            out.append((hid, prof, projects))
+        return out
+
+    def _on_remote_status_tick(self):
+        """Kick async status-only poll for rich-status hosts."""
+        hosts = self._rich_status_hosts()
+        if not hosts:
+            return GLib.SOURCE_CONTINUE
+        if getattr(self, '_remote_status_busy', False):
+            return GLib.SOURCE_CONTINUE
+        self._remote_status_busy = True
+        # Snapshot for worker thread
+        work_list = [(hid, prof, projects) for hid, prof, projects in hosts]
+
+        def work():
+            import remote_store
+            results = []
+            for hid, prof, projects in work_list:
+                snaps = []
+                try:
+                    snaps, _err = remote_store.fetch_remote_status_snapshots(prof)
+                    snaps = snaps or []
+                except Exception:
+                    snaps = []
+                results.append({
+                    'hid': hid,
+                    'projects': projects,
+                    'snaps': snaps,
+                })
+            GLib.idle_add(self._apply_remote_status_only, results)
+
+        import threading
+        threading.Thread(
+            target=work, daemon=True, name='pm-remote-status',
+        ).start()
+        return GLib.SOURCE_CONTINUE
+
+    def _apply_remote_status_only(self, results):
+        try:
+            for item in results:
+                projects = item.get('projects') or []
+                if projects:
+                    self._apply_remote_status_snaps(
+                        projects, item.get('snaps') or [],
+                        clear_missing=False,
+                    )
+            self._sidebar.refresh_status()
+        finally:
+            self._remote_status_busy = False
+        return False
+
+    def _refresh_remote_hosts(self):
+        """Kick async remote health/list/status — never blocks the GTK main loop."""
+        if getattr(self, '_remote_refresh_busy', False):
+            return False
+        profiles = list(self._settings.host_profiles().items())
+        if not profiles:
+            return False
+        interval = int(getattr(self._settings, 'remote_health_interval_sec', 30) or 0)
+        checks_enabled = interval > 0
+        cached = {
+            hid: list(projs)
+            for hid, projs in getattr(self._sidebar, '_remote_projects', {}).items()
+        }
+        self._remote_refresh_busy = True
+
+        def work():
+            import remote_store
+            from ssh_transport import HealthState
+            results = []
+            for hid, prof in profiles:
+                try:
+                    state, projects, detail = remote_store.probe_host_health(
+                        prof, checks_enabled=checks_enabled,
+                    )
+                    if state == HealthState.GREY:
+                        projects, err = remote_store.list_remote_projects(prof)
+                        if err:
+                            projects = cached.get(hid, [])
+                    elif state != HealthState.GREEN:
+                        projects = projects or cached.get(hid, [])
+                    snaps = []
+                    if getattr(prof, 'rich_status_opt_in', False) and projects:
+                        snaps, _ = remote_store.fetch_remote_status_snapshots(prof)
+                        snaps = snaps or []
+                    results.append({
+                        'hid': hid,
+                        'state': state,
+                        'projects': projects or [],
+                        'snaps': snaps,
+                        'rich': bool(getattr(prof, 'rich_status_opt_in', False)),
+                    })
+                except Exception as e:
+                    results.append({
+                        'hid': hid,
+                        'state': 'red',
+                        'projects': cached.get(hid, []),
+                        'snaps': [],
+                        'rich': False,
+                        'error': str(e),
+                    })
+            GLib.idle_add(self._apply_remote_refresh, results)
+
+        import threading
+        threading.Thread(target=work, daemon=True, name='pm-remote-refresh').start()
+        return False
+
+    def _apply_remote_refresh(self, results):
+        """Main-thread apply of async remote probe results."""
+        try:
+            for item in results:
+                hid = item['hid']
+                self._sidebar.set_host_health(hid, item['state'])
+                projects = item.get('projects') or []
+                self._sidebar.set_remote_projects(hid, projects)
+                if item.get('rich'):
+                    self._apply_remote_status_snaps(projects, item.get('snaps') or [])
+            # Re-apply process liveness from live terminals AFTER rows exist.
+            # Remote restore often starts SSH before the project list is cached;
+            # without this, rows stay inactive and rich-status looks grey.
+            self._sync_running_state()
+            self._sidebar.refresh_status()
+        finally:
+            self._remote_refresh_busy = False
+        return False
+
+    def _apply_remote_status_snaps(self, projects, snapshots, *, clear_missing=True):
+        """Map remote status snapshots onto project.path keys (main thread).
+
+        ``clear_missing``: full health refresh may clear keys with no file;
+        fast status polls only *update* hits so a brief empty fetch cannot
+        wipe a live working state.
+        """
+        from model import StatusSnapshot
+        # Only match cwds under …/.ProjectMan/projects/<name>[/…]
+        marker = '/.ProjectMan/projects/'
+        by_name = {}
+        for snap in snapshots:
+            cwd = (getattr(snap, 'cwd', None) or '').replace('\\', '/')
+            if marker not in cwd:
+                continue
+            rest = cwd.split(marker, 1)[1]
+            name = rest.strip('/').split('/')[0]
+            if not name or name.startswith('.'):
+                continue
+            prev = by_name.get(name)
+            if prev is None or snap.ts >= prev.ts:
+                by_name[name] = snap
+        project_paths = {p.name: p.path for p in projects}
+        for name, path in project_paths.items():
+            snap = by_name.get(name)
+            if snap is None:
+                if clear_missing:
+                    self._watcher.clear_external_key(path)
+                continue
+            self._watcher.publish_external(
+                path,
+                StatusSnapshot(
+                    event=snap.event,
+                    cwd=snap.cwd,
+                    ts=snap.ts,
+                    session=snap.session,
+                    tool=snap.tool,
+                    state=snap.state,
+                    phase=snap.phase,
+                    phase_ts=snap.phase_ts,
+                ),
+            )
+
+    def _poll_remote_project_status(self, prof, projects):
+        """Legacy sync entry — used rarely; prefer async _refresh_remote_hosts."""
+        import remote_store
+        snapshots, err = remote_store.fetch_remote_status_snapshots(prof)
+        if err or not snapshots:
+            return
+        self._apply_remote_status_snaps(projects, snapshots)
 
     def _sweep_dead_terminals(self):
         for path, tv in list(self._terminals.items()):
@@ -206,12 +426,13 @@ class AppWindow(Adw.ApplicationWindow):
             return False
 
         # If any session is actively working (orange dot), confirm first
-        working_names = [
-            self._find_project(p).name
-            for p in running
-            if (proj := self._find_project(p)) and
-               self._watcher.get_project_status(proj) == 'working'
-        ]
+        working_names = []
+        for p, tv in running.items():
+            proj = getattr(tv, '_project', None) or self._find_project(p)
+            if proj is None:
+                continue
+            if self._watcher.get_project_status(proj) == 'working':
+                working_names.append(proj.name)
         if working_names:
             self._show_working_confirm(running, working_names)
         else:
@@ -241,6 +462,7 @@ class AppWindow(Adw.ApplicationWindow):
     def _open_shutdown_window(self, running):
         self._save_session()      # snapshot before SIGTERM
         ShutdownWindow(parent=self, running=running, on_complete=self._quit)
+
 
     def _quit(self):
         """Destroy this window; quit the app only if it is the primary one.
@@ -279,11 +501,11 @@ class AppWindow(Adw.ApplicationWindow):
     def _save_session(self):
         """Snapshot running terminals to SESSION_FILE (atomic write).
 
-        Persists the per-project agent id alongside each path (session.json v2)
+        Persists the per-project harness id alongside each path (session.json v2)
         so a future restore re-spawns the right agent. The persisted agent is
         the one the terminal is RUNNING (spawn-time truth via
-        spawned_agent_signature(), the same source the restart prompt reads),
-        not the one settings would pick today — a saved-agent-wins restore (A2)
+        spawned_harness_signature(), the same source the restart prompt reads),
+        not the one settings would pick today — a saved-harness-wins restore (A2)
         legitimately diverges from settings, and re-saving the settings agent
         would silently drop that session on the next restore. For an all-claude
         fleet the dict form is written regardless; the v2 loader reads both
@@ -307,36 +529,144 @@ class AppWindow(Adw.ApplicationWindow):
                     file=sys.stderr,
                 )
                 return
-        agents_map = collect_agents_map(
-            self._terminals, open_paths, self._settings.effective_agent)
-        save_session(SESSION_FILE, open_paths, focused, agents=agents_map)
+        harnesses_map = collect_harnesses_map(
+            self._terminals, open_paths, self._settings.effective_harness)
+        hosts_map = {}
+        for path in open_paths:
+            tv = self._terminals.get(path)
+            proj = getattr(tv, '_project', None) if tv is not None else None
+            if proj is not None and getattr(proj, 'host_id', None):
+                hosts_map[path] = proj.host_id
+            else:
+                try:
+                    from hosts import decode_project_ref
+                    hid, _ = decode_project_ref(path)
+                    hosts_map[path] = hid
+                except Exception:
+                    hosts_map[path] = 'localhost'
+        save_session(
+            SESSION_FILE, open_paths, focused,
+            harnesses=harnesses_map, hosts=hosts_map,
+        )
+
+    def _project_for_session_path(self, path):
+        """Synthesize a remote Project from an ``ssh:`` session path only.
+
+        Does **not** call ``_find_project`` (that would recurse: find → synth
+        → find). Localhost paths return None here; callers use ProjectStore.
+        """
+        from hosts import decode_project_ref, encode_project_ref
+        from remote_store import remote_project_path
+        from model import Project
+        if not isinstance(path, str) or not path.startswith('ssh:'):
+            return None
+        hid, name = decode_project_ref(path)
+        prof = self._settings.host_profiles().get(hid)
+        if prof is None or not name:
+            return None
+        return Project(
+            name=name,
+            path=encode_project_ref(hid, name),
+            host_id=hid,
+            remote_cwd=remote_project_path(prof.remote_projects_dir, name),
+        )
+
+    def _restore_one_project(self, path, project, *, focus=False):
+        """Spawn one restored project. Never raises to the caller."""
+        try:
+            harness = self._restore_harnesses.get(path)
+            tv = self._get_or_create_terminal(project, harness_id=harness)
+            if focus:
+                try:
+                    self._stack.set_visible_child_name(path)
+                except Exception:
+                    pass
+                self._set_active_project(project)
+                self._active_path = path
+                self._push_mru(path)
+                try:
+                    self._sidebar.select_project(path)
+                except Exception:
+                    pass
+            if tv._child_pid is None:
+                tv.spawn_continue(project_name=project.name)
+            if focus:
+                try:
+                    tv.get_terminal().grab_focus()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(
+                f'ProjectMan: restore failed for {path!r}: {e}',
+                file=sys.stderr,
+            )
+
+    def _restore_session_idle(self):
+        """GLib idle entry for session restore (after window present)."""
+        try:
+            self._restore_session()
+        except Exception as e:
+            print(f'ProjectMan: session restore aborted: {e}', file=sys.stderr)
+        return False
 
     def _restore_session(self):
-        """Restore projects that were running at the last committed close."""
+        """Restore projects that were running at the last committed close.
+
+        Each project is restored independently so a remote spawn failure cannot
+        prevent localhost sessions from coming back (regression 2026-07-10).
+        """
         if self._settings.multiplexer == 'zellij':
             self._restore_zellij_session()
             return
-        # --- direct-agent mode (original behaviour) ---
+        # --- direct-harness mode (original behaviour) ---
         if not self._settings.resume_projects:
             return
         open_paths, focused_path = load_session(SESSION_FILE)
-        # saved-agent-wins on restore (A2): recreate the agent each project was
-        # actually running, overriding settings.effective_agent. v1 (str) and
-        # agent-less entries default to claude inside load_agents.
-        self._restore_agents = load_agents(SESSION_FILE)
+        if not open_paths:
+            return
+        # saved-harness-wins on restore (A2): recreate the harness each project was
+        # actually running, overriding settings.effective_harness. v1 (str) and
+        # harness-less entries default to claude inside load_harnesses.
+        self._restore_harnesses = load_harnesses(SESSION_FILE)
         active = filter_active_paths(open_paths, self._store.load_projects())
+        # Remote paths never appear in the local ProjectStore — resolve them too.
+        for path in open_paths:
+            if path in active:
+                continue
+            proj = self._project_for_session_path(path)
+            if proj is not None:
+                active[path] = proj
         focused, background = plan_restore(open_paths, focused_path, active)
         self._sidebar.set_active_only(bool(active))
         try:
-            if focused:
-                self._on_project_activated(self._sidebar, focused)
-            for path in background:
-                project = active[path]
-                tv = self._get_or_create_terminal(project)
-                if tv._child_pid is None:
-                    tv.spawn_continue(project_name=project.name)
+            # Locals first (fast, no SSH), then remotes, focus last — so a
+            # broken remote cannot abort localhost restore, and grab_focus wins.
+            def _is_remote(p):
+                return isinstance(p, str) and p.startswith('ssh:')
+
+            ordered = []
+            for p in open_paths:
+                if p == focused or p not in active:
+                    continue
+                if not _is_remote(p):
+                    ordered.append(p)
+            for p in open_paths:
+                if p == focused or p not in active:
+                    continue
+                if _is_remote(p):
+                    ordered.append(p)
+            if focused and focused in active:
+                ordered.append(focused)
+
+            for path in ordered:
+                self._restore_one_project(
+                    path, active[path], focus=(path == focused),
+                )
+            # Stamp sidebar process state from whatever children started
+            # (rows may appear later when remote list arrives).
+            self._sync_running_state()
         finally:
-            self._restore_agents = {}
+            self._restore_harnesses = {}
 
     def _restore_zellij_session(self):
         """In zellij mode: find live pm-* sessions, mark detached, re-open last-focused.
@@ -359,8 +689,8 @@ class AppWindow(Adw.ApplicationWindow):
             return
 
         open_paths, focused_path = load_session(SESSION_FILE)
-        # saved-agent-wins on restore (A2): the same map the direct path uses.
-        self._restore_agents = load_agents(SESSION_FILE)
+        # saved-harness-wins on restore (A2): the same map the direct path uses.
+        self._restore_harnesses = load_harnesses(SESSION_FILE)
         all_paths = {p.path for p in self._store.load_projects()}
 
         restore_path = focused_path if focused_path and focused_path in all_paths else None
@@ -389,7 +719,7 @@ class AppWindow(Adw.ApplicationWindow):
                     else:
                         tv.spawn_continue(project_name=project.name)
         finally:
-            self._restore_agents = {}
+            self._restore_harnesses = {}
 
     def _push_mru(self, path):
         self._mru = [path] + [p for p in self._mru if p != path]
@@ -418,8 +748,54 @@ class AppWindow(Adw.ApplicationWindow):
         if self._settings.debug_logging:
             print(f'[DBG] {msg}', flush=True)
 
-    def _set_active_project(self, name):
-        self._title.set_subtitle(name or '')
+    def _host_label_for_project(self, project) -> str:
+        """Sidebar-style host title for a project (localhost or remote display)."""
+        from hosts import LOCALHOST_ID
+        if project is None:
+            return 'localhost'
+        hid = getattr(project, 'host_id', None) or LOCALHOST_ID
+        if hid == LOCALHOST_ID:
+            return 'localhost'
+        prof = self._settings.host_profiles().get(hid)
+        return prof.title() if prof is not None else hid
+
+    def _format_window_title(self, project) -> str:
+        """Window title: ``ProjectMan-<project>(<host>)``.
+
+        Host string matches the sidebar section title (display name or SSH
+        target / localhost). Empty selection → plain ``ProjectMan``.
+        """
+        if project is None:
+            return 'ProjectMan'
+        host = self._host_label_for_project(project)
+        name = getattr(project, 'name', None) or ''
+        if not name:
+            return f'ProjectMan({host})'
+        return f'ProjectMan-{name}({host})'
+
+    def _set_active_project(self, name_or_project):
+        """Set window title from project (or clear). Accepts Project, name, or None.
+
+        The Adw.WindowTitle widget stays ``ProjectMan`` + empty subtitle for a
+        clean in-app chrome; the *window* title (taskbar / alt-tab / overview)
+        carries project+host because the subtitle was too easy to miss.
+        """
+        if name_or_project is None or name_or_project == '':
+            self.set_title('ProjectMan')
+            self._title.set_title('ProjectMan')
+            self._title.set_subtitle('')
+            return
+        if hasattr(name_or_project, 'name') and hasattr(name_or_project, 'host_id'):
+            full = self._format_window_title(name_or_project)
+            self.set_title(full)
+            self._title.set_title(full)
+            self._title.set_subtitle('')
+            return
+        # Legacy bare name
+        full = f'ProjectMan-{name_or_project}(localhost)'
+        self.set_title(full)
+        self._title.set_title(full)
+        self._title.set_subtitle('')
 
     def _on_search_changed(self, entry):
         self._sidebar.set_filter_text(entry.get_text())
@@ -462,20 +838,20 @@ class AppWindow(Adw.ApplicationWindow):
         toast.set_timeout(timeout)
         self._toast_overlay.add_toast(toast)
 
-    def _spawn_failure_toast_text(self, agent_id, raw_binary):
+    def _spawn_failure_toast_text(self, harness_id, raw_binary):
         """The M-UX.10a toast string: '<binary> not found — <display> isn't
         installed. <install hint>'.
 
-        Resolves the agent's REAL binary + display name + install hint from the
+        Resolves the harness's REAL binary + display name + install hint from the
         adapter (the raw argv[0] can be 'bash' under the continue wrapper, so we
         prefer the adapter's binary). Pure string assembly; no GTK."""
-        import agents
-        adapter = agents.ADAPTERS.get(agent_id) or agents.get_adapter(agent_id, self._settings)
-        display = getattr(adapter, 'display_name', agent_id)
+        import harnesses
+        adapter = harnesses.ADAPTERS.get(harness_id) or harnesses.get_adapter(harness_id, self._settings)
+        display = getattr(adapter, 'display_name', harness_id)
         hint = getattr(adapter, 'install_hint', '')
-        binary = agent_id
+        binary = harness_id
         try:
-            if agent_id == 'claude':
+            if harness_id == 'claude':
                 binary = self._settings.resolved_claude_binary
             elif hasattr(adapter, '_binary'):
                 binary = adapter._binary(self._settings)
@@ -489,7 +865,7 @@ class AppWindow(Adw.ApplicationWindow):
             msg = f"{msg} {hint}"
         return msg
 
-    def _on_spawn_failed(self, project_path, agent_id, raw_binary):
+    def _on_spawn_failed(self, project_path, harness_id, raw_binary):
         """M-UX.10a (C7): a missing-binary spawn → one-shot install-hint toast.
 
         The row is NOT removed here — process-exited already set it 'inactive'
@@ -506,7 +882,7 @@ class AppWindow(Adw.ApplicationWindow):
         already-off filter is a no-op). Restore's eager filter for the
         successful path is untouched."""
         self._sidebar.set_active_only(False)
-        key = (project_path, agent_id)
+        key = (project_path, harness_id)
         if key in self._warned_spawn_fail:
             return
         self._warned_spawn_fail.add(key)
@@ -515,23 +891,20 @@ class AppWindow(Adw.ApplicationWindow):
         # at timeout=5 it auto-dismissed before an unfocused user looked, reading
         # as "no toast". A missing-binary failure (C7) needs a recovery hint that
         # waits to be read. Dedup (_warned_spawn_fail) is unchanged.
-        self._show_toast(self._spawn_failure_toast_text(agent_id, raw_binary),
+        self._show_toast(self._spawn_failure_toast_text(harness_id, raw_binary),
                          timeout=0)
 
     def _handle_late_death(self, tv, status, path):
         """FB-3 (C7): a child exited — surface it in the pane.
 
-        Feeds a one-line 'session ended — exit <code>' banner into the pane
+        Feed a one-line 'session ended — exit <code>' banner into the pane
         (display-only) so a late/external death doesn't leave a frozen,
         unexplained terminal. The exit code is derived from the raw wait
         status; an undecodable status falls back to the raw number.
 
-        The Active Only filter is NOT touched here. An earlier version dropped
-        the filter when the active project died so its row wouldn't vanish
-        behind it — but that auto-toggled a filter the user had set, which was
-        worse (the maintainer 2026-06-18: closing a session should leave the filter
-        alone). The row going inactive hides as the filter intends; the user
-        toggles it off themselves.
+        The Active Only filter is never touched (the maintainer 2026-06-18): closing a
+        session must leave the user's filter alone — row hiding is the filter
+        doing its job.
         """
         try:
             code = os.waitstatus_to_exitcode(status)
@@ -587,52 +960,53 @@ class AppWindow(Adw.ApplicationWindow):
         """Clear the live-toast reference when the user dismisses it."""
         self._provider_toast = None
 
-    def _maybe_warn_unknown_agent(self, agent_id):
-        """One-shot toast when a NAMED harness isn't available.
+    def _maybe_warn_unknown_harness(self, harness_id):
+        """One-shot toast when a NAMED agent isn't available (A6/m3, M-P3.2).
 
         ``resolve_adapter`` returns a non-None ``missing`` only when a non-empty
-        id isn't the registered harness ('claude'); the spawn still proceeds on
-        the fallback (always claude now). The toast names the harness that will
-        ACTUALLY run rather than saying nothing.
-        The warning is shown once per distinct missing id (``_warned_agents``)
-        so a multi-project restore naming the same dead agent doesn't toast N
+        id has no registered adapter; the spawn still proceeds on the fallback.
+        The fallback is NOT hardcoded to claude (M-P3.2): it follows
+        ``settings.harness_default`` then first-available, so the toast names the
+        adapter that will ACTUALLY run rather than always saying "Claude Code".
+        The warning is shown once per distinct missing id (``_warned_harnesses``)
+        so a multi-project restore naming the same dead harness doesn't toast N
         times.
         """
-        import agents
-        adapter, missing = agents.resolve_adapter(agent_id, self._settings)
-        if not missing or missing in self._warned_agents:
+        import harnesses
+        adapter, missing = harnesses.resolve_adapter(harness_id, self._settings)
+        if not missing or missing in self._warned_harnesses:
             return
-        self._warned_agents.add(missing)
+        self._warned_harnesses.add(missing)
         toast = Adw.Toast.new(
             f"harness '{missing}' not available — using {adapter.display_name}"
         )
         toast.set_timeout(5)
         self._toast_overlay.add_toast(toast)
 
-    def _get_or_create_terminal(self, project, agent_id=None):
+    def _get_or_create_terminal(self, project, harness_id=None):
         """Return the project's TerminalView, creating it if absent.
 
-        ``agent_id`` is the explicit agent for a freshly created terminal —
-        used by restore to recreate the agent that was actually running
-        (saved-agent-wins, A2). It is ignored once a terminal exists (a live
-        terminal keeps its agent). New non-restore activations pass None and
-        the terminal follows ``settings.effective_agent``.
+        ``harness_id`` is the explicit agent for a freshly created terminal —
+        used by restore to recreate the harness that was actually running
+        (saved-harness-wins, A2). It is ignored once a terminal exists (a live
+        terminal keeps its harness). New non-restore activations pass None and
+        the terminal follows ``settings.effective_harness``.
 
-        When ``agent_id`` is None, the in-progress restore map
-        (``_restore_agents``) is consulted so the focused project — which is
+        When ``harness_id`` is None, the in-progress restore map
+        (``_restore_harnesses``) is consulted so the focused project — which is
         activated through the ordinary _on_project_activated path rather than
         with an explicit id — still recreates its saved agent.
         """
-        if agent_id is None:
-            agent_id = self._restore_agents.get(project.path)
+        if harness_id is None:
+            harness_id = self._restore_harnesses.get(project.path)
         if project.path not in self._terminals:
             # A6/m3: if the project's agent is NAMED but not registered (a stale
             # session/settings id, or a typo), warn once. The terminal still
             # falls back to claude — resolve_adapter only changes the diagnostic.
-            effective = (agent_id if agent_id is not None
-                         else self._settings.effective_agent(project.path))
-            self._maybe_warn_unknown_agent(effective)
-            tv = TerminalView(project, self._settings, agent_id=agent_id)
+            effective = (harness_id if harness_id is not None
+                         else self._settings.effective_harness(project.path))
+            self._maybe_warn_unknown_harness(effective)
+            tv = TerminalView(project, self._settings, harness_id=harness_id)
 
             def _on_started(t, p=project.path, n=project.name):
                 # FB-2: a child actually ran this run → the close-time save is now
@@ -641,11 +1015,11 @@ class AppWindow(Adw.ApplicationWindow):
                 self._any_started_this_run = True
                 self._sidebar.set_project_state(p, 'attached', is_zellij=t._is_zellij)
                 # C5: tell the row which agent the child is ACTUALLY running, so a
-                # restored saved-agent-wins session (A2) whose live agent differs
+                # restored saved-harness-wins session (A2) whose live harness differs
                 # from the configured one shows the truth, not the next-session
-                # agent. Spawn-time truth via spawned_agent_signature() — the same
+                # agent. Spawn-time truth via spawned_harness_signature() — the same
                 # source the restart prompt reads.
-                self._sidebar.set_running_agent(p, t.spawned_agent_signature())
+                self._sidebar.set_running_harness(p, t.spawned_harness_signature())
                 # M-UX.10b (C7): the auto "Active Only" filter engages only once
                 # something actually RUNS — NOT on the activation attempt. This is
                 # what keeps a failed-spawn row visible (a spawn that never starts
@@ -657,18 +1031,18 @@ class AppWindow(Adw.ApplicationWindow):
 
             def _on_exited(t, s, p=project.path):
                 self._sidebar.set_project_state(p, 'inactive', is_zellij=False)
-                # No live child → no running agent; clear the C5 mismatch subtitle.
-                self._sidebar.set_running_agent(p, None)
+                # No live child → no running harness; clear the C5 mismatch subtitle.
+                self._sidebar.set_running_harness(p, None)
                 # FB-3 (C7): a dying child must not leave a frozen, unexplained
-                # pane — feed a "session ended" banner. The Active Only filter
-                # is left untouched (see _handle_late_death).
+                # pane — feed a "session ended" banner — and the project you were
+                # LOOKING at must never vanish behind the Active Only filter.
                 self._handle_late_death(t, s, p)
 
             def _on_detached(t, p=project.path):
                 self._sidebar.set_project_state(p, 'detached', is_zellij=True)
                 # Detached to a multiplexer — no live child here whose agent we
                 # can attest; drop the C5 mismatch subtitle (detach-to-none).
-                self._sidebar.set_running_agent(p, None)
+                self._sidebar.set_running_harness(p, None)
 
             tv.connect('process-started', _on_started)
             tv.connect('process-exited', _on_exited)
@@ -680,16 +1054,38 @@ class AppWindow(Adw.ApplicationWindow):
         return self._terminals[project.path]
 
     def _sync_running_state(self):
-        """Re-apply process running flags after a sidebar refresh."""
+        """Re-apply process running flags after a sidebar refresh / remote list.
+
+        Also stamps running harness so C5 subtitles and filters stay correct
+        when rows are built after the child already started.
+        """
         for path, tv in self._terminals.items():
             if tv._child_pid is not None:
-                self._sidebar.set_project_state(path, 'attached', is_zellij=tv._is_zellij)
+                self._sidebar.set_project_state(
+                    path, 'attached', is_zellij=tv._is_zellij)
+                try:
+                    self._sidebar.set_running_harness(
+                        path, tv.spawned_harness_signature())
+                except Exception:
+                    pass
+            else:
+                self._sidebar.set_project_state(path, 'inactive', is_zellij=False)
+                self._sidebar.set_running_harness(path, None)
 
     def _find_project(self, path):
         for p in self._store.load_projects() + self._store.load_archived():
             if p.path == path:
                 return p
-        return None
+        # Remote projects live in the sidebar cache, not ProjectStore.
+        remote = getattr(self._sidebar, '_remote_projects', None) or {}
+        for _hid, projects in remote.items():
+            for p in projects:
+                if p.path == path:
+                    return p
+        # Session restore / early activation often run before the async remote
+        # list is cached. Synthesize from ssh: refs + HostProfile so focused
+        # remotes still launch (background restore already used this path).
+        return self._project_for_session_path(path)
 
     # --- project activation ---
 
@@ -699,17 +1095,23 @@ class AppWindow(Adw.ApplicationWindow):
             return
         tv = self._get_or_create_terminal(project)
         self._stack.set_visible_child_name(path)
-        self._set_active_project(project.name)
+        self._set_active_project(project)
         self._active_path = path
         self._push_mru(path)
         self._sidebar.select_project(path)
         if tv._child_pid is None:
-            import zellij as z
-            sname = z.session_name(project.name)
-            if z.session_alive(sname):
-                tv.spawn_zellij(sname)
-            else:
+            from hosts import LOCALHOST_ID
+            is_remote = getattr(project, 'host_id', LOCALHOST_ID) != LOCALHOST_ID
+            if is_remote:
+                # Remote: direct SSH spawn only (no local zellij in v1).
                 tv.spawn_continue(project_name=project.name)
+            else:
+                import zellij as z
+                sname = z.session_name(project.name)
+                if z.session_alive(sname):
+                    tv.spawn_zellij(sname)
+                else:
+                    tv.spawn_continue(project_name=project.name)
         tv.get_terminal().grab_focus()
 
     def _on_project_activated(self, sidebar, path):
@@ -728,7 +1130,7 @@ class AppWindow(Adw.ApplicationWindow):
             return
         tv = self._get_or_create_terminal(project)
         self._stack.set_visible_child_name(path)
-        self._set_active_project(project.name)
+        self._set_active_project(project)
         self._active_path = path
         self._push_mru(path)
         tv.spawn_resume(session_id, project_name=project.name)
@@ -880,7 +1282,7 @@ class AppWindow(Adw.ApplicationWindow):
             return
         tv = self._get_or_create_terminal(project)
         self._stack.set_visible_child_name(path)
-        self._set_active_project(project.name)
+        self._set_active_project(project)
         self._active_path = path
         self._push_mru(path)
         tv.spawn_fresh(project_name=project.name)
@@ -902,7 +1304,7 @@ class AppWindow(Adw.ApplicationWindow):
         import zellij as z
         tv = self._get_or_create_terminal(project)
         self._stack.set_visible_child_name(path)
-        self._set_active_project(project.name)
+        self._set_active_project(project)
         self._active_path = path
         self._push_mru(path)
         sname = z.session_name(project.name)
@@ -916,66 +1318,145 @@ class AppWindow(Adw.ApplicationWindow):
         for tv in self._terminals.values():
             tv.apply_settings(settings)
         # Push settings into the sidebar so per-row caps gating + the session
-        # source follow the (possibly changed) effective agent (A1/A5).
+        # source follow the (possibly changed) effective harness (A1/A5).
         self._sidebar.set_settings(settings)
         self._sidebar.set_ntfy_enabled(settings.ntfy_enabled)
         self._refresh_sidebar_models()
+        self._arm_remote_health_timer()
+        self._arm_remote_status_timer()
+        # Rebuild sections when hosts list changes.
+        self._sidebar.refresh()
+        GLib.idle_add(self._refresh_remote_hosts)
 
     def _refresh_sidebar_models(self):
-        """Push the current provider options into the sidebar menus."""
+        """Push the current provider/model options into the sidebar menus."""
         from models import build_provider_options, provider_label
+        import harness_configs
         ids, labels = build_provider_options(self._settings.providers)
         options = list(zip(ids, labels))
-        # The "Default (…)" item names the active provider's label. Each row
-        # derives its own story from its effective provider (a per-project
-        # override to a different provider must not wear the global default's
-        # story); this global label is the fallback for settings-less/legacy
-        # rows.
-        global_label = provider_label(
-            self._settings.providers, self._settings.model_default)
+        # M-UX.1 (C2): the Provider submenu's "Default (…)" item must name what
+        # actually decides the model for the EFFECTIVE default harness — grok /
+        # opencode read their own config (the row used to claim "Anthropic
+        # (native Claude)" while grok ran Qwen). default_model_label returns
+        # claude's native/provider label unchanged when claude is the default.
+        # P3.5f (the maintainer's second reveal): each ROW now derives its OWN label from
+        # its effective harness (a claude-override row must not wear the global
+        # grok default's story). This global label is passed only as the
+        # fallback for settings-less/legacy rows.
+        global_label = harness_configs.default_model_label(self._settings)
+        # Provider axis only (Claude customs + native); model pins are separate.
         self._sidebar.set_model_options(
-            options, self._settings.model_overrides, global_label)
+            options, self._settings.provider_overrides, global_label)
 
     def _on_project_model_change(self, sidebar, path, value):
-        """A per-project provider was picked from the sidebar context menu."""
-        from models import FOLLOW_DEFAULT
-        overrides = dict(self._settings.model_overrides)
-        if value == FOLLOW_DEFAULT:
+        """A per-project provider was picked from the sidebar Provider menu."""
+        from models import FOLLOW_DEFAULT, NATIVE_GROK, NATIVE_OPENCODE
+        harness = self._settings.effective_harness(path)
+        overrides = dict(self._settings.provider_overrides) \
+            if isinstance(self._settings.provider_overrides, dict) else {}
+        if value in (NATIVE_GROK, NATIVE_OPENCODE):
+            # Harness-native: no Settings provider pin.
+            overrides.pop(path, None)
+        elif harness != 'claude':
+            # Unselectable customs for OC/GB today — ignore (model pins later).
+            return
+        elif value == FOLLOW_DEFAULT or value == (self._settings.model_default or ''):
+            # Picking the global Settings default → track it (clear pin).
             overrides.pop(path, None)
         else:
             overrides[path] = value
-        self._settings.model_overrides = overrides
+        self._settings.provider_overrides = overrides
         self._settings.save()
         self._refresh_sidebar_models()
         self._maybe_prompt_restart(path)
 
+    def _on_project_harness_change(self, sidebar, path, value):
+        """A per-project harness was picked from the sidebar 'Harness' submenu (B3).
+
+        Writes ``harness_overrides``. Selecting the current global default (or
+        the legacy FOLLOW_DEFAULT sentinel) clears the override so the project
+        tracks Settings → Default Harness. Any other id pins that harness.
+        Clears both provider and model pins for the path so the user re-picks
+        axes that may mean different things under the new harness.
+        Then refreshes sidebar radio/subtitle and offers restart if needed.
+        """
+        from models import FOLLOW_DEFAULT
+        from hosts import override_key
+        import harnesses
+        proj = self._find_project(path)
+        host_id = getattr(proj, 'host_id', 'localhost') if proj else 'localhost'
+        ref = override_key(path, host_id)
+        overrides = dict(self._settings.harness_overrides)
+        # Drop both canonical ref and raw path keys so nothing stale remains.
+        if value == FOLLOW_DEFAULT or value == self._settings.harness_default:
+            overrides.pop(ref, None)
+            overrides.pop(path, None)
+        else:
+            overrides.pop(path, None)
+            overrides[ref] = value
+        self._settings.harness_overrides = overrides
+        # Clear both axes (provider + model pin) for this project.
+        po = dict(self._settings.provider_overrides) \
+            if isinstance(self._settings.provider_overrides, dict) else {}
+        po.pop(ref, None)
+        po.pop(path, None)
+        self._settings.provider_overrides = po
+        mp = dict(self._settings.model_pins) \
+            if isinstance(self._settings.model_pins, dict) else {}
+        mp.pop(ref, None)
+        mp.pop(path, None)
+        self._settings.model_pins = mp
+        self._settings.save()
+        # S8 ship-blocker: an EXPLICIT per-project pick must defeat the A2
+        # restore-stickiness. A restored session's TerminalView carries a sticky
+        # ``_explicit_harness`` that ``apply_settings`` honors over settings — so
+        # without this, the restart prompt would re-spawn the OLD harness. Clear
+        # it BEFORE apply_settings so the adapter re-resolves to the new
+        # effective harness. Covers both a named pin and selecting the global
+        # default (clear override). No terminal for the path → nothing to do.
+        tv = self._terminals.get(path)
+        if tv is not None:
+            tv.clear_explicit_harness()
+        # Push the change through apply_settings so terminals + sidebar rows
+        # re-resolve the effective harness (subtitle, caps gating, radio state).
+        self.apply_settings(self._settings)
+        # M-UX.11 (S8): the selection feedback was too subtle. Fire a one-shot
+        # toast naming the project + the now-effective harness's display name.
+        project = self._find_project(path)
+        name = project.name if project else os.path.basename(path)
+        effective_id = self._settings.effective_harness(path, host_id=host_id)
+        adapter = harnesses.ADAPTERS.get(effective_id)
+        display = adapter.display_name if adapter is not None else effective_id
+        self._show_toast(f'Harness for {name}: {display}')
+        self._maybe_prompt_restart(path)
+
     def _maybe_prompt_restart(self, path):
-        """If a live session's model (provider) just changed, offer to restart it.
+        """If a live session's harness OR provider just changed, offer to restart it.
 
-        The provider/tier assignment is fixed at spawn time, so a running
-        session keeps its old provider until re-spawned. Never auto-kill —
-        that would lose context.
-
-        The ``agent_stale`` branch is kept defensively but is now unreachable:
-        Claude Code is the sole harness, so ``spawned_agent_signature`` always
-        equals ``effective_agent`` ('claude'). It stays as a guard in case a
-        future second harness is reintroduced.
+        Both the harness and the model are fixed at spawn time, so a running
+        session keeps its old harness/model until re-spawned. Never auto-kill —
+        that would lose context. The dialog wording adapts to which of the two
+        (or both) changed (B3 generalization of the Model-only prompt).
         """
         tv = self._terminals.get(path)
         if tv is None or tv._child_pid is None:
             return
-        model_stale = tv.spawned_model_signature() != self._settings.effective_provider(path)
-        agent_stale = tv.spawned_agent_signature() != self._settings.effective_agent(path)
-        if not model_stale and not agent_stale:
+        proj = getattr(tv, '_project', None) or self._find_project(path)
+        host_id = getattr(proj, 'host_id', 'localhost') if proj else 'localhost'
+        model_stale = (tv.spawned_model_signature()
+                       != self._settings.model_axis_signature(path))
+        harness_stale = (tv.spawned_harness_signature()
+                         != self._settings.effective_harness(path, host_id=host_id))
+        if not model_stale and not harness_stale:
             return
         project = self._find_project(path)
         name = project.name if project else os.path.basename(path)
-        if agent_stale and model_stale:
-            title, what = 'Harness Changed', 'harness and model'
-        elif agent_stale:
+        if harness_stale and model_stale:
+            title, what = 'Harness Changed', 'harness and provider'
+        elif harness_stale:
             title, what = 'Harness Changed', 'harness'
         else:
-            title, what = 'Model Changed', 'model'
+            title, what = 'Provider Changed', 'provider'
         dialog = Adw.AlertDialog.new(
             title,
             f'The new {what} for "{name}" applies to the next session. '
@@ -1029,7 +1510,7 @@ class AppWindow(Adw.ApplicationWindow):
 
     def _send_ntfy(self, project_name):
         topic = self._settings.ntfy_topic
-        # De-Clauded payload (agent-neutral): "<project> finished".
+        # De-Clauded payload (harness-neutral): "<project> finished".
         subprocess.Popen([
             'curl', '-s',
             '-H', f'Title: {project_name}',
@@ -1037,7 +1518,18 @@ class AppWindow(Adw.ApplicationWindow):
             f'https://ntfy.sh/{topic}'
         ])
 
-    def _on_project_create(self, sidebar, name):
+    def _on_host_section_toggled(self, sidebar, host_id, expanded):
+        """Persist sidebar section mode (sidebar already set host_section_mode)."""
+        try:
+            self._settings.save()
+        except OSError:
+            pass
+
+    def _on_project_create(self, sidebar, host_id, name):
+        from hosts import LOCALHOST_ID
+        if host_id and host_id != LOCALHOST_ID:
+            self._create_remote_project(host_id, name)
+            return
         try:
             self._store.create_project(name)
         except OSError:
@@ -1053,21 +1545,45 @@ class AppWindow(Adw.ApplicationWindow):
         path = os.path.join(self._store._projects_dir(), name)
         self._on_project_activated(self._sidebar, path)
         # B4 (M-UX.15, C7-adjacent / S7): a fresh project silently inherited the
-        # default agent — a "noob" who named it "claude-thing" got grok with no
+        # default harness — a "noob" who named it "claude-thing" got grok with no
         # word. Fire the M-UX.11 toast pattern naming the resolved agent (incl.
-        # the missing-binary fallback) so the agent the project got is never a
+        # the missing-binary fallback) so the harness the project got is never a
         # surprise.
         self._show_toast(self._project_created_toast_text(name))
 
-    def _project_created_toast_text(self, name):
-        """The B4 creation toast: "New project '<name>'".
+    def _create_remote_project(self, host_id, name):
+        import remote_store
+        prof = self._settings.host_profiles().get(host_id)
+        if prof is None:
+            self._show_toast(f'Unknown host {host_id}')
+            return
+        proj, err = remote_store.create_remote_project(prof, name)
+        if err or proj is None:
+            self._show_toast(err or 'Remote create failed')
+            return
+        # Refresh that host's cached list then activate.
+        projects, lerr = remote_store.list_remote_projects(prof)
+        if not lerr:
+            self._sidebar.set_remote_projects(host_id, projects)
+        else:
+            self._sidebar.set_remote_projects(host_id, [proj])
+        self._on_project_activated(self._sidebar, proj.path)
+        self._show_toast(self._project_created_toast_text(name))
 
-        Post-pivot Claude Code is the sole harness, so the old
-        "— harness: <Display>" suffix was always the same value and read as
-        jargon — dropped it. (The effective-harness resolution that fed the
-        suffix is gone with it; reintroduce both if a second harness returns.)
+    def _project_created_toast_text(self, name):
+        """The B4 creation toast: "New project '<name>' — harness: <Display>".
+
+        Resolves the EFFECTIVE agent for the new (override-free) project — which
+        is the global default — through ``resolve_adapter`` so the named harness is
+        the one that will ACTUALLY run (the fallback, not the requested id, when
+        the default's binary is missing). Pure string builder; unbound-testable.
         """
-        return f"New project '{name}'"
+        import harnesses
+        path = os.path.join(self._store._projects_dir(), name)
+        effective_id = self._settings.effective_harness(path)
+        adapter, _missing = harnesses.resolve_adapter(effective_id, self._settings)
+        display = adapter.display_name if adapter is not None else effective_id
+        return f"New project '{name}' — harness: {display}"
 
     def _on_project_rename(self, sidebar, old_path, new_name):
         project = self._find_project(old_path)
@@ -1090,7 +1606,11 @@ class AppWindow(Adw.ApplicationWindow):
         if self._active_path == old_path:
             self._active_path = new_path
             self._mru = [new_path if p == old_path else p for p in self._mru]
-            self._set_active_project(new_name)
+            renamed = self._find_project(new_path) or Project(
+                name=new_name, path=new_path,
+                host_id=getattr(project, 'host_id', 'localhost'),
+            )
+            self._set_active_project(renamed)
 
         self._sidebar.refresh()
         self._sync_running_state()

@@ -14,6 +14,45 @@
     margin: 2px 6px;
 }
 
+/* ── Host section headers (localhost + remotes) ───────────────────── */
+/* Override the pill-row radius from .navigation-sidebar row above. */
+.pm-sidebar list.navigation-sidebar row.pm-host-section {
+    border-radius: 0;
+    margin: 8px 0 2px 0;
+    /* Default wash; themes (Argonaut) set cyan. */
+    background-color: alpha(#00bcd4, 0.12);
+    box-shadow: inset 0 1px alpha(#00bcd4, 0.35);
+}
+.pm-host-section-title {
+    /* Slightly larger than default project name (~13px) */
+    font-size: 14px;
+    font-weight: 700;
+    text-transform: none;
+    letter-spacing: 0.02em;
+    opacity: 0.95;
+}
+.pm-host-section-filter {
+    font-size: 11px;
+    opacity: 0.55;
+    margin-top: -1px;
+}
+.pm-host-section-count {
+    font-size: 11px;
+    opacity: 0.55;
+    font-variant-numeric: tabular-nums;
+}
+/* Micro health indicator — smaller than project status dots */
+.host-health-dot {
+    min-width: 6px;
+    min-height: 6px;
+    border-radius: 50%;
+    margin-right: 2px;
+}
+.host-health-grey { background-color: alpha(currentColor, 0.25); }
+.host-health-green { background-color: #8ce10b; }
+.host-health-yellow { background-color: #ffb900; }
+.host-health-red { background-color: #ff2600; }
+
 /* ── Sidebar title in the app header bar ─────────────────────────── */
 .pm-sidebar-title {
     font-size: 11px; font-weight: 700; text-transform: uppercase;
@@ -27,7 +66,7 @@
 .session-default-badge { font-size: 10px; opacity: 0.8; }
 
 /* ── Effective-agent subtitle under a project name ────────────────── */
-.pm-agent-subtitle { font-size: 10px; opacity: 0.55; margin-top: -2px; }
+.pm-harness-subtitle { font-size: 10px; opacity: 0.55; margin-top: -2px; }
 
 /* ── Resource bar ─────────────────────────────────────────────────── */
 .resource-bar { padding: 6px 12px; }

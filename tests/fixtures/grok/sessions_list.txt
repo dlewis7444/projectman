@@ -1,0 +1,3 @@
+SESSION ID                            CREATED     UPDATED     STATUS      SUMMARY
+019eb297-fa74-7741-863e-d8aa822ac7bf  2026-06-10  2026-06-10  local  Reply with exactly: hook-test-ok
+019eb291-3b96-7503-b462-7b92e11c1ebd  2026-06-10  2026-06-10  local  Reply with exactly: ok

@@ -7,7 +7,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Vte', '3.91')
 from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk, Gio
 
-import agents
+import harnesses
 import terminal_copy
 import zellij
 
@@ -58,19 +58,19 @@ def _ensure_zellij_shell_wrapper():
     This wrapper is set as SHELL when creating new zellij sessions so that the
     initial pane auto-starts the project's agent. It checks for a per-session
     flag file (~/.ProjectMan/.zellij-init-<session>) and, if present, reads its
-    content (the agent's continue command line), removes the flag, execs the
+    content (the harness's continue command line), removes the flag, execs the
     command, then exits (closing the pane). Subsequent panes in the same session
     find no flag and go straight to the real shell.
 
-    The script is agent-independent (it execs whatever the flag holds); the
-    per-agent command is written into the flag by ``spawn_zellij``. For claude
+    The script is harness-independent (it execs whatever the flag holds); the
+    per-harness command is written into the flag by ``spawn_zellij``. For claude
     the realized behavior is identical to the pre-seam hardcoded
     ``claude -c || claude`` — pinned by the golden tests.
     """
     pm_dir = os.path.expanduser('~/.ProjectMan')
     wrapper_path = os.path.join(pm_dir, 'zellij-shell-init.sh')
     with open(wrapper_path, 'w') as f:
-        f.write(agents.build_zellij_wrapper_script())
+        f.write(harnesses.build_zellij_wrapper_script())
     os.chmod(wrapper_path, 0o755)
     return wrapper_path
 
@@ -80,7 +80,7 @@ class TerminalView(Gtk.Box):
         'process-exited':   (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         'process-started':  (GObject.SignalFlags.RUN_FIRST, None, ()),
         'process-detached': (GObject.SignalFlags.RUN_FIRST, None, ()),
-        # M-UX.10a (C7): a spawn that failed because the agent binary isn't
+        # M-UX.10a (C7): a spawn that failed because the harness binary isn't
         # installed (child exited within ~2s with rc 126/127 — exec-not-found /
         # not-executable). Carries the missing binary name so window.py can fire
         # a one-shot install-hint toast and KEEP the row, instead of leaving a
@@ -89,27 +89,27 @@ class TerminalView(Gtk.Box):
         'process-spawn-failed': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
-    def __init__(self, project, settings, agent_id=None):
+    def __init__(self, project, settings, harness_id=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self._project = project
         self._settings = settings
-        # The agent backend for this project (claude by default). All spawn
+        # The harness backend for this project (claude by default). All spawn
         # argv/env decisions route through the adapter; TerminalView keeps only
         # the pty/fork/watch machinery, which is already agent-agnostic.
         #
-        # ``agent_id`` is the explicit agent for this terminal (A2/M2). When
-        # given it OVERRIDES ``settings.effective_agent`` — this is how restore
-        # recreates the agent that was actually running (saved-agent-wins),
+        # ``harness_id`` is the explicit agent for this terminal (A2/M2). When
+        # given it OVERRIDES ``settings.effective_harness`` — this is how restore
+        # recreates the harness that was actually running (saved-harness-wins),
         # even if settings now name a different default. When None, the
-        # effective agent from settings is used (settings-wins on a new
+        # effective harness from settings is used (settings-wins on a new
         # activation). The resolved id is remembered so ``apply_settings`` keeps
         # honoring an explicit restore agent across settings reloads.
-        self._explicit_agent = agent_id
-        resolved = agent_id if agent_id is not None else settings.effective_agent(project.path)
+        self._explicit_harness = harness_id
+        resolved = harness_id if harness_id is not None else settings.effective_harness(project.path)
         # Pass settings so a named-but-missing agent falls back per the M-P3.2
-        # policy (agent_default → first-available) rather than hardcoding claude:
+        # policy (harness_default → first-available) rather than hardcoding claude:
         # the Claude-less promise must hold even for a stale/bogus override.
-        self._adapter = agents.get_adapter(resolved, settings)
+        self._adapter = harnesses.get_adapter(resolved, settings)
         self._child_pid = None
         self._is_multiplexed = False
         self._is_zellij = False
@@ -118,9 +118,9 @@ class TerminalView(Gtk.Box):
         # lets window.py detect when a model change leaves a session stale.
         self._spawned_model = ''
         # Agent id the live child was spawned with (parallel to _spawned_model).
-        self._spawned_agent = self._adapter.id
+        self._spawned_harness = self._adapter.id
         # Set by the adapter's spawn plan / zellij_spawn_env when a custom-model
-        # backend (ccr) is wanted but unavailable; cleared on a successful spawn.
+        # backend (custom provider) is wanted but unavailable; cleared on success.
         # window.py reads this from the process-started handler.
         self._fallback_reason = None
         # M-UX.10a: spawn-failure detection. Stamped at each _spawn with the
@@ -364,26 +364,26 @@ class TerminalView(Gtk.Box):
         self._terminal.set_color_cursor_foreground(rgba(p['cursor_fg']))
 
     def spawned_model_signature(self):
-        """The provider id the current child was spawned with ('' = native)."""
+        """The 'provider/model' the current child was spawned with."""
         return self._spawned_model
 
-    def spawned_agent_signature(self):
-        """The agent id the current child was spawned with."""
-        return self._spawned_agent
+    def spawned_harness_signature(self):
+        """The harness id the current child was spawned with."""
+        return self._spawned_harness
 
-    def spawn_agent(self, mode, session_id=None):
+    def spawn_harness(self, mode, session_id=None):
         """Spawn the project's agent in ``mode`` (fresh|continue|resume).
 
-        The adapter folds argv + env (incl. ccr) into a ``SpawnPlan``; this
+        The adapter folds argv + env into a ``SpawnPlan``; this
         method owns only the terminal-side lifecycle (clear, kill, spawn) and
         carries the plan's fallback_reason onto the instance so window.py can
         surface it from the process-started handler.
         """
         # Must clear at spawn entry, not in _spawn() — the adapter's spawn_plan
-        # (which runs models.build_spawn_env) sets a fresh reason below; clearing
-        # here avoids a stale reason from a prior failed spawn leaking through.
+        # (which runs build_spawn_env for claude) sets a fresh reason below; clearing here
+        # avoids a stale reason from a prior failed spawn leaking through.
         self._fallback_reason = None
-        # FB-4 (C4/C6): an agent-change / new-session DIRECT spawn over a live
+        # FB-4 (C4/C6): a harness-change / new-session DIRECT spawn over a live
         # zellij project must tear down the zellij SERVER session first — the
         # deactivate path already does this; the spawn path used to kill only the
         # local attach child (_kill_child), orphaning the server. Mirror the
@@ -399,35 +399,106 @@ class TerminalView(Gtk.Box):
         self._terminal.reset(True, True)
         # FB-9: re-resolve the adapter at spawn entry from the CURRENT effective
         # state — an explicit restore agent when one is still set (A2 sticky),
-        # else settings.effective_agent. After a true session end cleared
-        # _explicit_agent, this is what lets the NEXT spawn follow a pending
+        # else settings.effective_harness. After a true session end cleared
+        # _explicit_harness, this is what lets the NEXT spawn follow a pending
         # per-project override (the deactivate→reactivate repro) instead of the
         # dead session's agent. A restored session that was never ended keeps its
         # explicit agent, so A2 is intact.
-        resolved = (self._explicit_agent if self._explicit_agent is not None
-                    else self._settings.effective_agent(self._project.path))
-        self._adapter = agents.get_adapter(resolved, self._settings)
+        host_id = getattr(self._project, 'host_id', None) or 'localhost'
+        resolved = (self._explicit_harness if self._explicit_harness is not None
+                    else self._settings.effective_harness(
+                        self._project.path, host_id=host_id))
+        self._adapter = harnesses.get_adapter(resolved, self._settings)
         plan = self._adapter.spawn_plan(
             self._settings, self._project, mode, session_id=session_id
         )
         self._fallback_reason = plan.fallback_reason
         self._is_multiplexed = False
-        self._spawn(plan.argv, plan.env)
+        argv, env = self._maybe_wrap_ssh(plan.argv, plan.env, host_id)
+        if argv is None:
+            # _maybe_wrap_ssh set _fallback_reason
+            return
+        self._spawn(argv, env)
+
+    def _maybe_wrap_ssh(self, argv, env, host_id):
+        """If project is remote, rewrite into ``ssh -tt … bash -lc …``.
+
+        Returns ``(argv, env)`` for local ``_spawn``. Local env is None (inherit)
+        so only the remote command carries provider env. Returns ``(None, None)``
+        on hard failure (unknown host).
+        """
+        from hosts import LOCALHOST_ID
+        if not host_id or host_id == LOCALHOST_ID:
+            return argv, env
+        profiles = self._settings.host_profiles()
+        prof = profiles.get(host_id)
+        if prof is None:
+            self._fallback_reason = f'Unknown remote host {host_id!r}'
+            return None, None
+        # Rebuild argv with the host's binary (never a local absolute path).
+        remote_bin = prof.binary_spec(self._adapter.id).resolved(
+            path_fallback=self._adapter.id,
+        )
+        import harnesses as _h
+        fallback = self._adapter.caps.continue_falls_back_to_fresh
+        # Infer mode from plan.argv shape is fragile; re-derive from last plan
+        # by re-calling adapter helpers when available.
+        mode_argv = list(argv)
+        if hasattr(self._adapter, 'fresh_argv'):
+            # Replace binary tokens in common shapes: [bin], [bin, -c], bash wrapper.
+            # Prefer rebuild from mode stored on instance if we set it; else
+            # rewrite argv[0] when it is a direct binary spawn.
+            pass
+        # Rebuild from the same mode as spawn_harness by inspecting argv:
+        # bash -c continue wrapper → continue; else if --resume → resume; else fresh.
+        # Grok: pin --cwd to the project directory so hooks write status under
+        # the project path (not $HOME). We already cd there; '.' is that dir.
+        grok_cwd = (['--cwd', '.'] if self._adapter.id == 'grok' else [])
+        rebuilt = None
+        if mode_argv and mode_argv[0] == 'bash' and len(mode_argv) >= 3:
+            rebuilt = _h.build_continue_wrapper(
+                [remote_bin, *grok_cwd, '-c'],
+                [remote_bin, *grok_cwd],
+                fallback=fallback,
+            )
+        elif len(mode_argv) >= 3 and mode_argv[1] == '--resume':
+            rebuilt = [remote_bin, *grok_cwd, '--resume', mode_argv[2]]
+        elif len(mode_argv) >= 2 and mode_argv[1] == '-c':
+            rebuilt = _h.build_continue_wrapper(
+                [remote_bin, *grok_cwd, '-c'],
+                [remote_bin, *grok_cwd],
+                fallback=fallback,
+            )
+        else:
+            rebuilt = [remote_bin, *grok_cwd]
+        # Provider env on the *remote* process only — never the full laptop
+        # environ (HOME/USER would rewrite remote paths to the workstation user).
+        from ssh_transport import build_ssh_spawn_argv, filter_remote_export_env
+        remote_cwd = getattr(self._project, 'spawn_cwd', None) or self._project.path
+        ssh_argv = build_ssh_spawn_argv(
+            prof.ssh_target,
+            remote_cwd,
+            rebuilt,
+            filter_remote_export_env(env),
+            batch=False,  # interactive: allow prompts if any
+            connect_timeout=15,
+        )
+        return ssh_argv, None
 
     def spawn_continue(self, project_name=None):
-        """Continue the agent's most recent conversation (``-c`` semantics)."""
-        self.spawn_agent('continue')
+        """Continue the harness's most recent conversation (``-c`` semantics)."""
+        self.spawn_harness('continue')
 
     def spawn_fresh(self, project_name=None):
-        """Start a brand-new agent session."""
-        self.spawn_agent('fresh')
+        """Start a brand-new harness session."""
+        self.spawn_harness('fresh')
 
     def spawn_resume(self, session_id, project_name=None):
         """Resume a specific session by id."""
-        self.spawn_agent('resume', session_id=session_id)
+        self.spawn_harness('resume', session_id=session_id)
 
     def spawn_claude(self, session_id=None, fresh=False, project_name=None):
-        """Deprecated agent-neutral alias over ``spawn_agent`` (the name is a
+        """Deprecated harness-neutral alias over ``spawn_harness`` (the name is a
         historical artifact — it spawns whatever the project's adapter is, not
         necessarily claude). Retained so the P1 consumption-seam tests keep
         passing; window.py now calls ``spawn_continue``/``spawn_fresh``/
@@ -439,7 +510,7 @@ class TerminalView(Gtk.Box):
             mode = 'fresh'
         else:
             mode = 'continue'
-        self.spawn_agent(mode, session_id=session_id)
+        self.spawn_harness(mode, session_id=session_id)
 
     def spawn_zellij(self, session_name):
         """Attach to or create a zellij session for this project.
@@ -468,7 +539,7 @@ class TerminalView(Gtk.Box):
                 os.unlink(socket_path)
             except OSError:
                 pass
-            # Create per-session init flag CONTAINING the agent's continue
+            # Create per-session init flag CONTAINING the harness's continue
             # command line; the wrapper reads+execs it (generalized from the
             # old hardcoded `claude -c || claude`). For claude the content is
             # exactly `claude -c || claude` — byte-identical to before.
@@ -483,9 +554,9 @@ class TerminalView(Gtk.Box):
             # created — attaching to an existing session inherits whatever the
             # server already has. Per-project models under zellij are therefore
             # best-effort; the default (non-multiplexed) path is fully supported.
-            # The adapter owns the env decision: for claude this is the
-            # custom-provider env (models.build_spawn_env); for the native path
-            # it is None. terminal.py no longer names ANTHROPIC_* keys directly.
+            # The adapter owns the env decision (A3/M3): for claude this is the
+            # provider env; for opencode/grok (model-as-argv) it is None.
+            # terminal.py never names ANTHROPIC_* keys itself.
             custom, self._fallback_reason = self._adapter.zellij_spawn_env(
                 self._settings, self._project
             )
@@ -542,10 +613,8 @@ class TerminalView(Gtk.Box):
         env_dict = dict(env) if env is not None else dict(os.environ)
         env_dict.setdefault('TERM', 'xterm-256color')
         env_dict.setdefault('COLORTERM', 'truecolor')
-        # Freeze PM-spawned Claude Code against auto-updates universally — a CC
-        # update could break third-party-model support mid-session. Applied
-        # here (setdefault) so NATIVE spawns (env is None → os.environ) freeze
-        # too, not only custom-provider spawns (build_spawn_env already sets it).
+        # Freeze agent auto-updates for the session (Claude-focused; harmless
+        # for harnesses that ignore it).
         env_dict.setdefault('DISABLE_AUTOUPDATER', '1')
 
         pid = os.fork()
@@ -574,11 +643,12 @@ class TerminalView(Gtk.Box):
         import time as _time
         self._spawn_monotonic = _time.monotonic()
         self._spawn_binary = argv_list[0] if argv_list else ''
-        self._spawned_model = self._settings.effective_provider(self._project.path)
-        # The agent id the live child was actually spawned with — lets window.py
-        # detect when an agent override leaves a running session stale (B3),
+        self._spawned_model = self._settings.model_axis_signature(
+            self._project.path)
+        # The harness id the live child was actually spawned with — lets window.py
+        # detect when a harness override leaves a running session stale (B3),
         # parallel to _spawned_model. Uses the adapter that produced this spawn.
-        self._spawned_agent = self._adapter.id
+        self._spawned_harness = self._adapter.id
         self._add_pidfd_watch(pid)
         self.emit('process-started')
 
@@ -642,7 +712,7 @@ class TerminalView(Gtk.Box):
         if self._is_zellij and self._zellij_session:
             if zellij.session_alive(self._zellij_session):
                 # DETACH, not an end: the zellij session lives on and a reattach
-                # legitimately resumes THIS agent. PRESERVE _explicit_agent — the
+                # legitimately resumes THIS agent. PRESERVE _explicit_harness — the
                 # restored saved-agent (A2) must survive a detach/reattach.
                 self.emit('process-detached')
                 return False
@@ -655,8 +725,8 @@ class TerminalView(Gtk.Box):
         # PENDING per-project override (e.g. restored-grok with the row now set
         # to claude) is honored on the next activation, instead of the dead
         # session's agent outliving it. The next spawn re-resolves the adapter
-        # (spawn_agent), so a cleared explicit agent picks up effective_agent.
-        self._explicit_agent = None
+        # (spawn_harness), so a cleared explicit agent picks up effective_harness.
+        self._explicit_harness = None
         if spawn_failed:
             self.emit('process-spawn-failed', self._spawn_binary or '')
         self.emit('process-exited', status)
@@ -737,32 +807,32 @@ class TerminalView(Gtk.Box):
     def apply_settings(self, settings):
         # Note: resets font_size to the settings default, discarding any active zoom offset.
         self._settings = settings
-        # Re-resolve the adapter in case the effective agent changed. The next
+        # Re-resolve the adapter in case the effective harness changed. The next
         # spawn uses it; a live child keeps running its original agent. An
         # explicit construction-time agent (a restored session, A2) is sticky:
         # settings changes must not silently swap a running restored agent.
-        resolved = (self._explicit_agent if self._explicit_agent is not None
-                    else settings.effective_agent(self._project.path))
-        self._adapter = agents.get_adapter(resolved, settings)
+        resolved = (self._explicit_harness if self._explicit_harness is not None
+                    else settings.effective_harness(self._project.path))
+        self._adapter = harnesses.get_adapter(resolved, settings)
         self._font_size = settings.font_size
         self._apply_font()
         self._apply_colors()
         self._terminal.set_scrollback_lines(settings.scrollback_lines)
         self._terminal.set_audible_bell(settings.audible_bell)
 
-    def clear_explicit_agent(self):
+    def clear_explicit_harness(self):
         """Drop the sticky restore agent so an EXPLICIT per-project pick wins.
 
-        Contract (S8 ship-blocker): ``_explicit_agent`` makes a RESTORED
+        Contract (S8 ship-blocker): ``_explicit_harness`` makes a RESTORED
         session's agent sticky (A2) so an *incidental* GLOBAL/default settings
         change can't silently swap a running restored agent. But a deliberate
         per-project Agent-submenu pick (B3) MUST defeat that stickiness —
         otherwise the restart prompt re-spawns the OLD agent. Clearing the
         override lets the next ``apply_settings`` re-resolve the adapter to the
-        new ``effective_agent``. ONLY the explicit-pick handler calls this;
+        new ``effective_harness``. ONLY the explicit-pick handler calls this;
         global/default changes never do, so A2 stays intact.
         """
-        self._explicit_agent = None
+        self._explicit_harness = None
 
     def feed_session_ended(self, code):
         """FB-3 (C7): write a one-line 'session ended' banner into the pane —

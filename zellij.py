@@ -45,7 +45,7 @@ def session_exists(name: str) -> bool:
 def kill_session(name: str) -> None:
     """Kill the zellij SERVER session ``name`` (FB-4 — the one implementation).
 
-    The deactivate path and the agent-change/new-session spawn path both need to
+    The deactivate path and the harness-change/new-session spawn path both need to
     tear down a live zellij server session (not just the local attach child, which
     persists the server by design). This is that single call. Defensive: only
     runs ``zellij kill-session`` when the session actually exists, and never

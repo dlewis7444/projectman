@@ -62,7 +62,7 @@ def test_classifier_temperature_resolves_against_override_provider():
             **_provider('openrouter', base_url='http://b', models=['or1']),
         },
         model_default='ollama',
-        model_overrides={'/p': 'openrouter'},
+        provider_overrides={'/p': 'openrouter'},
         classifier_temperature={'ollama': 0.1, 'openrouter': 0.9},
     )
     env, _ = build_spawn_env(s, '/p')
