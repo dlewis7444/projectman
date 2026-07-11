@@ -618,9 +618,9 @@ class ProviderEditorWindow(Adw.Dialog):
             self._settings.providers.pop(self._pid, None)
         if self._settings.model_default == self._pid:
             self._settings.model_default = ''
-        if isinstance(self._settings.model_overrides, dict):
-            self._settings.model_overrides = {
-                p: v for p, v in self._settings.model_overrides.items()
+        if isinstance(self._settings.provider_overrides, dict):
+            self._settings.provider_overrides = {
+                p: v for p, v in self._settings.provider_overrides.items()
                 if v != self._pid
             }
         if isinstance(self._settings.tier_models, dict):
@@ -721,10 +721,12 @@ class SettingsWindow(Adw.PreferencesDialog):
         # re-enter the change handlers and recurse.
         self._suppress_combos = False
         self._build_general_page()
+        self._build_hosts_page()
         self._build_terminal_page()
         self._build_paa_page()
         self._build_appearance_page()
         self._build_models_page()
+        self._build_harnesses_page()
         self._build_about_page()
         self._build_claude_json_page()
         self.present(parent)
@@ -754,14 +756,14 @@ class SettingsWindow(Adw.PreferencesDialog):
         projects_group.add(self._projects_dir_row)
 
         # Group: Claude Code (the binary row, re-homed from the removed Agents
-        # page — Claude Code is the sole harness, so its binary config lives on
-        # General now). resolved_claude_binary reads agents['claude']['binary']
+        # page — Claude binary also lives on the Harnesses page; General keeps a
+        # convenience row). resolved_claude_binary reads agents['claude']['binary']
         # first, falling back to the legacy claude_binary key.
         claude_group = Adw.PreferencesGroup(title='Claude Code')
         page.add(claude_group)
 
-        cfg = (self._settings.agents.get('claude')
-               if isinstance(self._settings.agents, dict) else None)
+        cfg = (self._settings.harnesses.get('claude')
+               if isinstance(self._settings.harnesses, dict) else None)
         binary = ((cfg.get('binary') or '') if isinstance(cfg, dict)
                   else self._settings.claude_binary)
         self._claude_binary_row = Adw.EntryRow(title='Binary')
@@ -815,6 +817,492 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._ntfy_topic_row.connect('apply', self._on_ntfy_topic_apply)
         notif_group.add(self._ntfy_topic_row)
 
+    def _build_hosts_page(self):
+        """Remote SSH hosts (project SoT on the remote)."""
+        page = Adw.PreferencesPage(
+            title='Hosts', icon_name='network-server-symbolic'
+        )
+        self.add(page)
+
+        health_group = Adw.PreferencesGroup(
+            title='Health checks',
+            description='Interval for remote reachability checks. 0 disables.',
+        )
+        page.add(health_group)
+        self._health_interval_row = Adw.SpinRow(
+            title='Remote health interval (seconds)',
+            subtitle='Default 30. Grey health dots when set to 0.',
+            adjustment=Gtk.Adjustment(
+                value=self._settings.remote_health_interval_sec,
+                lower=0, upper=3600, step_increment=5, page_increment=30,
+            ),
+            digits=0,
+        )
+        self._health_interval_row.connect(
+            'notify::value', self._on_health_interval_changed)
+        health_group.add(self._health_interval_row)
+
+        self._hosts_page = page
+        self._add_group = Adw.PreferencesGroup(
+            title='Add host',
+            description=(
+                'Projects live under ~/.ProjectMan/projects on the remote. '
+                'Uses your existing SSH config and keys.'
+            ),
+        )
+        page.add(self._add_group)
+
+        self._add_host_btn = Gtk.Button(label='Add Host…')
+        self._add_host_btn.add_css_class('pill')
+        self._add_host_btn.add_css_class('suggested-action')
+        self._add_host_btn.set_halign(Gtk.Align.START)
+        self._add_host_btn.connect('clicked', self._on_add_host_clicked)
+        add_row = Adw.ActionRow(
+            title='Add a remote',
+            subtitle='SSH target from your config (e.g. agentbox)',
+        )
+        add_row.add_suffix(self._add_host_btn)
+        add_row.set_activatable_widget(self._add_host_btn)
+        self._add_group.add(add_row)
+
+        # Visible busy status (toasts alone are easy to miss in Preferences).
+        self._add_host_status = Gtk.Label(label='')
+        self._add_host_status.add_css_class('dim-label')
+        self._add_host_status.add_css_class('caption')
+        self._add_host_status.set_halign(Gtk.Align.START)
+        self._add_host_status.set_wrap(True)
+        self._add_host_status.set_margin_start(12)
+        self._add_host_status.set_margin_end(12)
+        self._add_host_status.set_margin_bottom(8)
+        self._add_host_status.set_visible(False)
+        status_row = Adw.ActionRow()
+        status_row.set_child(self._add_host_status)
+        status_row.set_activatable(False)
+        status_row.set_selectable(False)
+        self._add_group.add(status_row)
+        self._add_host_status_row = status_row
+
+        self._host_rows = {}
+        self._host_switches = {}
+        # One PreferencesGroup ("card") per host — torn down on refresh.
+        self._host_card_groups = []
+        self._refresh_host_rows()
+
+    def _refresh_host_rows(self):
+        for group in self._host_card_groups:
+            self._hosts_page.remove(group)
+        self._host_card_groups.clear()
+        self._host_rows.clear()
+        self._host_switches.clear()
+        for hid, prof in self._settings.host_profiles().items():
+            # Separate card so Edit / rich-status clearly belong to this host.
+            card = Adw.PreferencesGroup(
+                title=prof.title(),
+                description=f'SSH: {prof.ssh_target}',
+            )
+            self._hosts_page.add(card)
+            self._host_card_groups.append(card)
+
+            row = Adw.ActionRow(
+                title='Connection',
+                subtitle=prof.ssh_target,
+            )
+            edit_btn = Gtk.Button(label='Edit')
+            edit_btn.add_css_class('flat')
+            edit_btn.connect(
+                'clicked',
+                lambda b, h=hid: self._open_host_editor(h),
+            )
+            row.add_suffix(edit_btn)
+            remove_btn = Gtk.Button(label='Remove')
+            remove_btn.add_css_class('flat')
+            remove_btn.add_css_class('destructive-action')
+            remove_btn.connect(
+                'clicked',
+                lambda b, h=hid: self._on_remove_host(h),
+            )
+            row.add_suffix(remove_btn)
+            card.add(row)
+            self._host_rows[hid] = row
+
+            sw_row = Adw.SwitchRow(
+                title='Rich status dots',
+                subtitle=(
+                    'Opt-in: install status bridges on this host and poll '
+                    'working/waiting/done for project dots + ntfy'
+                ),
+            )
+            sw_row.set_active(bool(prof.rich_status_opt_in))
+            sw_row.connect(
+                'notify::active',
+                lambda r, p, h=hid: self._on_host_rich_status(h, r.get_active()),
+            )
+            card.add(sw_row)
+            self._host_switches[hid] = sw_row
+
+    def _on_health_interval_changed(self, row, _pspec):
+        self._settings.remote_health_interval_sec = int(row.get_value())
+        self._settings.save()
+        self._app.emit('settings-changed')
+
+    def _on_host_rich_status(self, host_id, active):
+        hosts = dict(self._settings.hosts)
+        entry = dict(hosts.get(host_id) or {})
+        if not entry:
+            return
+        # Avoid re-entrancy when rebuild sets active from saved state.
+        if bool(entry.get('rich_status_opt_in', False)) == bool(active):
+            return
+        entry['rich_status_opt_in'] = bool(active)
+        hosts[host_id] = entry
+        self._settings.hosts = hosts
+        self._settings.save()
+        if active:
+            # Install bridges on the remote (idempotent); never block GTK.
+            self._set_add_host_status(
+                f'Installing status bridges on {entry.get("ssh_target", host_id)}…'
+            )
+            import threading
+            threading.Thread(
+                target=self._enable_rich_status_worker,
+                args=(host_id,),
+                daemon=True,
+                name='pm-rich-status-install',
+            ).start()
+        else:
+            self._set_add_host_status(
+                'Rich status off — project dots idle until re-enabled'
+            )
+            try:
+                self._parent._refresh_remote_hosts()
+            except Exception:
+                pass
+
+    def _enable_rich_status_worker(self, host_id):
+        import remote_hooks
+        from hosts import HostProfile
+        raw = (self._settings.hosts or {}).get(host_id) or {}
+        prof = HostProfile.from_dict({**raw, 'id': host_id})
+        if prof is None:
+            GLib.idle_add(self._set_add_host_status, 'Host missing')
+            return
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        ok, msg = remote_hooks.ensure_remote_status_ready(
+            prof, app_dir=app_dir,
+        )
+
+        def done():
+            if ok:
+                self._set_add_host_status(
+                    f'Rich status ready on {prof.title()}: {msg}'
+                )
+                self._toast(f'Rich status enabled on {prof.title()}')
+            else:
+                self._set_add_host_status(f'Bridge install failed: {msg[:160]}')
+                self._toast(f'Bridge install failed on {prof.title()}')
+            try:
+                self._parent._refresh_remote_hosts()
+            except Exception:
+                pass
+            return False
+
+        GLib.idle_add(done)
+
+    def _open_host_editor(self, host_id):
+        """Phase 5: edit display name, projects dir, binaries; re-probe.
+
+        Uses Adw.Dialog (not AlertDialog) so we can set a real width — host
+        settings need room for long binary paths.
+        """
+        from hosts import HostProfile
+        raw = dict((self._settings.hosts or {}).get(host_id) or {})
+        prof = HostProfile.from_dict({**raw, 'id': host_id})
+        if prof is None:
+            return
+
+        dialog = Adw.Dialog()
+        dialog.set_title(f'Edit host — {prof.title()}')
+        # ~2× typical alert width so override paths are readable.
+        if hasattr(dialog, 'set_content_width'):
+            dialog.set_content_width(720)
+        if hasattr(dialog, 'set_content_height'):
+            dialog.set_content_height(520)
+
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        toolbar.add_top_bar(header)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_vexpand(True)
+
+        prefs = Adw.PreferencesPage()
+        group = Adw.PreferencesGroup(
+            title='Host',
+            description='Changes apply to the next spawn / health poll.',
+        )
+        prefs.add(group)
+
+        name_row = Adw.EntryRow(title='Display name')
+        name_row.set_text(prof.display_name or '')
+        group.add(name_row)
+
+        target_row = Adw.EntryRow(title='SSH target')
+        target_row.set_text(prof.ssh_target)
+        target_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+        group.add(target_row)
+
+        pdir_row = Adw.EntryRow(title='Remote projects directory')
+        pdir_row.set_text(prof.remote_projects_dir or '~/.ProjectMan/projects')
+        pdir_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+        group.add(pdir_row)
+
+        bin_group = Adw.PreferencesGroup(title='Harness binaries')
+        prefs.add(bin_group)
+        bin_widgets = {}
+        for hid_bin, label in (
+            ('claude', 'Claude Code'),
+            ('opencode', 'OpenCode'),
+            ('grok', 'Grok Build'),
+        ):
+            spec = prof.binary_spec(hid_bin)
+            use_path = Adw.SwitchRow(
+                title=f'{label}: use $PATH',
+                subtitle='Off = use absolute override path below',
+            )
+            use_path.set_active(bool(spec.use_path))
+            bin_group.add(use_path)
+            path_row = Adw.EntryRow(title=f'{label} override path')
+            path_row.set_text(spec.override or '')
+            path_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+            bin_group.add(path_row)
+            bin_widgets[hid_bin] = (use_path, path_row)
+
+        scrolled.set_child(prefs)
+        toolbar.set_content(scrolled)
+
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_margin_top(8)
+        btn_box.set_margin_bottom(12)
+        btn_box.set_margin_end(12)
+        probe_btn = Gtk.Button(label='Re-probe binaries')
+        cancel_btn = Gtk.Button(label='Cancel')
+        save_btn = Gtk.Button(label='Save')
+        save_btn.add_css_class('suggested-action')
+        btn_box.append(probe_btn)
+        btn_box.append(cancel_btn)
+        btn_box.append(save_btn)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.append(toolbar)
+        outer.append(btn_box)
+        dialog.set_child(outer)
+
+        def _close(*_a):
+            dialog.close()
+
+        def _save(*_a):
+            entry = dict(raw)
+            entry['display_name'] = name_row.get_text().strip()
+            entry['ssh_target'] = target_row.get_text().strip() or prof.ssh_target
+            entry['remote_projects_dir'] = (
+                pdir_row.get_text().strip() or '~/.ProjectMan/projects'
+            )
+            binaries = {}
+            for hid_bin, (use_path, path_row) in bin_widgets.items():
+                binaries[hid_bin] = {
+                    'use_path': bool(use_path.get_active()),
+                    'override': path_row.get_text().strip(),
+                }
+            entry['binaries'] = binaries
+            hosts = dict(self._settings.hosts)
+            hosts[host_id] = entry
+            self._settings.hosts = hosts
+            self._settings.save()
+            self._app.emit('settings-changed')
+            self._refresh_host_rows()
+            self._toast(
+                f'Saved host {entry.get("display_name") or entry["ssh_target"]}'
+            )
+            dialog.close()
+
+        def _probe(*_a):
+            self._set_add_host_status(f'Re-probing binaries on {prof.ssh_target}…')
+            # Run probe off UI thread so Settings stays responsive.
+            import threading
+
+            def work():
+                import remote_store
+                from hosts import HostProfile as HP
+                p = HP.from_dict({**raw, 'id': host_id, 'ssh_target': target_row.get_text().strip() or prof.ssh_target})
+                bins = remote_store.discover_remote_binaries(p) if p else {}
+                GLib.idle_add(self._apply_probe_to_editor, host_id, bins, bin_widgets)
+
+            threading.Thread(target=work, daemon=True).start()
+
+        cancel_btn.connect('clicked', _close)
+        save_btn.connect('clicked', _save)
+        probe_btn.connect('clicked', _probe)
+        dialog.present(self._parent)
+
+    def _apply_probe_to_editor(self, host_id, bins, bin_widgets):
+        if not bins:
+            self._set_add_host_status('No harness binaries found on host')
+            self._toast('No binaries found on host')
+            return False
+        raw = dict((self._settings.hosts or {}).get(host_id) or {})
+        binaries = dict(raw.get('binaries') or {})
+        for hid_bin, path in bins.items():
+            binaries[hid_bin] = {'use_path': False, 'override': path}
+        raw['binaries'] = binaries
+        hosts = dict(self._settings.hosts)
+        hosts[host_id] = raw
+        self._settings.hosts = hosts
+        self._settings.save()
+        if bin_widgets:
+            for hid_bin, (use_path, path_row) in bin_widgets.items():
+                if hid_bin in bins:
+                    use_path.set_active(False)
+                    path_row.set_text(bins[hid_bin])
+        self._set_add_host_status(
+            'Found: ' + ', '.join(f'{k}={v}' for k, v in sorted(bins.items()))
+        )
+        self._toast(f'Probed {len(bins)} binary(ies)')
+        return False
+
+    def _on_remove_host(self, host_id):
+        hosts = dict(self._settings.hosts)
+        hosts.pop(host_id, None)
+        self._settings.hosts = hosts
+        exp = dict(self._settings.host_section_expanded or {})
+        exp.pop(host_id, None)
+        self._settings.host_section_expanded = exp
+        self._settings.save()
+        self._app.emit('settings-changed')
+        self._refresh_host_rows()
+
+    def _on_add_host_clicked(self, button):
+        if getattr(self, '_add_host_busy', False):
+            self._toast('Already adding a host…')
+            return
+        dialog = Adw.AlertDialog(
+            heading='Add remote host',
+            body=(
+                'Enter an SSH target exactly as you would for ssh(1) '
+                '(alias, FQDN, or user@host). An optional display name '
+                'overrides the sidebar title.\n\n'
+                'ProjectMan will use this key’s full SSH access — the same '
+                'as an interactive session you already run. Ensure the host '
+                'key is already accepted (ssh once manually if needed).'
+            ),
+        )
+        dialog.add_response('cancel', 'Cancel')
+        dialog.add_response('add', 'Add')
+        dialog.set_response_appearance('add', Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response('add')
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_top(8)
+        target_row = Adw.EntryRow(title='SSH target')
+        target_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+        name_row = Adw.EntryRow(title='Display name (optional)')
+        box.append(target_row)
+        box.append(name_row)
+        dialog.set_extra_child(box)
+
+        def _on_response(d, response):
+            if response != 'add':
+                return
+            target = target_row.get_text().strip()
+            if not target:
+                return
+            name = name_row.get_text().strip()
+            # Immediate, obvious feedback: button + status line + toast.
+            self._add_host_busy = True
+            if hasattr(self, '_add_host_btn') and self._add_host_btn is not None:
+                self._add_host_btn.set_sensitive(False)
+                self._add_host_btn.set_label('Contacting…')
+            self._set_add_host_status(f'Contacting {target}… (SSH may take a few seconds)')
+            self._toast(f'Contacting {target}…')
+            # Defer so the toast / label can paint before blocking SSH work.
+            GLib.idle_add(self._add_host, target, name)
+
+        dialog.connect('response', _on_response)
+        dialog.present(self._parent)
+
+    def _toast(self, text, timeout=4):
+        """Surface a toast on the main window (PreferencesDialog has none)."""
+        try:
+            self._parent._show_toast(text, timeout=timeout)
+        except TypeError:
+            try:
+                self._parent._show_toast(text)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _set_add_host_status(self, text: str):
+        if not hasattr(self, '_add_host_status') or self._add_host_status is None:
+            return
+        text = (text or '').strip()
+        self._add_host_status.set_label(text)
+        self._add_host_status.set_visible(bool(text))
+
+    def _add_host_reset_button(self):
+        self._add_host_busy = False
+        if hasattr(self, '_add_host_btn') and self._add_host_btn is not None:
+            self._add_host_btn.set_sensitive(True)
+            self._add_host_btn.set_label('Add Host…')
+
+    def _add_host(self, ssh_target, display_name):
+        from hosts import HostProfile, new_host_id
+        import remote_store
+        hid = new_host_id()
+        prof = HostProfile(
+            id=hid,
+            ssh_target=ssh_target,
+            display_name=display_name or '',
+            # Opt-in only — rich status hooks are not installed until enabled.
+            rich_status_opt_in=False,
+        )
+        # Connectivity + ensure projects dir (blocking; preceded by toast)
+        ok, err = remote_store.ensure_remote_projects_dir(prof)
+        if not ok:
+            msg = f'Could not reach {ssh_target}: {(err or "ssh failed")[:120]}'
+            self._set_add_host_status(msg)
+            self._toast(msg, timeout=6)
+            self._add_host_reset_button()
+            return False
+        self._set_add_host_status(f'Connected to {prof.title()} — discovering binaries…')
+        self._toast(f'Connected to {prof.title()} — finishing setup…')
+        bins = remote_store.discover_remote_binaries(prof)
+        # Store absolute paths (use_path=False). Non-interactive SSH often
+        # lacks interactive PATH (.bashrc early-return), so bare names fail.
+        binaries = {}
+        for hid_bin, path in bins.items():
+            binaries[hid_bin] = {'use_path': False, 'override': path}
+        prof.binaries = binaries
+        hosts = dict(self._settings.hosts)
+        hosts[hid] = prof.to_dict()
+        self._settings.hosts = hosts
+        self._settings.set_section_expanded(hid, True)
+        self._settings.save()
+        self._app.emit('settings-changed')
+        self._refresh_host_rows()
+        try:
+            self._parent._refresh_remote_hosts()
+        except Exception:
+            pass
+        bin_note = ''
+        if bins:
+            bin_note = ' · ' + ', '.join(f'{k}={v}' for k, v in sorted(bins.items()))
+        self._set_add_host_status(f'Host added: {prof.title()}{bin_note}')
+        self._toast(f'Host added: {prof.title()}')
+        self._add_host_reset_button()
+        return False  # GLib.idle_add: do not reschedule
+
     def _build_terminal_page(self):
         page = Adw.PreferencesPage(
             title='Terminal', icon_name='utilities-terminal-symbolic'
@@ -866,7 +1354,10 @@ class SettingsWindow(Adw.PreferencesDialog):
         # -- Enable group --
         enable_group = Adw.PreferencesGroup(
             title='Projects Admin Agent',
-            description='Proactive background monitor for project health',
+            description=(
+                'Proactive background monitor for project health. '
+                'Localhost projects only — remote hosts are not scanned.'
+            ),
         )
         page.add(enable_group)
 
@@ -1106,12 +1597,12 @@ class SettingsWindow(Adw.PreferencesDialog):
         (resolved_claude_binary would otherwise fall back to a stale legacy
         value)."""
         value = row.get_text().strip()
-        if not isinstance(self._settings.agents, dict):
-            self._settings.agents = {}
-        claude_cfg = self._settings.agents.get('claude')
+        if not isinstance(self._settings.harnesses, dict):
+            self._settings.harnesses = {}
+        claude_cfg = self._settings.harnesses.get('claude')
         if not isinstance(claude_cfg, dict):
             claude_cfg = {}
-            self._settings.agents['claude'] = claude_cfg
+            self._settings.harnesses['claude'] = claude_cfg
         claude_cfg['binary'] = value
         self._settings.claude_binary = value
         self._save_and_notify()
@@ -1319,11 +1810,19 @@ class SettingsWindow(Adw.PreferencesDialog):
         # -- Active Provider --
         self._active_provider_group = Adw.PreferencesGroup(title='Active Provider')
         page.add(self._active_provider_group)
-        self._provider_combo = Adw.ComboRow(title='Default Provider')
+        self._provider_combo = Adw.ComboRow(title='Default Provider, Claude Code')
         self._provider_combo.set_subtitle(
             'Anthropic (native) uses your own Anthropic credentials')
         self._provider_combo.connect('notify::selected', self._on_default_provider_changed)
         self._active_provider_group.add(self._provider_combo)
+        for future_title in (
+            'Default Provider, Grok Build (future)',
+            'Default Provider, OpenCode (future)',
+        ):
+            future_row = Adw.ActionRow(title=future_title)
+            future_row.set_subtitle('Not configurable in ProjectMan yet')
+            future_row.set_sensitive(False)
+            self._active_provider_group.add(future_row)
 
         # -- Providers --
         # Each provider card holds its own per-provider Tier Assignments (B2):
@@ -1336,18 +1835,18 @@ class SettingsWindow(Adw.PreferencesDialog):
         )
         page.add(self._providers_group)
 
-        add_group = Adw.PreferencesGroup()
-        page.add(add_group)
-        add_row = Adw.ActionRow()
+        # Add Provider lives in the same group as provider rows so spacing
+        # matches inter-row gaps (a separate PreferencesGroup was too large).
+        self._provider_add_row = Adw.ActionRow()
         add_btn = Gtk.Button(label='Add Provider')
         add_btn.add_css_class('suggested-action')
         add_btn.set_valign(Gtk.Align.CENTER)
         add_btn.connect('clicked', self._on_add_provider)
-        add_row.add_suffix(add_btn)
-        add_group.add(add_row)
+        self._provider_add_row.add_prefix(add_btn)
 
         self._provider_card_rows = []
         self._refresh_models_page()
+        self._build_native_model_sections(page)
 
     def _refresh_models_page(self):
         """Rebuild the whole Models page from settings (after any change)."""
@@ -1370,15 +1869,20 @@ class SettingsWindow(Adw.PreferencesDialog):
         for row in list(self._provider_card_rows):
             self._providers_group.remove(row)
         self._provider_card_rows = []
-        if not isinstance(self._settings.providers, dict):
-            return
-        for pid in sorted(self._settings.providers):
-            prov = self._settings.providers.get(pid)
-            if not isinstance(prov, dict):
-                continue
-            row = self._build_provider_row(pid, prov)
-            self._providers_group.add(row)
-            self._provider_card_rows.append(row)
+        # Drop Add row if present so provider rows insert above it cleanly.
+        add_row = getattr(self, '_provider_add_row', None)
+        if add_row is not None and add_row.get_parent() is self._providers_group:
+            self._providers_group.remove(add_row)
+        if isinstance(self._settings.providers, dict):
+            for pid in sorted(self._settings.providers):
+                prov = self._settings.providers.get(pid)
+                if not isinstance(prov, dict):
+                    continue
+                row = self._build_provider_row(pid, prov)
+                self._providers_group.add(row)
+                self._provider_card_rows.append(row)
+        if add_row is not None:
+            self._providers_group.add(add_row)
 
     def _build_provider_row(self, pid, prov):
         """A slim, one-line row for a provider in the Models page. The row's
@@ -1399,15 +1903,9 @@ class SettingsWindow(Adw.PreferencesDialog):
             count.add_css_class('dim-label')
             count.set_valign(Gtk.Align.CENTER)
             row.add_suffix(count)
-        # The row itself opens the editor (click → dialog). A chevron signals
-        # it's actionable — no separate "Models" button (that label was a
-        # misnomer for a full provider editor, and a button inside Settings
-        # opening another window was the wrong shape the maintainer flagged).
+        # Click opens the editor. No chevron — the row is a card, not an expander.
         row.set_activatable(True)
         row.connect('activated', lambda _r, p=pid: self._open_editor(p))
-        chev = Gtk.Image.new_from_icon_name('go-next-symbolic')
-        chev.set_valign(Gtk.Align.CENTER)
-        row.add_suffix(chev)
         return row
 
     def _open_editor(self, pid):
@@ -1449,6 +1947,213 @@ class SettingsWindow(Adw.PreferencesDialog):
         # Open the editor on the freshly-added empty provider so the user can
         # fill it immediately (the flow that lost fields under the ExpanderRow).
         self._open_editor(pid)
+
+    # ------------------------------------------------------------------ #
+    #  Extra Pages                                                         #
+    # ------------------------------------------------------------------ #
+
+    def _build_native_model_sections(self, page):
+        """Placeholder sections for Grok / OpenCode model ownership.
+
+        These harnesses pick models in their own configs; PM does not list or
+        edit those models here. One non-interactive row each points at that.
+        """
+        import harnesses
+        import harness_configs
+        for harness_id in ('grok', 'opencode'):
+            adapter = harnesses.ADAPTERS.get(harness_id)
+            display = adapter.display_name if adapter else harness_id
+            cfg = harness_configs.load_harness_config(harness_id)
+            shown_path = ''
+            if cfg is not None:
+                shown_path = harness_configs._display_path(cfg.source_path)
+            group = Adw.PreferencesGroup(title=display)
+            if shown_path:
+                group.set_description(
+                    f'Models are chosen in the harness’s own config ({shown_path}).')
+            else:
+                group.set_description(
+                    'Models are chosen in the harness’s own config.')
+            page.add(group)
+            row = Adw.ActionRow(title='Managed by the harness')
+            row.set_sensitive(False)
+            group.add(row)
+
+
+    # ------------------------------------------------------------------ #
+    #  Harnesses page (B3 — minimal this phase; full doctor is P3)            #
+    # ------------------------------------------------------------------ #
+
+
+    #  Harnesses page (B3 — minimal this phase; full doctor is P3)            #
+    # ------------------------------------------------------------------ #
+
+    def _build_harnesses_page(self):
+        import harnesses
+        import harness_configs
+        page = Adw.PreferencesPage(
+            title='Harnesses', icon_name='applications-engineering-symbolic'
+        )
+        self.add(page)
+
+        default_group = Adw.PreferencesGroup(title='General')
+        page.add(default_group)
+
+        self._harness_default_ids = list(harnesses.ADAPTERS.keys())
+        labels = [harnesses.ADAPTERS[a].display_name for a in self._harness_default_ids]
+        self._harness_default_combo = Adw.ComboRow(title='Default Harness')
+        self._harness_default_combo.set_tooltip_text(
+            'The coding harness used for new sessions. Override per project '
+            'from the sidebar right-click menu.')
+        self._harness_default_combo.set_model(Gtk.StringList.new(labels))
+        cur = self._settings.harness_default
+        self._harness_default_combo.set_selected(
+            self._harness_default_ids.index(cur) if cur in self._harness_default_ids else 0)
+        self._harness_default_combo.connect(
+            'notify::selected', self._on_harness_default_changed)
+        default_group.add(self._harness_default_combo)
+
+        # Per-harness config: binary path + doctor-lite check.
+        self._harness_binary_rows = {}
+        # M-UX.8: (row, button) per harness so the bridge state can refresh after
+        # an install click without rebuilding the page.
+        self._bridge_rows = {}
+        for harness_id in self._harness_default_ids:
+            adapter = harnesses.ADAPTERS[harness_id]
+            group = Adw.PreferencesGroup(title=adapter.display_name)
+            page.add(group)
+
+            cfg = self._settings.harnesses.get(harness_id, {}) if isinstance(
+                self._settings.harnesses, dict) else {}
+            binary_row = Adw.EntryRow(title='Binary')
+            binary_row.set_text((cfg.get('binary') or '') if isinstance(cfg, dict) else '')
+            binary_row.set_show_apply_button(True)
+            binary_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+            binary_row.set_tooltip_text(
+                f'Leave blank to use "{harness_id}" from PATH')
+            binary_row.connect(
+                'apply', lambda r, aid=harness_id: self._on_harness_binary_apply(aid, r))
+            group.add(binary_row)
+            self._harness_binary_rows[harness_id] = binary_row
+
+            # Doctor-lite: <binary> --version.
+            check_row = Adw.ActionRow(title='Status')
+            check_row.set_subtitle('Run a check to verify the binary')
+            check_btn = Gtk.Button(label='Check')
+            check_btn.set_valign(Gtk.Align.CENTER)
+            check_btn.add_css_class('flat')
+            check_btn.connect(
+                'clicked', lambda b, aid=harness_id, r=check_row: self._on_harness_doctor(aid, r))
+            check_row.add_suffix(check_btn)
+            group.add(check_row)
+
+            # B2 (M-UX.13, C1/C2): per-harness account status — "is my subscription
+            # connected?" answered at a glance, presence-based (the Check button
+            # above stays the live probe). Contents are never read; only the
+            # token file's existence/size (or, for opencode, parsed providers).
+            account_line = harness_configs.account_status_line(harness_id)
+            if account_line is not None:
+                account_row = Adw.ActionRow(title='Account')
+                account_row.set_subtitle(account_line)
+                account_row.set_sensitive(False)
+                group.add(account_row)
+
+            # B1 (M-UX.8-residual / F10, C1/C5): grok reads Claude-style hooks by
+            # default, which would make Claude's hook double-fire on grok events.
+            # Surface the [compat.claude] hooks state read-only (the file-driven
+            # behavior was invisible — a C1 defect).
+            if harness_id == 'grok':
+                compat_row = Adw.ActionRow(title='Claude-hooks compat')
+                compat_row.set_subtitle(harness_configs.grok_compat_hooks_line())
+                compat_row.set_sensitive(False)
+                group.add(compat_row)
+
+            # Status-bridge install button (only for agents that ship one).
+            if harnesses.harness_bridge_source(self._app_dir(), harness_id) is not None \
+                    or harness_id == 'opencode':
+                bridge_row = Adw.ActionRow(title='Status bridge')
+                bridge_btn = Gtk.Button()
+                bridge_btn.set_valign(Gtk.Align.CENTER)
+                bridge_btn.add_css_class('flat')
+                bridge_btn.connect(
+                    'clicked', lambda b, aid=harness_id: self._on_install_bridge(aid))
+                bridge_row.add_suffix(bridge_btn)
+                group.add(bridge_row)
+                # M-UX.8 (C5): reflect the bridge's ACTUAL installed state via the
+                # F12a manifest rather than always saying "Install bridge".
+                self._bridge_rows[harness_id] = (bridge_row, bridge_btn)
+                self._refresh_bridge_row(harness_id)
+
+    @staticmethod
+    def _app_dir():
+        return os.path.dirname(os.path.abspath(__file__))
+
+    def _on_harness_default_changed(self, row, _param):
+        idx = row.get_selected()
+        if 0 <= idx < len(self._harness_default_ids):
+            self._settings.harness_default = self._harness_default_ids[idx]
+            self._save_and_notify()
+
+    def _on_harness_binary_apply(self, harness_id, row):
+        harnesses_cfg = dict(self._settings.harnesses) if isinstance(
+            self._settings.harnesses, dict) else {}
+        entry = dict(harnesses_cfg.get(harness_id) or {}) if isinstance(
+            harnesses_cfg.get(harness_id), dict) else {}
+        value = row.get_text().strip()
+        entry['binary'] = value
+        harnesses_cfg[harness_id] = entry
+        self._settings.harnesses = harnesses_cfg
+        if harness_id == 'claude':
+            # Keep the legacy claude_binary key in sync. Without this, clearing
+            # the row would leave a stale legacy value that resolved_claude_binary
+            # falls back to — the clear would silently not take effect.
+            self._settings.claude_binary = value
+        self._save_and_notify()
+
+    def _on_harness_doctor(self, harness_id, row):
+        import harnesses
+        ok, detail = harnesses.harness_doctor(self._settings, harness_id)
+        row.set_subtitle(detail or ('ok' if ok else 'check failed'))
+        # Swap the prefix icon to reflect the result. The Image is created once
+        # per row on first check and updated thereafter — repeated checks must
+        # not stack prefix icons (Adw.ActionRow has no clear-prefixes API).
+        icon = 'emblem-ok-symbolic' if ok else 'dialog-warning-symbolic'
+        existing = getattr(row, '_pm_doctor_icon', None)
+        if existing is None:
+            existing = Gtk.Image.new_from_icon_name(icon)
+            row.add_prefix(existing)
+            row._pm_doctor_icon = existing
+        else:
+            existing.set_from_icon_name(icon)
+
+    def _refresh_bridge_row(self, harness_id):
+        """Set the bridge button label + row subtitle from the manifest state
+        (M-UX.8/C5). Called at build and after every install click."""
+        import harnesses
+        entry = self._bridge_rows.get(harness_id)
+        if entry is None:
+            return
+        row, btn = entry
+        state = harnesses.bridge_state(self._app_dir(), harness_id)
+        label, subtitle = harnesses.bridge_button_labels(state)
+        btn.set_label(label)
+        row.set_subtitle(subtitle)
+
+    def _on_install_bridge(self, harness_id):
+        import harnesses
+        result = harnesses.install_harness_bridge(self._app_dir(), harness_id)
+        msgs = {
+            'installed': 'Status bridge installed',
+            'already': 'Status bridge already up to date',
+            'missing-source': 'Bridge source not found in the app directory',
+            'no-bridge': 'This harness has no status bridge',
+            'error': 'Failed to install the status bridge',
+        }
+        toast = Adw.Toast.new(msgs.get(result, result))
+        toast.set_timeout(3)
+        self.add_toast(toast)
+        # C5: the button label must now reflect the post-install state.
+        self._refresh_bridge_row(harness_id)
 
     # ------------------------------------------------------------------ #
     #  Extra Pages                                                         #

@@ -1,0 +1,27 @@
+{
+  "$comment": "opencode.json fixture \u2014 known-good ollama provider shape matching README 'Using opencode'. Pins harness_configs.parse_opencode_config. Four models qwen3.5:cloud / glm-5.1:cloud / kimi-k2.6:cloud / nemotron-3-super:cloud.",
+  "model": "ollama/qwen3.5:cloud",
+  "provider": {
+    "ollama": {
+      "name": "Ollama",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://localhost:11434/v1"
+      },
+      "models": {
+        "qwen3.5:cloud": {
+          "name": "qwen3.5:cloud"
+        },
+        "glm-5.1:cloud": {
+          "name": "glm-5.1:cloud"
+        },
+        "kimi-k2.6:cloud": {
+          "name": "kimi-k2.6:cloud"
+        },
+        "nemotron-3-super:cloud": {
+          "name": "nemotron-3-super:cloud"
+        }
+      }
+    }
+  }
+}

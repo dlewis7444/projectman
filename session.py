@@ -7,27 +7,37 @@ import tempfile
 SESSION_FILE = os.path.expanduser('~/.ProjectMan/session.json')
 
 
-DEFAULT_AGENT = 'claude'
+DEFAULT_HARNESS = 'claude'
+LOCALHOST_ID = 'localhost'
 
 
-def save_session(path, open_paths, focused_path, agents=None):
+def save_session(path, open_paths, focused_path, harnesses=None, hosts=None):
     """Atomically write session state.
 
-    open_paths   : iterable of project path strings
+    open_paths   : iterable of project path strings (session keys; localhost
+                   still uses absolute paths for back-compat)
     focused_path : focused project path, or None
-    agents       : optional {path: agent_id} map. When None, entries are
+    harnesses    : optional {path: harness_id} map. When None, entries are
                    written in the legacy plain-string form (byte-compatible
-                   with v1). When given, each entry becomes the v2 dict form
-                   ``{"path": p, "agent": a}``, defaulting absent paths to
-                   ``DEFAULT_AGENT``.
+                   with v1). When given, each entry becomes the v2/v3 dict form
+                   ``{"path": p, "harness": a, ...}``, defaulting absent paths
+                   to ``DEFAULT_HARNESS``.
+    hosts        : optional {path: host_id} map. When provided (with harnesses),
+                   each dict entry also gets ``"host": host_id`` (v3). Absent
+                   paths default to ``localhost``.
     """
-    if agents is None:
+    if harnesses is None and hosts is None:
         entries = list(open_paths)
     else:
-        entries = [
-            {'path': p, 'agent': agents.get(p, DEFAULT_AGENT)}
-            for p in open_paths
-        ]
+        entries = []
+        for p in open_paths:
+            entry = {
+                'path': p,
+                'harness': (harnesses or {}).get(p, DEFAULT_HARNESS),
+            }
+            if hosts is not None:
+                entry['host'] = hosts.get(p, LOCALHOST_ID)
+            entries.append(entry)
     data = {
         'open_paths': entries,
         'focused_path': focused_path,
@@ -53,7 +63,7 @@ def _entry_path(entry):
     """Extract the project path from a session entry (v1 str or v2 dict).
 
     Returns the path string, or None for a malformed entry (e.g. a dict with no
-    ``path`` key). v2 dict form: ``{"path": ..., "agent": ...}``.
+    ``path`` key). v2 dict form: ``{"path": ..., "harness": ...}``.
     """
     if isinstance(entry, str):
         return entry
@@ -68,9 +78,9 @@ def load_session(path):
 
     Returns (open_paths, focused_path) on success, or ([], None) on any error.
     open_paths is deduplicated and contains only path strings — v2 dict entries
-    (``{"path": ..., "agent": ...}``) are transparently reduced to their path,
-    so every existing caller is unaffected. Use ``load_agents`` to recover the
-    per-project agent.
+    (``{"path": ..., "harness": ...}``) are transparently reduced to their path,
+    so every existing caller is unaffected. Use ``load_harnesses`` to recover the
+    per-project harness.
     """
     try:
         with open(path) as f:
@@ -92,12 +102,13 @@ def load_session(path):
         return [], None
 
 
-def load_agents(path):
-    """Return {path: agent_id} for the saved session.
+def load_harnesses(path):
+    """Return {path: harness_id} for the saved session.
 
-    v1 (str) entries and v2 dict entries missing an ``agent`` default to
-    ``DEFAULT_AGENT`` ('claude'). Returns {} on any error or missing file. The
-    map is keyed by the same deduplicated paths ``load_session`` returns.
+    v1 (str) entries and v2 dict entries missing a harness default to
+    ``DEFAULT_HARNESS`` ('claude'). Dual-reads ``harness`` (preferred) and
+    legacy ``agent``. Returns {} on any error or missing file. The map is keyed
+    by the same deduplicated paths ``load_session`` returns.
     """
     try:
         with open(path) as f:
@@ -105,17 +116,47 @@ def load_agents(path):
         raw = data.get('open_paths', [])
         if not isinstance(raw, list):
             return {}
-        agents = {}
+        out = {}
         for entry in raw:
             p = _entry_path(entry)
-            if p is None or p in agents:
+            if p is None or p in out:
                 continue
             if isinstance(entry, dict):
-                agent = entry.get('agent')
-                agents[p] = agent if isinstance(agent, str) and agent else DEFAULT_AGENT
+                hid = entry.get('harness')
+                if not (isinstance(hid, str) and hid):
+                    hid = entry.get('agent')
+                out[p] = hid if isinstance(hid, str) and hid else DEFAULT_HARNESS
             else:
-                agents[p] = DEFAULT_AGENT
-        return agents
+                out[p] = DEFAULT_HARNESS
+        return out
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, KeyError,
+            AttributeError):
+        return {}
+
+
+def load_hosts(path):
+    """Return {path: host_id} for the saved session.
+
+    v1/v2 entries (no host field) default to ``localhost``. Returns {} on any
+    error. Keyed by the same paths as ``load_session`` / ``load_harnesses``.
+    """
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        raw = data.get('open_paths', [])
+        if not isinstance(raw, list):
+            return {}
+        out = {}
+        for entry in raw:
+            p = _entry_path(entry)
+            if p is None or p in out:
+                continue
+            if isinstance(entry, dict):
+                hid = entry.get('host')
+                out[p] = hid if isinstance(hid, str) and hid else LOCALHOST_ID
+            else:
+                out[p] = LOCALHOST_ID
+        return out
     except (FileNotFoundError, json.JSONDecodeError, TypeError, KeyError,
             AttributeError):
         return {}
@@ -148,32 +189,32 @@ def collect_session_state(terminals, active_path):
     return open_paths, focused
 
 
-def collect_agents_map(terminals, open_paths, effective_agent_fn):
-    """Compute {path: agent_id} for the session snapshot — the RUNNING agent.
+def collect_harnesses_map(terminals, open_paths, effective_harness_fn):
+    """Compute {path: harness_id} for the session snapshot — the RUNNING harness.
 
     terminals          : dict[path → TerminalView-like] (needs
-                         .spawned_agent_signature())
+                         .spawned_harness_signature())
     open_paths         : paths being persisted (from collect_session_state)
-    effective_agent_fn : fallback resolver (settings.effective_agent), used
+    effective_harness_fn : fallback resolver (settings.effective_harness), used
                          ONLY for a path missing from terminals (defensive —
                          open_paths is sourced from terminals, so this leg is
                          normally never taken)
 
-    The persisted agent must be the one the live child was actually spawned
+    The persisted harness must be the one the live child was actually spawned
     with (spawn-time truth, the same source the restart prompt reads), NOT the
-    one settings would resolve today. Saved-agent-wins (A2) restores a project
-    with its saved agent even when settings disagree; deriving the save half
-    from settings would re-save that project under the settings agent and the
+    one settings would resolve today. Saved-harness-wins (A2) restores a project
+    with its saved harness even when settings disagree; deriving the save half
+    from settings would re-save that project under the settings harness and the
     NEXT restore would silently drop the running session.
     """
-    agents = {}
+    out = {}
     for path in open_paths:
         tv = terminals.get(path)
         if tv is not None:
-            agents[path] = tv.spawned_agent_signature()
+            out[path] = tv.spawned_harness_signature()
         else:
-            agents[path] = effective_agent_fn(path)
-    return agents
+            out[path] = effective_harness_fn(path)
+    return out
 
 
 def plan_restore(open_paths, focused_path, active_map):

@@ -47,7 +47,7 @@ def test_should_save_session_decision_table():
 def _save_fake(tmp_path, *, any_started, terminals=None):
     """A duck-typed AppWindow self for _save_session, pointed at a temp session
     file via monkeypatched SESSION_FILE (set by the caller)."""
-    s = types.SimpleNamespace(resume_projects=True, effective_agent=lambda p: 'claude')
+    s = types.SimpleNamespace(resume_projects=True, effective_harness=lambda p: 'claude')
     fake = types.SimpleNamespace(
         _settings=s,
         _terminals=terminals or {},
@@ -59,7 +59,7 @@ def _save_fake(tmp_path, *, any_started, terminals=None):
 
 def _live_term(agent='claude'):
     t = types.SimpleNamespace(_child_pid=4242)
-    t.spawned_agent_signature = lambda: agent
+    t.spawned_harness_signature = lambda: agent
     return t
 
 
@@ -212,7 +212,7 @@ def _spawnfail_fake():
         _warned_spawn_fail=set(),
     )
     fake._show_toast = lambda text, timeout=5: toasts.append((text, timeout))
-    fake._spawn_failure_toast_text = lambda agent_id, raw: f'{agent_id} not found'
+    fake._spawn_failure_toast_text = lambda harness_id, raw: f'{harness_id} not found'
     return fake, toasts
 
 

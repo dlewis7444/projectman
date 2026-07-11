@@ -25,6 +25,21 @@ headerbar {
     background-color: alpha(#008df8, 0.20);
 }
 
+/* Host section: square, cyan wash (section chrome, not project row) */
+.pm-sidebar list.navigation-sidebar row.pm-host-section {
+    background-color: alpha(#00d4ff, 0.10);
+    box-shadow: inset 0 1px alpha(#00d4ff, 0.40);
+}
+.pm-sidebar list.navigation-sidebar row.pm-host-section:hover {
+    background-color: alpha(#00d4ff, 0.16);
+}
+.pm-sidebar list.navigation-sidebar row.pm-host-section:selected {
+    background-color: alpha(#00d4ff, 0.14);
+}
+.pm-host-section-title {
+    color: #7ee8ff;
+}
+
 row.active-project { background: alpha(#008df8, 0.15); }
 
 .status-dot.status-stopped { background: alpha(currentColor, 0.08); }

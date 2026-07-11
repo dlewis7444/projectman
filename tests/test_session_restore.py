@@ -2,7 +2,10 @@ import json
 import os
 import types
 import pytest
-from session import save_session, load_session, filter_active_paths, collect_session_state, plan_restore
+from session import (
+    save_session, load_session, load_hosts, filter_active_paths,
+    collect_session_state, plan_restore,
+)
 
 
 # ── save_session ──────────────────────────────────────────────────────────────
@@ -208,6 +211,87 @@ def test_plan_restore_focused_in_active_set():
     focused, bg = plan_restore(['/a', '/b'], '/a', active)
     assert focused == '/a'
     assert bg == ['/b']
+
+
+def test_plan_restore_focused_remote_ssh_ref(tmp_path):
+    """Remote ssh: paths stay in the restore plan when synthesized into active.
+
+    Regression: focused remotes were dropped because activation used
+    _find_project before the async remote list landed; background locals still
+    restored. Session v3 must keep focused remote in the plan.
+    """
+    path = str(tmp_path / 'session.json')
+    remote = 'ssh:abc123:myproj'
+    local = '/home/u/projects/local'
+    save_session(
+        path, [local, remote], remote,
+        harnesses={local: 'claude', remote: 'grok'},
+        hosts={local: 'localhost', remote: 'abc123'},
+    )
+    open_paths, focused_path = load_session(path)
+    assert focused_path == remote
+    assert remote in open_paths
+    assert load_hosts(path)[remote] == 'abc123'
+    # Local-only filter would drop remote — synthesis adds it back (window).
+    active = filter_active_paths(open_paths, [_proj(local)])
+    assert remote not in active
+    active[remote] = _proj(remote)  # synth stand-in
+    focused, bg = plan_restore(open_paths, focused_path, active)
+    assert focused == remote
+    assert local in bg
+
+
+def test_find_project_synth_does_not_recurse():
+    """_find_project must not call _project_for_session_path which calls find.
+
+    Regression 2026-07-10: maximum recursion depth exceeded on restore.
+    """
+    import types
+    from window import AppWindow
+    from hosts import HostProfile
+
+    # Minimal self: store empty, sidebar no remotes, one host profile.
+    class _Store:
+        def load_projects(self):
+            return []
+
+        def load_archived(self):
+            return []
+
+    class _Sidebar:
+        _remote_projects = {}
+
+    class _Settings:
+        def host_profiles(self):
+            return {
+                'abc123': HostProfile(
+                    id='abc123', ssh_target='box', display_name='box',
+                ),
+            }
+
+    fake = types.SimpleNamespace(
+        _store=_Store(),
+        _sidebar=_Sidebar(),
+        _settings=_Settings(),
+    )
+    # Attach unbound methods so find → synth works without full AppWindow.
+    fake._project_for_session_path = (
+        lambda path, s=fake: AppWindow._project_for_session_path(s, path)
+    )
+    fake._find_project = (
+        lambda path, s=fake: AppWindow._find_project(s, path)
+    )
+    path = 'ssh:abc123:myproj'
+    proj = fake._project_for_session_path(path)
+    assert proj is not None
+    assert proj.name == 'myproj'
+    assert proj.host_id == 'abc123'
+    found = fake._find_project(path)
+    assert found is not None
+    assert found.path == path
+    # Local path: synth returns None, find returns None
+    assert fake._project_for_session_path('/local/p') is None
+    assert fake._find_project('/local/p') is None
 
 
 def test_plan_restore_focused_null_when_not_in_active():

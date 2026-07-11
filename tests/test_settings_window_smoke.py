@@ -8,8 +8,7 @@ Tier Assignments apply to.
 
 These construct real GTK widgets headless (no display) like the sidebar tests,
 with ``SettingsWindow.present`` patched out so the unrealized window never
-needs a surface. They run in plain pytest, so they gate every commit AND the
-VM gate's pytest phase automatically.
+needs a surface. They run in plain pytest on every commit.
 
 Provider editing now lives in a dedicated ``ProviderEditorWindow`` sub-window
 (not the in-page ExpanderRow), so the tier-combo / editability tests open that
@@ -191,7 +190,7 @@ def test_override_provider_tiers_honored_and_editor_editable():
                             **{'openrouter': {'name': 'OR', 'base_url': 'http://b',
                                               'api_key': 'k', 'models': ['or-opus']}}},
                  model_default='',                       # native default
-                 model_overrides={'/p': 'openrouter'},  # project on openrouter
+                 provider_overrides={'/p': 'openrouter'},  # project on openrouter
                  tier_models={'openrouter': {'opus': 'or-opus'}})
     # Spawn side: the override provider's tiers are injected.
     env, reason = build_spawn_env(s, '/p')

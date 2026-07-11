@@ -178,12 +178,13 @@ def test_provider_defaults():
     s = Settings()
     assert s.providers == {}
     assert s.model_default == ''
-    assert s.model_overrides == {}
+    assert s.provider_overrides == {}
+    assert s.model_pins == {}
     assert s.tier_models == {}
-    # ccr/agent_default/agent_overrides are no longer fields
+    # ccr/harness_default/harness_overrides are no longer fields
     assert not hasattr(s, 'ccr_managed')
-    assert not hasattr(s, 'agent_default')
-    assert not hasattr(s, 'agent_overrides')
+    assert hasattr(s, 'harness_default')
+    assert hasattr(s, 'harness_overrides')
 
 
 def test_providers_roundtrip(tmp_path):
@@ -213,17 +214,33 @@ def test_effective_provider_global_default():
 
 def test_effective_provider_per_project_override():
     s = Settings(providers=_sample_providers(), model_default='ollama',
-                 model_overrides={'/p/a': ''})
+                 provider_overrides={'/p/a': ''})
     assert s.effective_provider('/p/a') == ''          # pinned to native
     assert s.effective_provider('/p/b') == 'ollama'    # follows default
 
 
-def test_effective_agent_always_claude():
-    # Claude Code is the sole harness; effective_agent is a kept back-compat
-    # symbol that now always returns 'claude'.
-    assert Settings().effective_agent('/p') == 'claude'
+def test_effective_harness_defaults_to_claude():
+    assert Settings().effective_harness('/p') == 'claude'
     assert Settings(providers=_sample_providers(),
-                    model_default='ollama').effective_agent('/p') == 'claude'
+                    model_default='ollama').effective_harness('/p') == 'claude'
+
+
+def test_effective_model_reads_model_pins_only():
+    s = Settings(providers=_sample_providers(), model_default='ollama',
+                 provider_overrides={'/p': 'ollama'},
+                 model_pins={'/p': 'ollama/qwen'})
+    assert s.effective_provider('/p') == 'ollama'
+    assert s.effective_model('/p') == 'ollama/qwen'
+    # Provider pin alone does not invent a model pin.
+    s2 = Settings(providers=_sample_providers(),
+                  provider_overrides={'/p': 'ollama'})
+    assert s2.effective_model('/p') == ''
+
+
+def test_stale_provider_override_falls_back_to_default():
+    s = Settings(providers=_sample_providers(), model_default='ollama',
+                 provider_overrides={'/p': 'not-a-provider'})
+    assert s.effective_provider('/p') == 'ollama'
 
 
 def test_uses_custom_provider():
@@ -247,7 +264,7 @@ def test_any_custom_provider_active():
     assert s.any_custom_provider_active() is True
     # custom only via a per-project override
     s2 = Settings(providers=_sample_providers(),
-                  model_overrides={'/p/a': 'ollama'})
+                  provider_overrides={'/p/a': 'ollama'})
     assert s2.any_custom_provider_active() is True
 
 
