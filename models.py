@@ -31,6 +31,8 @@ import json
 import urllib.request
 
 NATIVE_LABEL = 'Anthropic (native)'
+GROK_NATIVE_LABEL = 'Grok (native)'
+OPENCODE_NATIVE_LABEL = 'OpenCode (native)'
 
 # Claude Code treats a trailing ``[1m]`` on a model id as a 1M-token context
 # window (modelMax = 1_000_000) and strips the suffix before the API call.
@@ -41,6 +43,11 @@ _1M_SUFFIX = '[1m]'
 # default" (i.e. remove any override). Safe because a real provider id is a
 # non-empty dict key and never this string.
 FOLLOW_DEFAULT = '__default__'
+
+# Harness-native "provider" sentinels for the projects Provider submenu.
+# Distinct from real provider ids and from FOLLOW_DEFAULT.
+NATIVE_GROK = '__native_grok__'
+NATIVE_OPENCODE = '__native_opencode__'
 
 # The label shown for a tier's "use the provider's default model" entry.
 TIER_DEFAULT_LABEL = 'Default'
@@ -89,12 +96,66 @@ def provider_label(providers, pid):
     """
     if not pid:
         return NATIVE_LABEL
+    if pid == NATIVE_GROK:
+        return GROK_NATIVE_LABEL
+    if pid == NATIVE_OPENCODE:
+        return OPENCODE_NATIVE_LABEL
     if not isinstance(providers, dict):
         return pid
     prov = providers.get(pid)
     if not isinstance(prov, dict):
         return pid
     return prov.get('name') or pid
+
+
+def build_provider_menu_entries(settings, harness_id):
+    """Entries for the projects-tab Provider submenu.
+
+    One native option for the effective harness only (Gio.Menu cannot grey
+    items, so unselectable choices are omitted rather than shown disabled):
+
+      * Claude  → Anthropic (native) + every custom Settings provider
+      * Grok    → Grok (native) only
+      * OpenCode → OpenCode (native) only
+
+    Returns ``[(id, label, selectable)]`` — ``selectable`` is always True for
+    listed entries. Pure + defensive — never raises on bad settings shapes.
+    """
+    hid = harness_id or 'claude'
+    if hid == 'grok':
+        return [(NATIVE_GROK, GROK_NATIVE_LABEL, True)]
+    if hid == 'opencode':
+        return [(NATIVE_OPENCODE, OPENCODE_NATIVE_LABEL, True)]
+    # Claude (or unknown): Anthropic native + customs.
+    entries = [('', NATIVE_LABEL, True)]
+    providers = getattr(settings, 'providers', None)
+    if isinstance(providers, dict):
+        for pid in sorted(providers):
+            prov = providers.get(pid)
+            if not isinstance(prov, dict):
+                continue
+            label = prov.get('name') or pid
+            entries.append((pid, label, True))
+    return entries
+
+
+def provider_menu_current(settings, project_path='', harness_id=None):
+    """Concrete radio target for the Provider submenu (never FOLLOW_DEFAULT).
+
+    Claude → ``effective_provider`` (Settings default or per-project pin).
+    Grok / OpenCode → their native sentinel (model owned by the harness).
+    """
+    if harness_id is None:
+        harness_id = getattr(settings, 'effective_harness', lambda p: 'claude')(
+            project_path)
+    if harness_id == 'grok':
+        return NATIVE_GROK
+    if harness_id == 'opencode':
+        return NATIVE_OPENCODE
+    try:
+        return settings.effective_provider(project_path) or ''
+    except Exception:
+        return getattr(settings, 'model_default', '') or ''
 
 
 def validate_providers(parsed):

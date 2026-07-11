@@ -74,7 +74,7 @@ def test_journal_created_when_missing(tmp_path):
     assert not journal.exists()
     if not journal.exists():
         journal.write_text(
-            '<!-- PAA session journal. Written by the agent, never overwritten by PM. -->\n'
+            '<!-- PAA session journal. Written by the harness, never overwritten by PM. -->\n'
         )
     assert journal.exists()
 

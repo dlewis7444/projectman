@@ -4,8 +4,80 @@ All notable changes to ProjectMan will be documented in this file.
 
 ## [Unreleased]
 
-_Nothing yet. Deferred UX polish TODOs (editor unsaved-changes affordance;
-sidebar new-project count while inline-edit row is visible) remain open._
+_Deferred UX polish TODOs (editor unsaved-changes affordance; sidebar
+new-project count while inline-edit row is visible) remain open._
+
+## [1.4.2] - 2026-07-10
+
+### Changed
+- **Sidebar host filter labels:** under each host name, modes read
+  `(all projects)`, `(active projects)`, `(projects hidden)` (was
+  `(all)` / `(active)` / `(hide)`); filter label font 10px → 11px.
+- **`install.sh` status-bridge footer:** bullet list instead of a dense
+  text wall so each harness line is scannable; **OpenCode** / **Grok**
+  product capitalization in that footer.
+- **`install.sh` session-bus check:** warn only when no session bus is
+  available (and no `dbus-launch` / `dbus-run-session` either). Stops the
+  false-positive `dbus-x11` warning on Fedora Workstation (dbus-broker
+  session bus is already present without `dbus-launch`).
+
+## [1.4.1] - 2026-07-10
+
+### Changed
+- **Settings dual-axis split:** per-project pins no longer share one
+  `model_overrides` map. **`provider_overrides`** holds provider ids
+  (`''` = native; absent = follow `model_default`). **`model_pins`** holds
+  optional model ids for harness `-m` (Grok/OpenCode today). Both axes are
+  harness-agnostic storage so custom providers can later apply to all three
+  harnesses without another settings rewrite. Legacy `model_overrides` is
+  dual-read once on load and split; save writes only the new keys.
+- Harness switch clears **both** provider and model pins for that project.
+
+### Notes
+- Closes the dual-use follow-up from 1.4.0 (provider pin vs model pin sharing
+  one map).
+- Future native model pickers should write `model_pins` only; Provider menu
+  continues to write `provider_overrides`.
+
+## [1.4.0] - 2026-07-10
+
+Harness-agnostic multi-backend release (Claude Code, OpenCode, Grok Build).
+
+### Added
+- **Multi-harness cockpit:** Claude Code, OpenCode, and Grok Build as first-class
+  backends (pick per project). Adapter seam in `harnesses.py`; status bridges
+  under `bridges/opencode/` and `bridges/grok/`.
+- **Settings → Harnesses** page: default harness, per-harness binary, doctor-lite,
+  account lines, bridge install/update.
+- **Projects right-click → Harness** menu: Claude Code / OpenCode / Grok Build
+  with `(default)` on the global default.
+- **Projects right-click → Provider** menu: one native option for the effective
+  harness (Anthropic / Grok / OpenCode) plus Claude custom providers from Settings.
+- **Claude model axis** retained: Settings → Models providers, tiers, max context,
+  1M toggle, Fable (from 1.3.0). Grok/OpenCode models stay harness-owned configs.
+- **Settings → Models:** “Default Provider, Claude Code” plus Grok/OpenCode
+  “(future)” placeholders; native sections show “Managed by the harness”.
+
+### Changed
+- **Terminology:** UI and code use **Harness** (not “Agent”) for Claude Code /
+  OpenCode / Grok Build. Projects menu **Provider** (not “Model”) for the
+  provider/native picker. Settings keys: `harnesses` / `harness_default` /
+  `harness_overrides` (dual-read legacy `agents` / `agent_*` on load; first save
+  rewrites to the new shape). Session `open_paths[].harness` dual-reads legacy
+  `agent`.
+- **ccr removed:** Claude custom providers use direct env injection via
+  `models.build_spawn_env` (no claude-code-router sidecar).
+- **Harness switch** clears the project’s provider pin and sticky spawn harness
+  so the next session follows the new harness default.
+- **OpenCode** display name is `OpenCode` (product branding).
+
+### Fixed
+- **`install.sh` status-bridge install** after the harness rename (was calling
+  undefined `agents.install_harness_bridge` with stderr silenced). Now uses
+  `harnesses.install_harness_bridge` and surfaces failures.
+
+### Notes
+- Dual-use `model_overrides` follow-up landed in **1.4.1**.
 
 ## [1.3.0] - 2026-07-09
 
@@ -223,9 +295,7 @@ sidebar new-project count while inline-edit row is visible) remain open._
   a grok config declares no `[models] default`, the label now reads "built-in
   default (managed by Grok Build)" instead of promoting a lone `[model.*]` block
   as if it were active — the real default in that case is grok's built-in model,
-  invisible to the config. _(release gate round 2 — the cross-instrument
-  correction: a coherence-sweep candidate fix was disproven by a subscriber's
-  live turn.)_
+  invisible to the config.
 - **First-launch papercuts.** A fresh install now writes `settings.json` on the
   first launch (defaults persisted, not just held in memory); the empty-state
   placeholder reads "Select a project in the sidebar to start a session"; the
@@ -441,9 +511,8 @@ _(Version 1.1.0 was never released; the label is retired.)_
   `caps.resume_by_id`; and `resolve_adapter()` distinguishes a named-but-missing
   agent so `window.py` can show a one-shot "agent 'X' not available" toast.
 - opencode session-list parsing is fixture-tested (recorded shapes under
-  `tests/fixtures/opencode/`, marked to-be-verified on the VM gate); the parser
-  is layered and defensive (JSON CLI → storage scan) against opencode's
-  cross-version CLI/storage drift.
+  `tests/fixtures/opencode/`); the parser is layered and defensive
+  (JSON CLI → storage scan) against opencode's cross-version CLI/storage drift.
 
 ## [1.0.3] - 2026-06-09
 

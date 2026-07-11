@@ -143,3 +143,50 @@ def test_follow_default_sentinel_is_not_a_provider_id():
     # FOLLOW_DEFAULT must never collide with '' or a provider id
     assert FOLLOW_DEFAULT != ''
     assert FOLLOW_DEFAULT not in TIERS
+
+
+# ── Provider menu entries (projects right-click) ──────────────────────────────
+
+def test_build_provider_menu_entries_claude_selectables():
+    from models import build_provider_menu_entries, NATIVE_GROK, NATIVE_OPENCODE
+    from settings import Settings
+    s = Settings(providers={'ollama': {'name': 'Ollama', 'base_url': 'x', 'models': []}})
+    entries = build_provider_menu_entries(s, 'claude')
+    ids = [e[0] for e in entries]
+    assert ids == ['', 'ollama']
+    assert all(e[2] for e in entries)
+    assert NATIVE_GROK not in ids
+    assert NATIVE_OPENCODE not in ids
+
+
+def test_build_provider_menu_entries_opencode_only_native():
+    from models import build_provider_menu_entries, NATIVE_OPENCODE
+    from settings import Settings
+    s = Settings(providers={'ollama': {'name': 'Ollama', 'base_url': 'x', 'models': []}})
+    entries = build_provider_menu_entries(s, 'opencode')
+    assert len(entries) == 1
+    assert entries[0][0] == NATIVE_OPENCODE
+    assert entries[0][2] is True
+
+
+def test_provider_menu_current_claude_uses_model_default():
+    from models import provider_menu_current
+    from settings import Settings
+    s = Settings(model_default='ollama',
+                 providers={'ollama': {'name': 'Ollama', 'base_url': 'x', 'models': []}})
+    assert provider_menu_current(s, '/p', 'claude') == 'ollama'
+
+
+def test_provider_menu_current_grok_is_native_sentinel():
+    from models import provider_menu_current, NATIVE_GROK
+    from settings import Settings
+    s = Settings(harness_default='grok', model_default='ollama')
+    assert provider_menu_current(s, '/p', 'grok') == NATIVE_GROK
+
+
+def test_default_model_label_claude_uses_settings_provider():
+    import harness_configs as ac
+    from settings import Settings
+    s = Settings(harness_default='claude', model_default='ollama',
+                 providers={'ollama': {'name': 'Ollama', 'base_url': 'x', 'models': []}})
+    assert ac.default_model_label(s) == 'Ollama'

@@ -10,7 +10,7 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import GObject, Gio, GLib
 
 
-# Canonical, agent-neutral status dir (PM-owned, Decision 2). The opencode
+# Canonical, harness-neutral status dir (PM-owned, Decision 2). The opencode
 # bridge and (now) hook.js both write here.
 STATUS_DIR = os.path.expanduser('~/.ProjectMan/status')
 # Legacy Claude-scoped dir. StatusWatcher dual-watches it through the
@@ -25,6 +25,27 @@ class Project:
     name: str
     path: str
     is_archived: bool = False
+    # Host axis: 'localhost' or a configured remote host id.
+    # localhost: ``path`` is the local realpath.
+    # remote: ``path`` is the unique project_ref (``ssh:<id>:<name>``) for
+    # dict/stack keys; ``remote_cwd`` is the path used on the remote host.
+    host_id: str = 'localhost'
+    remote_cwd: str | None = None
+
+    @property
+    def project_ref(self) -> str:
+        """Stable settings/session key for this project."""
+        from hosts import encode_project_ref, LOCALHOST_ID
+        if self.host_id == LOCALHOST_ID or not self.host_id:
+            return encode_project_ref(LOCALHOST_ID, self.path)
+        return encode_project_ref(self.host_id, self.name)
+
+    @property
+    def spawn_cwd(self) -> str:
+        """Working directory for the harness process (local or remote)."""
+        if self.remote_cwd:
+            return self.remote_cwd
+        return self.path
 
 
 @dataclass
@@ -45,7 +66,7 @@ class StatusSnapshot:
     state: str = 'done'
     # F11 phase-aging fields (agent-generic; today only the grok bridge stamps
     # them). ``phase`` marks a sub-state within ``state`` — currently only
-    # ``pre_tool_use`` is meaningful: the agent fired its pre-tool hook and the
+    # ``pre_tool_use`` is meaningful: the harness fired its pre-tool hook and the
     # wire went silent, which is either a fast approved tool (clears in <1s) or
     # a permission prompt waiting on the human (grok has NO fires-at-prompt
     # event — mini-probe finding, 54s/21s observed silences). ``phase_ts`` is
@@ -197,6 +218,9 @@ class StatusWatcher(GObject.GObject):
     def __init__(self, *, now_fn=None, schedule_fn=None):
         super().__init__()
         self._status: dict = {}
+        # Remote (or other external) status keyed by Project.path — survives
+        # local-dir _reload so SSH-polled snapshots are not wiped by inotify.
+        self._external_status: dict = {}
         self._monitors = []
         # F11 phase-aging injection points. ``now_fn() -> epoch seconds`` is the
         # clock; ``schedule_fn(seconds, callback)`` arms a one-shot timer whose
@@ -378,8 +402,47 @@ class StatusWatcher(GObject.GObject):
             return 'waiting'
         return snapshot.state
 
+    def publish_external(self, key, snapshot):
+        """Publish a status snapshot under an arbitrary key (e.g. remote project.path).
+
+        Does not touch the local-file map; survives ``_reload``. Emits
+        ``status-changed`` so the sidebar can refresh dots. Arms F11 phase
+        aging so remote ``pre_tool_use`` silence promotes working→waiting.
+        """
+        if not key or snapshot is None:
+            return
+        self._external_status[key] = snapshot
+        # Merge external + local for phase-timer arming (local-only arm misses
+        # remote snaps and leaves Grok stuck on yellow working without waiting).
+        merged = dict(self._status)
+        merged.update(self._external_status)
+        self._arm_phase_timer(merged)
+        self.emit('status-changed')
+
+    def clear_external_prefix(self, prefix: str):
+        """Drop external keys starting with *prefix* (unused helper for host remove)."""
+        if not prefix:
+            return
+        drop = [k for k in self._external_status if k.startswith(prefix)]
+        for k in drop:
+            del self._external_status[k]
+
+    def clear_external_key(self, key: str):
+        """Drop one external status key (e.g. remote project with no status file)."""
+        if key and key in self._external_status:
+            del self._external_status[key]
+
     def get_project_status(self, project):
         snapshot = self._status.get(project.path)
+        if snapshot is None:
+            snapshot = self._external_status.get(project.path)
+        if snapshot is None:
+            # Remote projects: also try spawn_cwd / remote_cwd if something
+            # published under the remote absolute path.
+            alt = getattr(project, 'remote_cwd', None) or getattr(
+                project, 'spawn_cwd', None)
+            if alt and alt != project.path:
+                snapshot = self._status.get(alt) or self._external_status.get(alt)
         if snapshot is None:
             return 'idle'
         # If the same session later moved its cwd into a subdirectory (e.g.
@@ -389,13 +452,15 @@ class StatusWatcher(GObject.GObject):
         # snapshot among the project root and any same-session subdirectories.
         # The session-ID guard keeps independent worktree sessions from leaking
         # in — they have different session IDs.
-        prefix = project.path + os.sep
+        # Local path prefix rollup only (remote keys are opaque ssh: refs).
         best = snapshot
-        for path, s in self._status.items():
-            if (path.startswith(prefix)
-                    and s.session == snapshot.session
-                    and s.ts > best.ts):
-                best = s
+        if not str(project.path).startswith('ssh:'):
+            prefix = project.path + os.sep
+            for path, s in self._status.items():
+                if (path.startswith(prefix)
+                        and s.session == snapshot.session
+                        and s.ts > best.ts):
+                    best = s
         # F11: read through the phase-aging promotion (no-phase snapshots pass
         # through unchanged).
         return self._effective_state(best)

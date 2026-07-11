@@ -5,9 +5,9 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Gio, GLib, GObject, Gdk, Pango
 
-import agents
+import harnesses
 from model import ResourceReader
-from models import FOLLOW_DEFAULT, NATIVE_LABEL, provider_label
+from models import FOLLOW_DEFAULT, NATIVE_LABEL
 
 
 class Sidebar(Gtk.Box):
@@ -22,10 +22,14 @@ class Sidebar(Gtk.Box):
         'project-rename':       (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         'show-archive-window':  (GObject.SignalFlags.RUN_FIRST, None, ()),
         'show-settings':        (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'project-create':       (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # host_id, project name
+        'project-create':       (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         'show-paa-window':      (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-haiku-check':  (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
+        'project-harness-change': (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
+        # host_id, expanded
+        'host-section-toggled': (GObject.SignalFlags.RUN_FIRST, None, (str, bool)),
     }
 
     def __init__(self, store, history, watcher, version='', settings=None):
@@ -35,31 +39,35 @@ class Sidebar(Gtk.Box):
         # ``history`` retained only for back-compat construction; the expander
         # now pulls sessions through the per-project adapter (A1), not the
         # HistoryReader directly. ``settings`` lets each row resolve its
-        # effective agent so the seam is load-bearing.
+        # effective harness so the seam is load-bearing.
         self._history = history
         self._settings = settings
         self._watcher = watcher
         self._rows = {}
+        self._section_headers = {}  # host_id → HostSectionHeader
+        self._row_host = {}         # path → host_id
         self._new_project_row = None
-        self._active_only = False
+        self._new_project_host_id = 'localhost'
         self._filter_text = ''
         # Per-project model menu state, pushed in via set_model_options().
         self._model_options = []
         self._model_overrides = {}
         self._global_model_label = NATIVE_LABEL
+        # Remote project lists keyed by host_id (Phase 2 fills these).
+        self._remote_projects = {}  # host_id → list[Project]
+        self._host_health = {}      # host_id → 'grey'|'green'|'yellow'|'red'
+        # Durable process state — survives process-started BEFORE the row exists
+        # (remote restore spawns SSH, then async list builds rows later).
+        # path → (state, is_zellij|None)
+        self._process_states = {}
+        # path → harness_id | None (C5 running harness)
+        self._running_harnesses = {}
 
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         btn_row.set_halign(Gtk.Align.END)
         btn_row.set_margin_top(6)
         btn_row.set_margin_end(8)
         btn_row.set_margin_bottom(2)
-
-        add_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
-        add_btn.add_css_class('flat')
-        add_btn.add_css_class('circular')
-        add_btn.set_tooltip_text('New Project')
-        add_btn.connect('clicked', self._on_add_project)
-        btn_row.append(add_btn)
 
         self._paa_btn = Gtk.Button()
         # FB-8 (C9): a BUNDLED symbolic icon, not a bare U+2728 Gtk.Label \u2014 the
@@ -104,16 +112,8 @@ class Sidebar(Gtk.Box):
         self._count_label.set_margin_bottom(0)
         self.append(self._count_label)
 
-        # "Active Only" toggle — hides inactive projects to reduce clutter
-        self._active_toggle = Gtk.ToggleButton(label='Active Only')
-        self._active_toggle.add_css_class('flat')
-        self._active_toggle.add_css_class('pm-sidebar-btn')
-        self._active_toggle.set_margin_start(8)
-        self._active_toggle.set_margin_end(8)
-        self._active_toggle.set_margin_top(4)
-        self._active_toggle.set_margin_bottom(0)
-        self._active_toggle.connect('toggled', self._on_active_toggled)
-        self.append(self._active_toggle)
+        # Active Only toggle removed: click a host header to cycle
+        # hide all → active only → show all (per section).
 
         # "Archived Projects" opens popup window
         archive_btn = Gtk.Button(label='Archived Projects')
@@ -135,98 +135,213 @@ class Sidebar(Gtk.Box):
         self._populate()
 
     def _filter_row(self, row):
+        if isinstance(row, HostSectionHeader):
+            return True
+        if isinstance(row, NewProjectEntryRow):
+            # Only show while the target section is not fully hidden.
+            return self._section_mode(self._new_project_host_id) != 'hidden'
         if isinstance(row, ProjectRow):
-            if self._active_only and row._process_state not in ('attached', 'detached'):
+            host_id = self._row_host.get(row._project.path, getattr(
+                row._project, 'host_id', 'localhost'))
+            mode = self._section_mode(host_id)
+            if mode == 'hidden':
+                return False
+            if mode == 'active' and row._process_state not in ('attached', 'detached'):
                 return False
             if self._filter_text and self._filter_text not in row._project.name.lower():
                 return False
         return True
 
+    def _section_mode(self, host_id):
+        if self._settings is not None:
+            return self._settings.section_mode(host_id)
+        return 'all'
+
+    def _is_section_expanded(self, host_id):
+        return self._section_mode(host_id) != 'hidden'
+
     def set_filter_text(self, text):
         self._filter_text = text.lower()
         self._listbox.invalidate_filter()
 
+    def _host_order(self):
+        """localhost first, then remotes in stable settings order."""
+        from hosts import LOCALHOST_ID
+        order = [LOCALHOST_ID]
+        if self._settings is not None:
+            for hid in self._settings.host_profiles():
+                if hid not in order:
+                    order.append(hid)
+        return order
+
+    def _projects_for_host(self, host_id):
+        from hosts import LOCALHOST_ID
+        if host_id == LOCALHOST_ID:
+            return list(self._store.load_projects())
+        return list(self._remote_projects.get(host_id, []))
+
+    def _append_project_row(self, proj, running_state, running_agent):
+        row = ProjectRow(proj, self._history, self._watcher,
+                         settings=self._settings)
+        # Prefer durable maps (survive spawn-before-row), then row snapshot.
+        if proj.path in self._process_states:
+            st, zj = self._process_states[proj.path]
+            row.set_process_state(st, is_zellij=zj)
+        elif proj.path in running_state:
+            row._process_state = running_state[proj.path]
+            row.update_status()
+        if proj.path in self._running_harnesses:
+            row.set_running_harness(self._running_harnesses[proj.path])
+        elif running_agent.get(proj.path) is not None:
+            row.set_running_harness(running_agent[proj.path])
+        row.connect('session-activated',
+                    lambda r, p, sid, pp=proj.path: self.emit('session-activated', pp, sid))
+        # Archive only for localhost projects
+        from hosts import LOCALHOST_ID
+        if getattr(proj, 'host_id', LOCALHOST_ID) == LOCALHOST_ID:
+            row.connect('project-archive',
+                        lambda r, p=proj.path: self.emit('project-archive', p))
+        row.connect('project-deactivate',
+                    lambda r, p=proj.path: self.emit('project-deactivate', p))
+        row.connect('project-new-session',
+                    lambda r, p=proj.path: self.emit('project-new-session', p))
+        row.connect('project-zellij',
+                    lambda r, p=proj.path: self.emit('project-zellij', p))
+        row.connect('project-ntfy-toggle',
+                    lambda r, p=proj.path: self.emit('project-ntfy-toggle', p))
+        row.connect('project-haiku-check',
+                    lambda r, p=proj.path: self.emit('project-haiku-check', p))
+        row.connect('project-rename',
+                    lambda r, new_name, p=proj.path: self.emit('project-rename', p, new_name))
+        row.connect('project-model-change',
+                    lambda r, mid, p=proj.path: self.emit('project-model-change', p, mid))
+        row.connect('project-harness-change',
+                    lambda r, aid, p=proj.path: self.emit('project-harness-change', p, aid))
+        row.set_model_options(
+            self._model_options,
+            self._model_overrides.get(proj.path, FOLLOW_DEFAULT),
+            self._global_model_label,
+        )
+        self._listbox.append(row)
+        self._rows[proj.path] = row
+        self._row_host[proj.path] = getattr(proj, 'host_id', 'localhost')
+
     def _populate(self):
+        from hosts import LOCALHOST_ID
         # Preserve the in-progress new-project entry across rebuilds
         pending_row = self._new_project_row
+        pending_host = self._new_project_host_id
         if pending_row is not None:
             self._listbox.remove(pending_row)
             self._new_project_row = None
-        # Preserve process running state across rebuilds
+        # Snapshot row state (also mirrored into durable maps by setters).
         running_state = {path: row._process_state for path, row in self._rows.items()}
-        # Preserve the live running-agent (C5) across rebuilds too, so a refresh
-        # doesn't drop the mismatch subtitle of a still-running session.
-        running_agent = {path: row._running_agent for path, row in self._rows.items()}
+        running_agent = {path: row._running_harness for path, row in self._rows.items()}
 
         self._rows.clear()
+        self._row_host.clear()
+        self._section_headers.clear()
         while True:
             row = self._listbox.get_row_at_index(0)
             if row is None:
                 break
             self._listbox.remove(row)
 
-        for proj in self._store.load_projects():
-            row = ProjectRow(proj, self._history, self._watcher,
-                             settings=self._settings)
-            if proj.path in running_state:
-                row._process_state = running_state[proj.path]
-                row.update_status()
-            if running_agent.get(proj.path) is not None:
-                row.set_running_agent(running_agent[proj.path])
-            row.connect('session-activated',
-                        lambda r, p, sid, pp=proj.path: self.emit('session-activated', pp, sid))
-            row.connect('project-archive',
-                        lambda r, p=proj.path: self.emit('project-archive', p))
-            row.connect('project-deactivate',
-                        lambda r, p=proj.path: self.emit('project-deactivate', p))
-            row.connect('project-new-session',
-                        lambda r, p=proj.path: self.emit('project-new-session', p))
-            row.connect('project-zellij',
-                        lambda r, p=proj.path: self.emit('project-zellij', p))
-            row.connect('project-ntfy-toggle',
-                        lambda r, p=proj.path: self.emit('project-ntfy-toggle', p))
-            row.connect('project-haiku-check',
-                        lambda r, p=proj.path: self.emit('project-haiku-check', p))
-            row.connect('project-rename',
-                        lambda r, new_name, p=proj.path: self.emit('project-rename', p, new_name))
-            row.connect('project-model-change',
-                        lambda r, mid, p=proj.path: self.emit('project-model-change', p, mid))
-            row.set_model_options(
-                self._model_options,
-                self._model_overrides.get(proj.path, FOLLOW_DEFAULT),
-                self._global_model_label,
+        for host_id in self._host_order():
+            title = 'localhost'
+            show_health = False
+            if host_id != LOCALHOST_ID and self._settings is not None:
+                prof = self._settings.host_profiles().get(host_id)
+                title = prof.title() if prof is not None else host_id
+                show_health = True
+            mode = self._section_mode(host_id)
+            header = HostSectionHeader(
+                host_id=host_id,
+                title=title,
+                expanded=mode != 'hidden',
+                show_health=show_health,
+                on_toggle=self._on_section_toggle,
+                on_add_project=self._on_section_add_project,
             )
-            self._listbox.append(row)
-            self._rows[proj.path] = row
+            header.set_filter_mode(mode)
+            health = self._host_health.get(host_id, 'grey')
+            header.set_health(health)
+            self._listbox.append(header)
+            self._section_headers[host_id] = header
 
-        if pending_row is not None:
-            self._new_project_row = pending_row
-            self._listbox.prepend(pending_row)
-            GLib.idle_add(lambda: pending_row._entry.grab_focus() and False)
+            projects = self._projects_for_host(host_id)
+            for proj in projects:
+                if not getattr(proj, 'host_id', None):
+                    proj.host_id = host_id
+                self._append_project_row(proj, running_state, running_agent)
 
+            # Pending new-project row sits under its host section
+            if pending_row is not None and pending_host == host_id:
+                self._new_project_row = pending_row
+                self._new_project_host_id = pending_host
+                self._listbox.append(pending_row)
+                GLib.idle_add(lambda: pending_row._entry.grab_focus() and False)
+
+        self._refresh_section_counts()
         self._update_count_label()
+        self._listbox.invalidate_filter()
 
-    def _on_row_activated(self, listbox, row):
-        if isinstance(row, ProjectRow):
-            self.emit('project-activated', row._project.path)
-
-    def _on_active_toggled(self, button):
-        self._active_only = button.get_active()
+    def _on_section_toggle(self, host_id):
+        """Cycle section filter: hidden → active → all → hidden."""
+        order = ('hidden', 'active', 'all')
+        cur = self._section_mode(host_id)
+        try:
+            nxt = order[(order.index(cur) + 1) % len(order)]
+        except ValueError:
+            nxt = 'all'
+        if self._settings is not None:
+            self._settings.set_section_mode(host_id, nxt)
+        header = self._section_headers.get(host_id)
+        if header is not None:
+            header.set_expanded(nxt != 'hidden')
+            header.set_filter_mode(nxt)
+        self.emit('host-section-toggled', host_id, nxt != 'hidden')
         self._listbox.invalidate_filter()
         self._update_count_label()
 
+    def _on_section_add_project(self, host_id):
+        # Creating requires the section not fully hidden.
+        if self._section_mode(host_id) == 'hidden' and self._settings is not None:
+            self._settings.set_section_mode(host_id, 'all')
+            header = self._section_headers.get(host_id)
+            if header is not None:
+                header.set_expanded(True)
+                header.set_filter_mode('all')
+            self.emit('host-section-toggled', host_id, True)
+            self._listbox.invalidate_filter()
+        self._on_add_project(None, host_id=host_id)
+
+    def _on_row_activated(self, listbox, row):
+        if isinstance(row, HostSectionHeader):
+            self._on_section_toggle(row.host_id)
+            return
+        if isinstance(row, ProjectRow):
+            self.emit('project-activated', row._project.path)
+
+    def _refresh_section_counts(self):
+        """Update each section header's active(total) counts."""
+        from collections import defaultdict
+        totals = defaultdict(int)
+        actives = defaultdict(int)
+        for path, row in self._rows.items():
+            hid = self._row_host.get(path, 'localhost')
+            totals[hid] += 1
+            if row._process_state in ('attached', 'detached'):
+                actives[hid] += 1
+        # Remote hosts with zero cached projects still need 0(0)
+        for host_id, header in self._section_headers.items():
+            header.set_counts(actives.get(host_id, 0), totals.get(host_id, 0))
+
     def _update_count_label(self):
-        if self._active_only:
-            n = sum(1 for row in self._rows.values()
-                    if row._process_state in ('attached', 'detached'))
-            self._count_label.set_label(f'{n} active')
-        else:
-            # TODO: also count the pending new-project inline-edit row so the
-            # label doesn't read "0 projects" while that row is visible — it's
-            # prepended to the listbox in _populate but intentionally kept out
-            # of _rows until commit. (release gate engineer, )
-            n = len(self._rows)
-            self._count_label.set_label(f'{n} projects')
+        active_n = sum(1 for row in self._rows.values()
+                       if row._process_state in ('attached', 'detached'))
+        total_n = len(self._rows)
+        self._count_label.set_label(f'{active_n} active · {total_n} projects')
 
     def refresh_status(self):
         for row in self._rows.values():
@@ -236,24 +351,61 @@ class Sidebar(Gtk.Box):
         self._populate()
 
     def set_active_only(self, active):
-        self._active_toggle.set_active(active)
+        """No-op — Active Only button removed; host-header cycle replaces it.
+
+        Kept so window.py restore/spawn call sites do not break.
+        """
+        return
 
     def select_project(self, path):
         if path in self._rows:
             self._listbox.select_row(self._rows[path])
 
     def set_project_state(self, path, state: str, is_zellij: bool = None):
+        """Record process liveness for *path* even if the row is not built yet.
+
+        Remote restore spawns SSH before the async project list creates the
+        ProjectRow; without a durable map those starts were invisible to the
+        sidebar (instant reattach on click, grey dots, wrong active counts).
+        """
+        self._process_states[path] = (state, is_zellij)
         if path in self._rows:
             self._rows[path].set_process_state(state, is_zellij=is_zellij)
-            if self._active_only:
-                self._listbox.invalidate_filter()
-            self._update_count_label()
+        # Active-only sections need a refilter when process state changes.
+        self._listbox.invalidate_filter()
+        self._refresh_section_counts()
+        self._update_count_label()
 
-    def set_running_agent(self, path, agent_id):
+    def set_remote_projects(self, host_id, projects):
+        """Replace the cached project list for a remote host.
+
+        Rebuilds the sidebar only when the name set changes — health polls
+        must not thrash the whole list every 30s (UI freeze).
+        """
+        new = list(projects or [])
+        old = self._remote_projects.get(host_id, [])
+        self._remote_projects[host_id] = new
+        old_names = sorted(p.name for p in old)
+        new_names = sorted(p.name for p in new)
+        if old_names != new_names:
+            self._populate()
+        else:
+            # Counts may still change via process state; refresh header totals.
+            self._refresh_section_counts()
+
+    def set_host_health(self, host_id, state: str):
+        """Update micro health indicator on a remote section header."""
+        self._host_health[host_id] = state
+        header = self._section_headers.get(host_id)
+        if header is not None:
+            header.set_health(state)
+
+    def set_running_harness(self, path, harness_id):
         """Push the live child's actual agent onto a row (C5). ``None`` clears
-        it. No-op for an unknown path so window.py can fire unconditionally."""
+        it. Durable even when the row does not exist yet."""
+        self._running_harnesses[path] = harness_id
         if path in self._rows:
-            self._rows[path].set_running_agent(agent_id)
+            self._rows[path].set_running_harness(harness_id)
 
     def flash_sweeper_caught(self, path, duration_ms=2000):
         """Briefly italicize the project name to signal that the polling
@@ -274,21 +426,22 @@ class Sidebar(Gtk.Box):
             row.update_ntfy_visibility(enabled)
 
     def set_settings(self, settings):
-        """Push updated settings so rows re-resolve their effective provider.
+        """Push updated settings so rows re-resolve their effective harness.
 
-        Called from window.apply_settings after a model override change so the
-        per-row caps gating (A5) and session source (A1) follow the new
-        effective provider.
+        Called from window.apply_settings after a harness/model override change
+        so the per-row caps gating (A5) and session source (A1) follow the new
+        effective harness.
         """
         self._settings = settings
         for row in self._rows.values():
             row.set_settings(settings)
 
     def set_model_options(self, options, overrides, global_label):
-        """Push provider/model menu options to every project row.
+        """Push provider menu options to every project row.
 
-        options: list of (model_id, label). overrides: {path: 'provider/model'}.
-        global_label: label of the global default model.
+        Each row rebuilds its Provider submenu from settings (natives + customs,
+        selectable by effective harness). ``options`` / ``overrides`` /
+        ``global_label`` are kept for call-compat; rows prefer live settings.
         """
         self._model_options = list(options)
         self._model_overrides = dict(overrides)
@@ -354,29 +507,161 @@ class Sidebar(Gtk.Box):
         """Stop the golden glow animation."""
         self._paa_btn.remove_css_class('paa-btn-throb')
 
-    def _on_add_project(self, button):
+    def _on_add_project(self, button, host_id='localhost'):
         if self._new_project_row is not None:
             self._new_project_row._entry.grab_focus()
             return
+        # Ensure target section is expanded so the entry row is visible.
+        if not self._is_section_expanded(host_id):
+            if self._settings is not None:
+                self._settings.set_section_expanded(host_id, True)
+            header = self._section_headers.get(host_id)
+            if header is not None:
+                header.set_expanded(True)
+            self.emit('host-section-toggled', host_id, True)
         row = NewProjectEntryRow(
             on_commit=self._commit_new_project,
             on_cancel=self._cancel_new_project,
         )
         self._new_project_row = row
-        self._listbox.prepend(row)
+        self._new_project_host_id = host_id
+        # Insert after the section header for this host.
+        header = self._section_headers.get(host_id)
+        if header is not None:
+            idx = header.get_index()
+            self._listbox.insert(row, idx + 1)
+        else:
+            self._listbox.prepend(row)
+        self._listbox.invalidate_filter()
+        GLib.idle_add(lambda: row._entry.grab_focus() and False)
 
     def _commit_new_project(self, name):
         row = self._new_project_row
+        host_id = self._new_project_host_id
         self._new_project_row = None
+        self._new_project_host_id = 'localhost'
         if row is not None:
             self._listbox.remove(row)
-        self.emit('project-create', name)
+        self.emit('project-create', host_id, name)
 
     def _cancel_new_project(self):
         if self._new_project_row is None:
             return
         self._listbox.remove(self._new_project_row)
         self._new_project_row = None
+        self._new_project_host_id = 'localhost'
+
+
+class HostSectionHeader(Gtk.ListBoxRow):
+    """Section header for a host (localhost or remote).
+
+    Click cycles filter mode: hide all → active only → show all.
+    Shows optional health micro-dot and ``active(total)`` counts.
+    """
+
+    _MODE_TIPS = {
+        'hidden': 'Hidden — click for active only',
+        'active': 'Active only — click for show all',
+        'all': 'Show all — click to hide',
+    }
+    _MODE_LABELS = {
+        'all': '(all projects)',
+        'active': '(active projects)',
+        'hidden': '(projects hidden)',
+    }
+
+    def __init__(self, host_id, title, expanded, show_health, on_toggle, on_add_project):
+        super().__init__()
+        self.set_selectable(False)
+        self.set_activatable(True)
+        self.host_id = host_id
+        self._expanded = expanded
+        self._filter_mode = 'all' if expanded else 'hidden'
+        self._title_text = title
+        self._on_toggle = on_toggle
+        self._on_add_project = on_add_project
+        self.add_css_class('pm-host-section')
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_margin_start(8)
+        box.set_margin_end(4)
+        box.set_margin_top(8)
+        box.set_margin_bottom(6)
+
+        self._health_dot = Gtk.Box()
+        self._health_dot.add_css_class('host-health-dot')
+        self._health_dot.set_valign(Gtk.Align.CENTER)
+        self._health_dot.set_visible(show_health)
+        box.append(self._health_dot)
+
+        title_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        title_col.set_hexpand(True)
+        self._title_label = Gtk.Label(label=title, xalign=0)
+        self._title_label.add_css_class('pm-host-section-title')
+        self._title_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self._title_label.set_hexpand(True)
+        title_col.append(self._title_label)
+        # Filter mode under the name: (all projects) / (active projects) / (projects hidden)
+        self._filter_label = Gtk.Label(label=self._MODE_LABELS['all'], xalign=0)
+        self._filter_label.add_css_class('dim-label')
+        self._filter_label.add_css_class('pm-host-section-filter')
+        self._filter_label.set_ellipsize(Pango.EllipsizeMode.END)
+        title_col.append(self._filter_label)
+        box.append(title_col)
+
+        self._count_label = Gtk.Label(label='0(0)')
+        self._count_label.add_css_class('dim-label')
+        self._count_label.add_css_class('caption')
+        self._count_label.add_css_class('pm-host-section-count')
+        self._count_label.set_valign(Gtk.Align.CENTER)
+        box.append(self._count_label)
+
+        add_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
+        add_btn.add_css_class('flat')
+        add_btn.add_css_class('circular')
+        add_btn.set_tooltip_text('New Project')
+        add_btn.set_has_frame(False)
+        add_btn.set_valign(Gtk.Align.CENTER)
+        add_btn.connect('clicked', self._on_add_clicked)
+        box.append(add_btn)
+
+        self.set_child(box)
+        self.set_expanded(expanded)
+        self.set_filter_mode(self._filter_mode)
+        if show_health:
+            self.set_health('grey')
+
+    def _on_add_clicked(self, button):
+        self._on_add_project(self.host_id)
+
+    def set_expanded(self, expanded):
+        self._expanded = bool(expanded)
+
+    def set_filter_mode(self, mode: str):
+        if mode not in ('hidden', 'active', 'all'):
+            mode = 'all'
+        self._filter_mode = mode
+        if hasattr(self, '_filter_label'):
+            self._filter_label.set_label(self._MODE_LABELS.get(mode, self._MODE_LABELS['all']))
+        tip = self._MODE_TIPS.get(mode, '')
+        self._title_label.set_tooltip_text(f'{self._title_text}\n{tip}')
+        self.set_tooltip_text(tip)
+
+    def set_counts(self, active: int, total: int):
+        self._count_label.set_label(f'{int(active)}({int(total)})')
+
+    def set_health(self, state: str):
+        for s in ('grey', 'green', 'yellow', 'red'):
+            self._health_dot.remove_css_class(f'host-health-{s}')
+        state = state if state in ('grey', 'green', 'yellow', 'red') else 'grey'
+        self._health_dot.add_css_class(f'host-health-{state}')
+        tips = {
+            'grey': 'Health check off or not yet run',
+            'green': 'Reachable',
+            'yellow': 'Reachable with problems',
+            'red': 'Unreachable',
+        }
+        self._health_dot.set_tooltip_text(tips.get(state, ''))
 
 
 class NewProjectEntryRow(Gtk.ListBoxRow):
@@ -437,6 +722,7 @@ class ProjectRow(Gtk.ListBoxRow):
         'project-haiku-check': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-rename':     (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        'project-harness-change': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self, project, history, watcher, settings=None):
@@ -450,11 +736,11 @@ class ProjectRow(Gtk.ListBoxRow):
         self._process_state = 'inactive'
         self._is_zellij = False
         self._new_session_row = None
-        # The agent id the LIVE child is actually running (C5 truth), pushed in
+        # The harness id the LIVE child is actually running (C5 truth), pushed in
         # from window.py's process-started/exited flow. None when nothing runs.
-        # When it disagrees with the configured/effective agent (a restored
-        # saved-agent-wins session, A2), the subtitle leads with what's running.
-        self._running_agent = None
+        # When it disagrees with the configured/effective harness (a restored
+        # saved-harness-wins session, A2), the subtitle leads with what's running.
+        self._running_harness = None
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_child(outer)
@@ -480,7 +766,7 @@ class ProjectRow(Gtk.ListBoxRow):
         self._status_dot.set_valign(Gtk.Align.CENTER)
         top.append(self._status_dot)
 
-        # Name + an effective-agent subtitle (B3). Vertical so the subtitle
+        # Name + an effective-harness subtitle (B3). Vertical so the subtitle
         # sits under the name; the box carries the hexpand the name used to.
         name_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         name_box.set_hexpand(True)
@@ -494,7 +780,7 @@ class ProjectRow(Gtk.ListBoxRow):
         self._subtitle_label.set_ellipsize(Pango.EllipsizeMode.END)
         self._subtitle_label.add_css_class('dim-label')
         self._subtitle_label.add_css_class('caption')
-        self._subtitle_label.add_css_class('pm-agent-subtitle')
+        self._subtitle_label.add_css_class('pm-harness-subtitle')
         self._subtitle_label.set_visible(False)
         name_box.append(self._subtitle_label)
         top.append(name_box)
@@ -538,23 +824,23 @@ class ProjectRow(Gtk.ListBoxRow):
         self._setup_context_menu()
         self._apply_caps()
 
-    # --- agent seam (A1 sessions, A5 caps gating) -------------------------
+    # --- harness seam (A1 sessions, A5 caps gating) -------------------------
 
     def _adapter(self):
-        """The effective agent adapter for this project (claude if unknown).
+        """The effective harness adapter for this project (claude if unknown).
 
         Resolved through the seam so the expander, the session-resume action,
-        and the Model submenu all degrade on the adapter's declared caps rather
+        and the Provider submenu all degrade on the adapter's declared caps rather
         than assuming claude. Falls back to the claude adapter when settings
         weren't injected (defensive — keeps headless/legacy construction sane).
         """
-        agent_id = (self._settings.effective_agent(self._project.path)
+        harness_id = (self._settings.effective_harness(self._project.path)
                     if self._settings is not None else 'claude')
-        # F9: thread settings into get_adapter so a named-but-missing agent's
-        # caps-gating reflects the M-P3.2 fallback (agent_default → first
+        # F9: thread settings into get_adapter so a named-but-missing harness's
+        # caps-gating reflects the M-P3.2 fallback (harness_default → first
         # available), not a hardcoded claude. With settings the row gates on the
         # adapter that will ACTUALLY run for this project.
-        return agents.get_adapter(agent_id, self._settings)
+        return harnesses.get_adapter(harness_id, self._settings)
 
     def _caps(self):
         return self._adapter().caps
@@ -563,90 +849,90 @@ class ProjectRow(Gtk.ListBoxRow):
         """Whether an attached row's watcher-'idle' should render as 'done'.
 
         Gated on the effective adapter's ``caps.rich_status`` (its first
-        consumer): a rich-status agent (claude, opencode — both bridged) with
+        consumer): a rich-status harness (claude, opencode — both bridged) with
         no status file yet is a genuinely just-started/finished state, so the
         historic green remap stands. A ``rich_status=False`` agent has no
         bridge at all — remapping would pin a fake green "work finished" dot
-        for the entire run; it keeps the honest dim 'idle' instead. If adapter
-        resolution fails for any reason, preserve the historic remap — the dot
-        path must never throw.
+        for the entire run; it keeps the honest dim 'idle' instead.
+
+        Remote projects never get the fake-green remap: status must come from
+        polled remote status files (host rich-status opt-in). Without a hit,
+        stay dim 'idle' so the dot is not stuck green for the whole session.
         """
         try:
+            from hosts import LOCALHOST_ID
+            if getattr(self._project, 'host_id', LOCALHOST_ID) != LOCALHOST_ID:
+                return False
             return self._adapter().caps.rich_status
         except Exception:
             return True
 
     def set_settings(self, settings):
-        """Re-bind settings and re-apply caps gating (effective provider changed)."""
+        """Re-bind settings and re-apply caps gating (effective harness changed)."""
         self._settings = settings
+        self._populate_harness_submenu()
         self._apply_caps()
         self._rebuild_popover()
 
     def _apply_caps(self):
         """Show/hide caps-gated menu entries for the effective adapter (A5).
 
-        * Provider submenu   — caps.model_select (the per-project provider picker)
+        * Provider submenu     — caps.model_select
         * History expander  — caps.sessions (the expand arrow + new-session row)
         * Session resume     — caps.resume_by_id (gated where the row is built)
 
         Idempotent: safe to call after construction and on every settings push.
         """
         caps = self._caps()
-        # Provider submenu visibility (the per-project provider picker).
+        # Provider submenu visibility.
         self._set_menu_item_present('Provider', caps.model_select,
                                     self._insert_model_submenu)
-        # History expander: hide the arrow entirely when the agent can't
+        # History expander: hide the arrow entirely when the harness can't
         # enumerate sessions, so there's no empty dropdown to open.
         if hasattr(self, '_arrow'):
             self._arrow.set_visible(caps.sessions)
         self._update_subtitle()
 
     def _subtitle_text(self):
-        """Pure builder for the row subtitle string. Returns the text to show,
-        or ``None`` when the row should stay clean (no subtitle).
+        """Pure builder for the row subtitle string (B3 + C5). Returns the text
+        to show, or ``None`` when the row should stay clean (no subtitle).
 
-        Claude Code is the sole harness, so the harness part is always the same
-        and is NOT shown in the normal case — a pinned-provider row shows just
-        ``<ProviderLabel>``. Two shapes:
-
+        Two shapes:
           * NO live mismatch — the running harness is absent OR equals the
-            configured one (always true with a single harness): ``None`` for a
-            plain native row, ``<ProviderLabel>`` when a provider is pinned.
-          * LIVE mismatch — a child is running a DIFFERENT harness than the one
-            configured (unreachable with a single harness, but kept as a
-            defensive guard): lead with what is ACTUALLY running, naming the
-            next: ``<RunningDisplay> (next: <ConfiguredDisplay>)`` (+ the
-            provider suffix). Always shown.
+            configured/effective harness: today's string, BYTE-IDENTICAL —
+            ``<AgentDisplay>`` (+ ``" · " + model`` when a model is pinned),
+            and ``None`` for a plain default harness with no model.
+          * LIVE mismatch — a child is running a DIFFERENT agent than the one
+            configured for the next session (a restored saved-harness-wins
+            session, A2): lead with what is ACTUALLY running, naming the next:
+            ``<RunningDisplay> (next: <ConfiguredDisplay>)`` (+ the model
+            suffix, preserved in both shapes). Always shown — the truth of a
+            live mismatch overrides the clean-default hide rule (C5).
         """
         if self._settings is None:
             return None
-        agent_id = self._settings.effective_agent(self._project.path)
-        provider = self._settings.effective_provider(self._project.path)
-        running = self._running_agent
-        mismatch = running is not None and running != agent_id
+        harness_id = self._settings.effective_harness(self._project.path)
+        model = self._settings.effective_model(self._project.path)
+        running = self._running_harness
+        mismatch = running is not None and running != harness_id
         if mismatch:
-            head = (f'{self._harness_display(running)} '
-                    f'(next: {self._harness_display(agent_id)})')
-            parts = [head]
-            if provider:
-                parts.append(provider_label(self._settings.providers, provider))
-            return ' · '.join(parts)
-        # No mismatch: Claude Code is the sole harness, so the harness part is
-        # always the same and is omitted — a pinned-provider row shows just the
-        # provider label. A native row (no provider) stays clean.
-        if not provider:
-            return None
-        return provider_label(self._settings.providers, provider)
-
-    @staticmethod
-    def _harness_display(agent_id):
-        adapter = agents.ADAPTERS.get(agent_id)
-        return adapter.display_name if adapter else agent_id
+            head = (f'{self._harness_display_name(running)} '
+                    f'(next: {self._harness_display_name(harness_id)})')
+        else:
+            is_default_agent = (
+                harness_id == self._settings.harness_default == harnesses.DEFAULT_HARNESS)
+            if is_default_agent and not model:
+                return None
+            head = self._harness_display_name(harness_id)
+        parts = [head]
+        if model:
+            parts.append(model)
+        return ' · '.join(parts)
 
     def _update_subtitle(self):
         """Render the subtitle from the pure builder (B3 + C5).
 
-        Surfaces a non-default configuration — or a live agent mismatch — without
+        Surfaces a non-default configuration — or a live harness mismatch — without
         opening the menus; a plain default/native row stays clean.
         """
         if not hasattr(self, '_subtitle_label'):
@@ -658,10 +944,10 @@ class ProjectRow(Gtk.ListBoxRow):
         self._subtitle_label.set_text(text)
         self._subtitle_label.set_visible(True)
 
-    def set_running_agent(self, agent_id):
-        """Record the agent the live child is actually running (C5) and refresh
+    def set_running_harness(self, harness_id):
+        """Record the harness the live child is actually running (C5) and refresh
         the subtitle. ``None`` clears it (the session ended)."""
-        self._running_agent = agent_id
+        self._running_harness = harness_id
         self._update_subtitle()
 
     def _set_menu_item_present(self, label, present, inserter):
@@ -698,10 +984,14 @@ class ProjectRow(Gtk.ListBoxRow):
         self._menu.append('New Session',        'row.new-session')
         self._menu.append('New Zellij Session', 'row.zellij')
         self._menu.append('Haiku Check',        'row.haiku-check')
+        self._harness_submenu = Gio.Menu()
+        self._menu.append_submenu('Harness', self._harness_submenu)
         self._model_submenu = Gio.Menu()
         self._menu.append_submenu('Provider', self._model_submenu)
         self._menu.append('Rename',             'row.rename')
-        self._menu.append('Archive',            'row.archive')
+        from hosts import LOCALHOST_ID as _LH
+        if getattr(self._project, 'host_id', _LH) == _LH:
+            self._menu.append('Archive',            'row.archive')
 
         ag = Gio.SimpleActionGroup()
 
@@ -715,7 +1005,8 @@ class ProjectRow(Gtk.ListBoxRow):
         self._new_session_action = _add('new-session', 'project-new-session')
         _add('zellij',       'project-zellij')
         _add('haiku-check',  'project-haiku-check')
-        _add('archive',      'project-archive')
+        if getattr(self._project, 'host_id', _LH) == _LH:
+            _add('archive',      'project-archive')
 
         rename_action = Gio.SimpleAction.new('rename', None)
         rename_action.connect('activate', lambda a, p: self._enter_rename_mode())
@@ -727,15 +1018,24 @@ class ProjectRow(Gtk.ListBoxRow):
         self._ntfy_action.connect('activate', self._on_ntfy_activate)
         ag.add_action(self._ntfy_action)
 
-        # Per-project provider selection (the sidebar Model menu is a provider
-        # picker). A single stateful 's' action lets GTK render the submenu as
-        # radio items with the active one checked.
+        # Per-project model selection. A single stateful 's' action lets GTK
+        # render the submenu as radio items with the active one checked.
         self._model_action = Gio.SimpleAction.new_stateful(
             'set-model', GLib.VariantType.new('s'),
             GLib.Variant('s', FOLLOW_DEFAULT),
         )
         self._model_action.connect('activate', self._on_model_select)
         ag.add_action(self._model_action)
+
+        # Per-project harness selection (B3) — same stateful-radio pattern.
+        # The value is FOLLOW_DEFAULT, or a harness id ('claude'/'opencode').
+        self._harness_action = Gio.SimpleAction.new_stateful(
+            'set-harness', GLib.VariantType.new('s'),
+            GLib.Variant('s', FOLLOW_DEFAULT),
+        )
+        self._harness_action.connect('activate', self._on_harness_select)
+        ag.add_action(self._harness_action)
+        self._populate_harness_submenu()
 
         self.insert_action_group('row', ag)
         self._rebuild_popover()
@@ -776,65 +1076,79 @@ class ProjectRow(Gtk.ListBoxRow):
         self._popover.set_has_arrow(False)
 
     def set_model_options(self, options, current, global_label):
-        """Populate the 'Model' submenu (a per-project PROVIDER picker).
+        """Populate the Provider submenu for THIS row's effective harness.
 
-        options: list of (provider_id, label); provider_id '' is
-                 ``Anthropic (native)``.
-        current: the active selection — ``FOLLOW_DEFAULT``, a provider_id, or
-                 ``''`` (pinned to native).
-        global_label: label of the global default provider, shown on the
-                 Default entry (fallback for settings-less/legacy rows).
-
-        P3.5f (C2, the maintainer's second reveal): the "Default (…)" label is PER-ROW —
-        computed from THIS row's effective provider, not the single global label
-        the window pushes (which a per-project-override row would wear as the
-        global default's story). ``global_label`` is the fallback for
-        settings-less/legacy rows.
+        One native option for the harness (Anthropic / Grok / OpenCode) plus
+        Claude customs when applicable. Unselectable choices are omitted —
+        Gio.Menu cannot grey items. Radio state is a concrete id.
         """
+        from models import (build_provider_menu_entries, provider_menu_current,
+                            FOLLOW_DEFAULT as _FD)
         self._model_submenu.remove_all()
-        # reveal-3 item 1 (G1, C2/C4): a row with no override and a native default
-        # showed BOTH 'Default (Anthropic (native))' AND a bare
-        # 'Anthropic (native)' — the native sentinel (index 0, id '') duplicates
-        # the Default item's resolved story. We compute the Default story ONCE
-        # and suppress any option that merely restates it. FOLLOW_DEFAULT (track
-        # the default) and an explicit pin stay distinct choices; we only drop a
-        # redundant pin the user hasn't taken — a LIVE pin (current == id) stays
-        # visible and checked.
-        default_story = self._default_label(global_label)
-        default_item = Gio.MenuItem.new(f'Default ({default_story})', None)
-        default_item.set_action_and_target_value(
-            'row.set-model', GLib.Variant('s', FOLLOW_DEFAULT))
-        self._model_submenu.append_item(default_item)
-        for provider_id, label in options:
-            if label == default_story and current != provider_id:
-                continue
+        if self._settings is not None:
+            try:
+                harness_id = self._settings.effective_harness(self._project.path)
+                entries = build_provider_menu_entries(self._settings, harness_id)
+                current = provider_menu_current(
+                    self._settings, self._project.path, harness_id)
+            except Exception:
+                entries = [(oid, lab, True) for oid, lab in (options or [])]
+                if current is None:
+                    current = _FD
+        else:
+            entries = [(oid, lab, True) for oid, lab in (options or [])]
+            if current is None:
+                current = _FD
+        for mid, label, _selectable in entries:
             item = Gio.MenuItem.new(label, None)
             item.set_action_and_target_value(
-                'row.set-model', GLib.Variant('s', provider_id))
+                'row.set-model', GLib.Variant('s', mid))
             self._model_submenu.append_item(item)
+        if current is None:
+            current = ''
         self._model_action.set_state(GLib.Variant('s', current))
         self._rebuild_popover()
-
-    def _default_label(self, fallback):
-        """The "Default (…)" provider-story label for THIS row's effective
-        provider.
-
-        P3.5f (C2): a per-project-override row must NOT wear the global
-        default's story. Resolve per-row via ``settings.effective_provider`` +
-        ``models.provider_label``. Settings-less/legacy rows — or any failure —
-        fall back to the global label, so the menu path never throws.
-        """
-        if self._settings is None:
-            return fallback
-        try:
-            pid = self._settings.effective_provider(self._project.path)
-            return provider_label(self._settings.providers, pid)
-        except Exception:
-            return fallback
 
     def _on_model_select(self, action, value):
         action.set_state(value)
         self.emit('project-model-change', value.get_string())
+
+    # --- Harness submenu (B3) ----------------------------------------------
+
+    def _populate_harness_submenu(self):
+        """Build the 'Harness' submenu: one radio per registered adapter.
+
+        The global default harness is labeled ``Display (default)``. There is no
+        separate "Follow default" item — picking the default id clears any
+        per-project override (window handler treats default id like FOLLOW).
+        Radio state is the effective harness (override or global default).
+        """
+        self._harness_submenu.remove_all()
+        default_id = (self._settings.harness_default
+                      if self._settings is not None else harnesses.DEFAULT_HARNESS)
+        for harness_id, adapter in harnesses.ADAPTERS.items():
+            label = adapter.display_name
+            if harness_id == default_id:
+                label = f'{label} (default)'
+            item = Gio.MenuItem.new(label, None)
+            item.set_action_and_target_value(
+                'row.set-harness', GLib.Variant('s', harness_id))
+            self._harness_submenu.append_item(item)
+        # Effective harness is always a concrete id (never FOLLOW_DEFAULT).
+        if self._settings is not None:
+            current = self._settings.effective_harness(self._project.path)
+        else:
+            current = default_id
+        self._harness_action.set_state(GLib.Variant('s', current))
+
+    @staticmethod
+    def _harness_display_name(harness_id):
+        adapter = harnesses.ADAPTERS.get(harness_id)
+        return adapter.display_name if adapter else harness_id
+
+    def _on_harness_select(self, action, value):
+        action.set_state(value)
+        self.emit('project-harness-change', value.get_string())
 
     def _on_right_click(self, gesture, n_press, x, y):
         rect = Gdk.Rectangle()
@@ -989,7 +1303,7 @@ class NewSessionRow(Gtk.ListBoxRow):
 
 
 class SessionHistoryRow(Gtk.ListBoxRow):
-    """A restorable past session, rendered from an ``agents.SessionRef`` (A1).
+    """A restorable past session, rendered from an ``harnesses.SessionRef`` (A1).
 
     The row reads ``ref.id``/``ref.title``/``ref.last_active`` \u2014 the canonical
     sessions contract \u2014 not the old Claude-specific ``Session.session_id``. The

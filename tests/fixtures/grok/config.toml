@@ -1,0 +1,21 @@
+# grok config.toml fixture — known-good ollama-pool shape (matches README
+# "Grok + the ollama pool"). Pins harness_configs.parse_grok_config.
+[models]
+default = "pool-qwen"
+
+[model.pool-qwen]
+model = "qwen3.5:9b"
+base_url = "http://localhost:11434/v1"
+name = "Qwen3.5 9B (Ollama pool)"
+context_window = 32768
+api_key = "ollama"
+
+[model.grok-4]
+model = "grok-4-latest"
+name = "Grok 4"
+
+[cli]
+auto_update = false
+
+[compat.claude]
+hooks = false

@@ -59,7 +59,17 @@ class ShutdownWindow(Adw.Window):
         listbox.set_selection_mode(Gtk.SelectionMode.NONE)
 
         for path, tv in running.items():
-            name = os.path.basename(path)
+            # Prefer the real project name — remote paths are project_refs
+            # like ``ssh:<host_id>:<name>``, not filesystem paths.
+            proj = getattr(tv, '_project', None)
+            if proj is not None and getattr(proj, 'name', None):
+                name = proj.name
+            else:
+                try:
+                    from hosts import decode_project_ref
+                    _hid, name = decode_project_ref(path)
+                except Exception:
+                    name = os.path.basename(path) or path
             row = Gtk.ListBoxRow()
             row.set_activatable(False)
 
