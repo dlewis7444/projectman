@@ -94,7 +94,7 @@ whichever you use; each is optional and they work side by side:
 
 | Harness | Install (puts the binary on your `PATH`) |
 |---------|------------------------------------------|
-| **Claude Code** (`claude`) | `curl -fsSL https://claude.ai/install.sh \| bash` — or `npm install -g @anthropic-ai/claude-code` |
+| **Claude Code** (`claude`) | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | **OpenCode** (`opencode`) | `curl -fsSL https://opencode.ai/install \| bash` — see [Using OpenCode](#using-opencode) |
 | **Grok Build** (`grok`) | `curl -fsSL https://x.ai/cli/install.sh \| bash` — see [Installing Grok Build](#installing-grok-build) |
 
