@@ -3,8 +3,9 @@ import json
 import subprocess
 from paa_ledger import LedgerItem, make_item_id, now_iso
 
-_HAIKU_TIMEOUT = 30
+_SCAN_TIMEOUT = 30
 _MAX_CONTENT_CHARS = 16000
+_TIER_ALIASES = ('haiku', 'sonnet', 'opus', 'fable', 'subagent')
 
 # Manifest files to check for dependency analysis (first found wins)
 _MANIFEST_FILES = [
@@ -13,22 +14,47 @@ _MANIFEST_FILES = [
 ]
 
 
-def _run_haiku(prompt, settings, timeout=_HAIKU_TIMEOUT):
-    """Invoke claude -p --model haiku --output-format json.
-    Returns (response_text, tokens_used) or (None, 0) on failure.
-    tokens_used = input_tokens + output_tokens (excludes cache)."""
+def _run_scan_model(prompt, settings, project_path=None, timeout=_SCAN_TIMEOUT):
+    """Invoke ``claude -p --model <scan-tier> --output-format json``.
+
+    Routes through the model axis when *project_path* is provided: custom
+    providers get ``build_spawn_env`` (``ANTHROPIC_BASE_URL`` etc.) and the
+    tier alias is resolved to the provider's model id. Native / unusable
+    custom providers fall back to inherited env + bare tier alias (same as
+    terminal spawn fallback).
+
+    *project_path* is optional for back-compat tests; production callers must
+    pass it (use ``''`` for global default provider — no project pin).
+
+    Returns ``(response_text, tokens_used)`` or ``(None, 0)`` on failure.
+    tokens_used = input_tokens + output_tokens (excludes cache).
+    """
     claude_cmd = settings.resolved_claude_binary
-    # PAA intentionally uses native Anthropic: this subprocess inherits PM's
-    # own os.environ (no ANTHROPIC_BASE_URL), so it is never routed through a
-    # custom provider. The model axis applies only to project terminals.
+    tier = (settings.paa_scan_model or 'haiku').strip() or 'haiku'
+    model_arg = tier
+    env = None  # None → subprocess inherits (native)
+
+    if project_path is not None:
+        from models import build_spawn_env, resolve_tier_model
+        env_dict, _reason = build_spawn_env(settings, project_path)
+        # reason set ⇒ env_dict is None ⇒ stay native with bare tier alias
+        if env_dict is not None:
+            env = env_dict
+            if tier in _TIER_ALIASES:
+                resolved = resolve_tier_model(
+                    settings, settings.effective_provider(project_path), tier)
+                if resolved:
+                    model_arg = resolved
+
     # Run from PAA's own directory to avoid polluting real project sessions
     paa_dir = os.path.join(settings.resolved_projects_dir, '.project-admin-agent')
     os.makedirs(paa_dir, exist_ok=True)
     try:
         result = subprocess.run(
-            [claude_cmd, '-p', '--model', settings.paa_scan_model, '--output-format', 'json', prompt],
+            [claude_cmd, '-p', '--model', model_arg, '--output-format', 'json', prompt],
             capture_output=True, text=True, timeout=timeout,
             cwd=paa_dir, stdin=subprocess.DEVNULL,
+            env=env,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return (None, 0)
@@ -42,6 +68,10 @@ def _run_haiku(prompt, settings, timeout=_HAIKU_TIMEOUT):
     usage = data.get('usage', {})
     tokens = usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
     return (response_text, tokens)
+
+
+# Back-compat alias (older imports / tests may still use the haiku name).
+_run_haiku = _run_scan_model
 
 
 def _parse_haiku_response(text):
@@ -108,7 +138,7 @@ def check_semantic_staleness(project_name, project_path, settings):
         'data loss, or security vulnerabilities. Stale documentation alone is never critical.\n'
         'If CLAUDE.md accurately reflects the project, respond: {"issues": []}'
     )
-    response, tokens = _run_haiku(prompt, settings)
+    response, tokens = _run_scan_model(prompt, settings, project_path=project_path)
     if response is None:
         return ([], 0)
 
@@ -157,7 +187,7 @@ def check_dependency_versions(project_name, project_path, settings):
         'Being outdated alone is never critical.\n'
         'If no significant issues: {"issues": []}'
     )
-    response, tokens = _run_haiku(prompt, settings)
+    response, tokens = _run_scan_model(prompt, settings, project_path=project_path)
     if response is None:
         return ([], 0)
 
@@ -230,7 +260,7 @@ def check_project_health(project_name, project_path, settings):
         'or broken deployments. Missing best-practice files are never critical.\n'
         'If project looks healthy: {"issues": []}'
     )
-    response, tokens = _run_haiku(prompt, settings)
+    response, tokens = _run_scan_model(prompt, settings, project_path=project_path)
     if response is None:
         return ([], 0)
 
