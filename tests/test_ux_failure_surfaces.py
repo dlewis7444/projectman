@@ -164,8 +164,8 @@ class _Sidebar:
         self.active_only_calls = []
         self.states = []
 
-    def set_active_only(self, v):
-        self.active_only_calls.append(v)
+    def set_active_only(self, v, path=None, paths=None):
+        self.active_only_calls.append((v, path, paths))
 
     def set_project_state(self, p, s, is_zellij=None):
         self.states.append((p, s))
@@ -200,12 +200,12 @@ def test_active_only_set_when_process_starts():
     # The closure body from window._get_or_create_terminal._on_started:
     def on_started(t, p='/proj'):
         sb.set_project_state(p, 'attached', is_zellij=t._is_zellij)
-        sb.set_active_only(True)
+        sb.set_active_only(True, path=p)
         if t._fallback_reason:
             pass
     on_started(t)
     assert ('/proj', 'attached') in sb.states
-    assert sb.active_only_calls == [True]
+    assert sb.active_only_calls == [(True, '/proj', None)]
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -225,7 +225,7 @@ def test_t5_spawn_failure_drops_active_only_filter():
     fake = _win(Settings(), sidebar=sb)
     fake._spawn_failure_toast_text = lambda aid, rb: AppWindow._spawn_failure_toast_text(fake, aid, rb)
     AppWindow._on_spawn_failed(fake, '/proj', 'claude', 'claude')
-    assert sb.active_only_calls == [False]      # the filter was dropped
+    assert sb.active_only_calls == [(False, '/proj', None)]  # filter dropped
 
 
 def test_t5_spawn_failure_drops_filter_every_time_even_when_deduped():
@@ -239,7 +239,7 @@ def test_t5_spawn_failure_drops_filter_every_time_even_when_deduped():
     AppWindow._on_spawn_failed(fake, '/proj', 'claude', 'claude')
     AppWindow._on_spawn_failed(fake, '/proj', 'claude', 'claude')  # deduped toast
     assert len(toasts) == 1                     # toast one-shot
-    assert sb.active_only_calls == [False, False]   # filter dropped both times
+    assert sb.active_only_calls == [(False, '/proj', None), (False, '/proj', None)]
 
 
 def test_t6_successful_restore_filter_behavior_unchanged():
@@ -252,10 +252,10 @@ def test_t6_successful_restore_filter_behavior_unchanged():
     # The success path's _on_started closure body (window._get_or_create_terminal):
     def on_started(t, p='/proj'):
         sb.set_project_state(p, 'attached', is_zellij=t._is_zellij)
-        sb.set_active_only(True)
+        sb.set_active_only(True, path=p)
     on_started(t)
-    assert sb.active_only_calls == [True]       # eager ON preserved
-    assert False not in sb.active_only_calls    # success NEVER drops the filter
+    assert sb.active_only_calls == [(True, '/proj', None)]  # eager ON preserved
+    assert not any(v is False for v, _, _ in sb.active_only_calls)
 
 
 # ════════════════════════════════════════════════════════════════════════════

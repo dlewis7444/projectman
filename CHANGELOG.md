@@ -7,6 +7,15 @@ All notable changes to ProjectMan will be documented in this file.
 _Deferred UX polish TODOs (editor unsaved-changes affordance; sidebar
 new-project count while inline-edit row is visible) remain open._
 
+## [1.4.6] - 2026-07-12
+
+### Fixed
+- **Per-host Active Only on project activation:** selecting a project and
+  starting a session again flips that host's sidebar section to "active
+  projects" (the old global Active Only behavior, now scoped per host).
+  Spawn failures still reveal the board on that host only (C7). Restore arms
+  active-only per host with sessions to reopen.
+
 ## [1.4.5] - 2026-07-11
 
 ### Fixed

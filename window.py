@@ -637,7 +637,7 @@ class AppWindow(Adw.ApplicationWindow):
             if proj is not None:
                 active[path] = proj
         focused, background = plan_restore(open_paths, focused_path, active)
-        self._sidebar.set_active_only(bool(active))
+        self._sidebar.set_active_only(bool(active), paths=active.keys() if active else None)
         try:
             # Locals first (fast, no SSH), then remotes, focus last — so a
             # broken remote cannot abort localhost restore, and grab_focus wins.
@@ -685,7 +685,8 @@ class AppWindow(Adw.ApplicationWindow):
                 live.append(project)
 
         if not self._settings.resume_projects:
-            self._sidebar.set_active_only(bool(live))
+            self._sidebar.set_active_only(
+                bool(live), paths=[p.path for p in live] if live else None)
             return
 
         open_paths, focused_path = load_session(SESSION_FILE)
@@ -701,7 +702,13 @@ class AppWindow(Adw.ApplicationWindow):
                     break
 
         background = [p for p in open_paths if p != restore_path and p in all_paths]
-        self._sidebar.set_active_only(bool(live) or bool(restore_path))
+        restore_paths = [p.path for p in live]
+        if restore_path:
+            restore_paths.append(restore_path)
+        self._sidebar.set_active_only(
+            bool(live) or bool(restore_path),
+            paths=restore_paths or None,
+        )
 
         try:
             if restore_path:
@@ -881,7 +888,7 @@ class AppWindow(Adw.ApplicationWindow):
         (idempotent — the toast is one-shot, this is not, and dropping an
         already-off filter is a no-op). Restore's eager filter for the
         successful path is untouched."""
-        self._sidebar.set_active_only(False)
+        self._sidebar.set_active_only(False, path=project_path)
         key = (project_path, harness_id)
         if key in self._warned_spawn_fail:
             return
@@ -1024,7 +1031,7 @@ class AppWindow(Adw.ApplicationWindow):
                 # something actually RUNS — NOT on the activation attempt. This is
                 # what keeps a failed-spawn row visible (a spawn that never starts
                 # never flips the filter, so the 'inactive' row isn't hidden).
-                self._sidebar.set_active_only(True)
+                self._sidebar.set_active_only(True, path=p)
                 # Surface provider fallback notice if this spawn fell back to native.
                 if t._fallback_reason:
                     self._show_provider_fallback_toast(n, t._fallback_reason)
