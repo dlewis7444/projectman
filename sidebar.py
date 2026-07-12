@@ -338,6 +338,30 @@ class Sidebar(Gtk.Box):
         self._invalidate_filters()
         GLib.idle_add(self._update_sticky_header_idle)
 
+    def _host_id_for_path(self, path):
+        if path in self._row_host:
+            return self._row_host[path]
+        from hosts import decode_project_ref
+        host_id, _ = decode_project_ref(path)
+        return host_id
+
+    def set_host_section_mode(self, host_id, mode):
+        """Set filter mode for one host (without cycling)."""
+        if mode not in ('hidden', 'active', 'all'):
+            mode = 'all'
+        if self._settings is not None:
+            self._settings.set_section_mode(host_id, mode)
+        header = self._section_headers.get(host_id)
+        if header is not None:
+            header.set_expanded(mode != 'hidden')
+            header.set_filter_mode(mode)
+        if self._sticky_host_id == host_id:
+            self._sticky_header.set_expanded(mode != 'hidden')
+            self._sticky_header.set_filter_mode(mode)
+        self.emit('host-section-toggled', host_id, mode != 'hidden')
+        self._invalidate_filters()
+        self._update_count_label()
+
     def _on_section_toggle(self, host_id):
         """Cycle section filter: hidden → active → all → hidden."""
         order = ('hidden', 'active', 'all')
@@ -346,32 +370,12 @@ class Sidebar(Gtk.Box):
             nxt = order[(order.index(cur) + 1) % len(order)]
         except ValueError:
             nxt = 'all'
-        if self._settings is not None:
-            self._settings.set_section_mode(host_id, nxt)
-        header = self._section_headers.get(host_id)
-        if header is not None:
-            header.set_expanded(nxt != 'hidden')
-            header.set_filter_mode(nxt)
-        if self._sticky_host_id == host_id:
-            self._sticky_header.set_expanded(nxt != 'hidden')
-            self._sticky_header.set_filter_mode(nxt)
-        self.emit('host-section-toggled', host_id, nxt != 'hidden')
-        self._invalidate_filters()
-        self._update_count_label()
+        self.set_host_section_mode(host_id, nxt)
 
     def _on_section_add_project(self, host_id):
         # Creating requires the section not fully hidden.
-        if self._section_mode(host_id) == 'hidden' and self._settings is not None:
-            self._settings.set_section_mode(host_id, 'all')
-            header = self._section_headers.get(host_id)
-            if header is not None:
-                header.set_expanded(True)
-                header.set_filter_mode('all')
-            if self._sticky_host_id == host_id:
-                self._sticky_header.set_expanded(True)
-                self._sticky_header.set_filter_mode('all')
-            self.emit('host-section-toggled', host_id, True)
-            self._invalidate_filters()
+        if self._section_mode(host_id) == 'hidden':
+            self.set_host_section_mode(host_id, 'all')
         self._on_add_project(None, host_id=host_id)
 
     def _on_row_activated(self, listbox, row):
@@ -408,12 +412,36 @@ class Sidebar(Gtk.Box):
     def refresh(self):
         self._populate()
 
-    def set_active_only(self, active):
-        """No-op — Active Only button removed; host-header cycle replaces it.
+    def set_active_only(self, active, path=None, paths=None):
+        """Per-host Active Only: maps to section mode 'active' / 'all'.
 
-        Kept so window.py restore/spawn call sites do not break.
+        path — single project (spawn success/failure on that host).
+        paths — iterable of project paths (restore); each host → 'active'.
+        Neither — all known hosts (legacy global call sites).
         """
-        return
+        if path is not None:
+            host_id = self._host_id_for_path(path)
+            if active:
+                self.set_host_section_mode(host_id, 'active')
+            elif self._section_mode(host_id) == 'active':
+                self.set_host_section_mode(host_id, 'all')
+            return
+
+        if paths is not None:
+            if not active:
+                return
+            host_ids = {self._host_id_for_path(p) for p in paths}
+            for host_id in host_ids:
+                self.set_host_section_mode(host_id, 'active')
+            return
+
+        if active:
+            for host_id in self._section_headers:
+                self.set_host_section_mode(host_id, 'active')
+        else:
+            for host_id in self._section_headers:
+                if self._section_mode(host_id) == 'active':
+                    self.set_host_section_mode(host_id, 'all')
 
     def select_project(self, path):
         row = self._rows.get(path)
