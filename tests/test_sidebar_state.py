@@ -63,6 +63,73 @@ def test_update_status_attached_no_file_shows_done():
     assert not row._status_dot.has_css_class('status-idle')
 
 
+def test_sidebar_uses_per_host_sections_with_sticky_header():
+    """Host chrome lives outside project ListBoxes; sticky pin exists."""
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar, HostSection, HostSectionHeader, ProjectRow
+
+    class FakeStore:
+        def load_projects(self):
+            return [
+                Project(name='alpha', path='/tmp/pm-alpha', host_id='localhost'),
+                Project(name='beta', path='/tmp/pm-beta', host_id='localhost'),
+            ]
+
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    assert list(sb._sections.keys()) == ['localhost']
+    section = sb._sections['localhost']
+    assert isinstance(section, HostSection)
+    assert isinstance(section.header, HostSectionHeader)
+    assert section.header.get_parent() is section
+    assert section.listbox.get_parent() is section
+    # Header is not a list row; projects are.
+    assert section.listbox.get_row_at_index(0) is not None
+    assert isinstance(section.listbox.get_row_at_index(0), ProjectRow)
+    assert sb._sticky_header is not None
+    assert sb._sticky_header.get_visible() is False
+    sb.select_project('/tmp/pm-beta')
+    assert section.listbox.get_selected_row() is sb._rows['/tmp/pm-beta']
+
+
+def test_rename_mode_ignores_focus_leave_until_armed():
+    """Context-menu popover close must not cancel rename before the entry settles."""
+    row = _make_row()
+    exits = []
+    orig = row._exit_rename_mode
+
+    def tracked():
+        exits.append(1)
+        return orig()
+
+    row._exit_rename_mode = tracked
+    row._enter_rename_mode()
+    assert row._rename_entry.get_visible() is True
+    assert row._name_box.get_visible() is False
+    assert row._rename_ignore_leave is True
+    # Synthetic leave while still armed (popover chatter) must no-op.
+    row._on_rename_focus_leave()
+    assert exits == []
+    assert row._rename_entry.get_visible() is True
+    # After arming, leave cancels.
+    row._rename_ignore_leave = False
+    row._on_rename_focus_leave()
+    assert exits == [1]
+    assert row._rename_entry.get_visible() is False
+    assert row._name_box.get_visible() is True
+
+
+def test_rename_activate_emits_new_name():
+    row = _make_row()
+    got = []
+    row.connect('project-rename', lambda r, name: got.append(name))
+    row._enter_rename_mode()
+    row._rename_entry.set_text('new-name')
+    row._on_rename_activate(row._rename_entry)
+    assert got == ['new-name']
+    assert row._rename_entry.get_visible() is False
+
+
 # ===========================================================================
 # P2 Part A — A1 (expander through adapter.list_sessions) + A5 (caps gating).
 # The GTK sliver; the headless contract is in test_agent_seam.py.

@@ -15,13 +15,20 @@
 }
 
 /* ── Host section headers (localhost + remotes) ───────────────────── */
-/* Override the pill-row radius from .navigation-sidebar row above. */
-.pm-sidebar list.navigation-sidebar row.pm-host-section {
+/* Headers live above each host's project ListBox (not list rows). */
+.pm-sidebar .pm-host-section {
     border-radius: 0;
     margin: 8px 0 2px 0;
     /* Default wash; themes (Argonaut) set cyan. */
     background-color: alpha(#00bcd4, 0.12);
     box-shadow: inset 0 1px alpha(#00bcd4, 0.35);
+}
+/* Sticky pin at top of scroll viewport — more opaque so rows don't bleed. */
+.pm-sidebar .pm-host-section.pm-sticky-host {
+    margin: 0;
+    background-color: alpha(#0e151d, 0.97);
+    box-shadow: inset 0 1px alpha(#00bcd4, 0.35),
+                0 2px 6px alpha(#000000, 0.35);
 }
 .pm-host-section-title {
     /* Slightly larger than default project name (~13px) */
