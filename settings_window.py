@@ -728,7 +728,6 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._build_models_page()
         self._build_harnesses_page()
         self._build_about_page()
-        self._build_claude_json_page()
         self.present(parent)
 
     # ------------------------------------------------------------------ #
@@ -755,24 +754,8 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._projects_dir_row.set_activatable_widget(choose_btn)
         projects_group.add(self._projects_dir_row)
 
-        # Group: Claude Code (the binary row, re-homed from the removed Agents
-        # page — Claude binary also lives on the Harnesses page; General keeps a
-        # convenience row). resolved_claude_binary reads agents['claude']['binary']
-        # first, falling back to the legacy claude_binary key.
-        claude_group = Adw.PreferencesGroup(title='Claude Code')
-        page.add(claude_group)
-
-        cfg = (self._settings.harnesses.get('claude')
-               if isinstance(self._settings.harnesses, dict) else None)
-        binary = ((cfg.get('binary') or '') if isinstance(cfg, dict)
-                  else self._settings.claude_binary)
-        self._claude_binary_row = Adw.EntryRow(title='Binary')
-        self._claude_binary_row.set_text(binary)
-        self._claude_binary_row.set_show_apply_button(True)
-        self._claude_binary_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
-        self._claude_binary_row.set_tooltip_text('Leave blank to use "claude" from PATH')
-        self._claude_binary_row.connect('apply', self._on_claude_binary_apply)
-        claude_group.add(self._claude_binary_row)
+        # Claude Code binary lives only on Settings → Harnesses (no duplicate
+        # convenience row on General).
 
         # Group: Startup
         startup_group = Adw.PreferencesGroup(title='Startup')
@@ -1364,11 +1347,12 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_enabled_row = Adw.SwitchRow(
             title='Enable PAA',
             # M-UX.4 (C2): the old "filesystem only — no API cost" lied — PAA's
-            # AI scans bill Anthropic. Split the copy: the master toggle enables
-            # the monitor (whose FILESYSTEM checks are free); the API cost belongs
-            # to "Enable AI Scans" below, which discloses it.
+            # AI scans use Claude Code with the configured provider. Split the
+            # copy: the master toggle enables the monitor (whose FILESYSTEM
+            # checks are free); the API cost belongs to "Enable AI Scans" below.
             subtitle='Background project health monitor. Filesystem checks are '
-                     'free; AI scans (below) use the claude CLI.',
+                     'free; AI scans (below) use Claude Code with your '
+                     'configured provider.',
         )
         self._paa_enabled_row.set_active(self._settings.paa_enabled)
         self._paa_enabled_row.connect('notify::active', self._on_paa_enabled_toggled)
@@ -1406,10 +1390,14 @@ class SettingsWindow(Adw.PreferencesDialog):
         # Chat model — lives here, not in AI Analysis, because Discuss
         # sessions work whether or not background AI scans are enabled.
         _chat_models = ['sonnet', 'haiku', 'opus']
-        _chat_labels = ['Sonnet', 'Haiku', 'Opus']
+        _chat_labels = [
+            'Standard (Sonnet tier)',
+            'Fast (Haiku tier)',
+            'Capable (Opus tier)',
+        ]
         self._paa_chat_model_row = Adw.ComboRow(
             title='Chat Model',
-            subtitle='Default model used for Discuss sessions',
+            subtitle='Claude Code tier for Discuss sessions',
         )
         self._paa_chat_model_row.set_model(Gtk.StringList.new(_chat_labels))
         chat_idx = _chat_models.index(self._settings.paa_chat_model) \
@@ -1426,17 +1414,17 @@ class SettingsWindow(Adw.PreferencesDialog):
         )
         page.add(ai_group)
 
-        self._paa_haiku_row = Adw.SwitchRow(
+        self._paa_ai_scans_row = Adw.SwitchRow(
             title='Enable AI Scans',
-            # The AI scans shell out to the `claude` CLI with native Anthropic
-            # credentials — NOT your custom provider. Say so.
-            subtitle='Uses the claude CLI and Anthropic credentials, '
-                     'regardless of your default harness',
+            # AI scans use Claude Code with the Models-page provider + scan tier
+            # (model-axis routing — not always Anthropic native).
+            subtitle='Runs project analysis via Claude Code using your '
+                     'Models-page provider and scan tier.',
         )
-        self._paa_haiku_row.set_active(self._settings.paa_allow_haiku)
-        self._paa_haiku_row.set_sensitive(self._settings.paa_enabled)
-        self._paa_haiku_row.connect('notify::active', self._on_paa_haiku_toggled)
-        ai_group.add(self._paa_haiku_row)
+        self._paa_ai_scans_row.set_active(self._settings.paa_allow_haiku)
+        self._paa_ai_scans_row.set_sensitive(self._settings.paa_enabled)
+        self._paa_ai_scans_row.connect('notify::active', self._on_paa_ai_scans_toggled)
+        ai_group.add(self._paa_ai_scans_row)
 
         self._paa_unlimited_row = Adw.SwitchRow(
             title='Unlimited Budget',
@@ -1453,7 +1441,8 @@ class SettingsWindow(Adw.PreferencesDialog):
 
         self._paa_budget_row = Adw.ActionRow(
             title='Monthly Token Budget',
-            subtitle='~$0.03 per 100K tokens at Haiku rates',
+            subtitle='Token budget for AI scans (cost depends on provider '
+                     'and scan model)',
         )
         self._paa_budget_row.set_sensitive(
             self._settings.paa_enabled
@@ -1475,12 +1464,17 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_budget_row.add_suffix(self._paa_budget_scale)
         ai_group.add(self._paa_budget_row)
 
-        # Scan model
+        # Scan model (stored values remain haiku/sonnet/opus CC tiers)
         _scan_models = ['haiku', 'sonnet', 'opus']
-        _scan_labels = ['Haiku', 'Sonnet', 'Opus']
+        _scan_labels = [
+            'Fast (Haiku tier)',
+            'Standard (Sonnet tier)',
+            'Capable (Opus tier)',
+        ]
         self._paa_scan_model_row = Adw.ComboRow(
             title='Scan Model',
-            subtitle='Model used for background AI scans',
+            subtitle="Claude Code tier used for background AI scans "
+                     "(mapped to your provider's models)",
         )
         self._paa_scan_model_row.set_model(Gtk.StringList.new(_scan_labels))
         scan_idx = _scan_models.index(self._settings.paa_scan_model) \
@@ -1590,23 +1584,6 @@ class SettingsWindow(Adw.PreferencesDialog):
         except GLib.Error:
             pass  # user cancelled
 
-    def _on_claude_binary_apply(self, row):
-        """Persist the Claude Code binary path into agents['claude']['binary'].
-
-        The legacy ``claude_binary`` key is kept in sync so a clear takes effect
-        (resolved_claude_binary would otherwise fall back to a stale legacy
-        value)."""
-        value = row.get_text().strip()
-        if not isinstance(self._settings.harnesses, dict):
-            self._settings.harnesses = {}
-        claude_cfg = self._settings.harnesses.get('claude')
-        if not isinstance(claude_cfg, dict):
-            claude_cfg = {}
-            self._settings.harnesses['claude'] = claude_cfg
-        claude_cfg['binary'] = value
-        self._settings.claude_binary = value
-        self._save_and_notify()
-
     def _on_resume_toggled(self, row, _param):
         self._settings.resume_projects = row.get_active()
         self._save_and_notify()
@@ -1647,17 +1624,17 @@ class SettingsWindow(Adw.PreferencesDialog):
     def _on_paa_enabled_toggled(self, row, _param):
         enabled = row.get_active()
         self._settings.paa_enabled = enabled
-        haiku = self._settings.paa_allow_haiku
+        ai_scans = self._settings.paa_allow_haiku
         self._paa_interval_row.set_sensitive(enabled)
         self._paa_stale_row.set_sensitive(enabled)
         self._paa_chat_model_row.set_sensitive(enabled)
-        self._paa_haiku_row.set_sensitive(enabled)
-        self._paa_unlimited_row.set_sensitive(enabled and haiku)
+        self._paa_ai_scans_row.set_sensitive(enabled)
+        self._paa_unlimited_row.set_sensitive(enabled and ai_scans)
         self._paa_budget_row.set_sensitive(
-            enabled and haiku and not self._settings.paa_budget_unlimited
+            enabled and ai_scans and not self._settings.paa_budget_unlimited
         )
-        self._paa_scan_model_row.set_sensitive(enabled and haiku)
-        self._paa_autonomy_row.set_sensitive(enabled and haiku)
+        self._paa_scan_model_row.set_sensitive(enabled and ai_scans)
+        self._paa_autonomy_row.set_sensitive(enabled and ai_scans)
         self._save_and_notify()
 
     def _on_paa_interval_changed(self, scale):
@@ -1685,16 +1662,16 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._settings.paa_budget_tokens = int(scale.get_value())
         self._save_and_notify()
 
-    def _on_paa_haiku_toggled(self, row, _param):
-        haiku = row.get_active()
-        self._settings.paa_allow_haiku = haiku
-        self._paa_unlimited_row.set_sensitive(self._settings.paa_enabled and haiku)
+    def _on_paa_ai_scans_toggled(self, row, _param):
+        ai_scans = row.get_active()
+        self._settings.paa_allow_haiku = ai_scans  # storage key kept for back-compat
+        self._paa_unlimited_row.set_sensitive(self._settings.paa_enabled and ai_scans)
         self._paa_budget_row.set_sensitive(
-            self._settings.paa_enabled and haiku
+            self._settings.paa_enabled and ai_scans
             and not self._settings.paa_budget_unlimited
         )
-        self._paa_scan_model_row.set_sensitive(self._settings.paa_enabled and haiku)
-        self._paa_autonomy_row.set_sensitive(self._settings.paa_enabled and haiku)
+        self._paa_scan_model_row.set_sensitive(self._settings.paa_enabled and ai_scans)
+        self._paa_autonomy_row.set_sensitive(self._settings.paa_enabled and ai_scans)
         self._save_and_notify()
 
     def _on_paa_scan_model_changed(self, row, _param):
@@ -1769,22 +1746,6 @@ class SettingsWindow(Adw.PreferencesDialog):
         save_btn.connect('clicked', _save)
         dialog.set_child(toolbar_view)
         dialog.present(self)
-
-    def _on_save_claude_json(self, button):
-        json_path = os.path.expanduser('~/.claude/settings.json')
-        buf = self._claude_json_tv.get_buffer()
-        text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
-        try:
-            os.makedirs(os.path.dirname(json_path), exist_ok=True)
-            with open(json_path, 'w') as f:
-                f.write(text)
-            toast = Adw.Toast.new('Saved successfully')
-            toast.set_timeout(2)
-            self.add_toast(toast)
-        except OSError as e:
-            toast = Adw.Toast.new(f'Error saving: {e}')
-            toast.set_timeout(4)
-            self.add_toast(toast)
 
     # ------------------------------------------------------------------ #
     #  Models page (click-friendly provider/tier editor)                   #
@@ -2194,43 +2155,3 @@ class SettingsWindow(Adw.PreferencesDialog):
         license_row.set_subtitle('MIT')
         license_row.set_sensitive(False)
         info_group.add(license_row)
-
-    def _build_claude_json_page(self):
-        page = Adw.PreferencesPage(
-            title='Claude JSON', icon_name='text-editor-symbolic'
-        )
-        self.add(page)
-
-        json_path = os.path.expanduser('~/.claude/settings.json')
-        try:
-            with open(json_path, 'r') as f:
-                json_content = f.read()
-        except FileNotFoundError:
-            json_content = '{}'
-
-        group = Adw.PreferencesGroup(title='~/.claude/settings.json')
-        page.add(group)
-
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_min_content_height(300)
-        self._claude_json_tv = Gtk.TextView()
-        self._claude_json_tv.set_monospace(True)
-        self._claude_json_tv.set_left_margin(8)
-        self._claude_json_tv.set_right_margin(8)
-        self._claude_json_tv.set_top_margin(8)
-        self._claude_json_tv.set_bottom_margin(8)
-        self._claude_json_tv.get_buffer().set_text(json_content)
-        scrolled.set_child(self._claude_json_tv)
-        group.add(scrolled)
-
-        save_row = Adw.ActionRow()
-        save_btn = Gtk.Button(label='Save')
-        save_btn.add_css_class('suggested-action')
-        save_btn.set_valign(Gtk.Align.CENTER)
-        save_btn.connect('clicked', self._on_save_claude_json)
-        save_row.add_suffix(save_btn)
-        page.add(Adw.PreferencesGroup())  # spacer
-        # Add button row directly
-        btn_group = Adw.PreferencesGroup()
-        page.add(btn_group)
-        btn_group.add(save_row)
