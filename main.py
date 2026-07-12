@@ -14,7 +14,7 @@ from window import AppWindow
 from settings import Settings
 
 
-VERSION = '1.4.2'
+VERSION = '1.4.3'
 
 # Single source of truth for the real DBus application id. A test or harness
 # overrides it via PM_APP_ID so it can never share identity with the user's
