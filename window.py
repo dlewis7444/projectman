@@ -120,7 +120,7 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.connect('project-new-session', self._on_project_new_session)
         self._sidebar.connect('project-zellij',      self._on_project_open_zellij)
         self._sidebar.connect('project-ntfy-toggle', self._on_ntfy_toggle)
-        self._sidebar.connect('project-haiku-check', self._on_project_haiku_check)
+        self._sidebar.connect('project-ai-scan', self._on_project_ai_scan)
         self._sidebar.connect('project-model-change', self._on_project_model_change)
         self._sidebar.connect('project-harness-change', self._on_project_harness_change)
         self._sidebar.connect('show-archive-window', self._on_show_archive_window)
@@ -1245,7 +1245,7 @@ class AppWindow(Adw.ApplicationWindow):
         if self._paa_win is not None:
             self._paa_win.refresh_from_scan()
 
-    def _on_project_haiku_check(self, sidebar, path):
+    def _on_project_ai_scan(self, sidebar, path):
         if self._paa_monitor is None:
             return
         project = self._find_project(path)
@@ -1253,15 +1253,15 @@ class AppWindow(Adw.ApplicationWindow):
             # The paa_enabled AND paa_allow_haiku guard now lives INSIDE
             # scan_single_project (M-UX.4) — a disabled scan makes zero model
             # calls and emits 'scan-blocked' (→ toast) instead of silently
-            # billing Anthropic.
+            # billing the configured provider.
             self._paa_monitor.scan_single_project(project.name, project.path)
 
     def _on_paa_scan_blocked(self, monitor, reason):
-        """M-UX.4 (C6): the Haiku Check was refused — say why, loudly."""
+        """M-UX.4 (C6): the AI Scan was refused — say why, loudly."""
         self._show_toast(reason)
 
     def _on_paa_single_scan_complete(self, monitor, project_name, new_findings):
-        """M-UX.4 (C6): show the Haiku Check RESULT (the sweep saw none)."""
+        """M-UX.4 (C6): show the AI Scan RESULT (the sweep saw none)."""
         if new_findings > 0:
             msg = (f'Scan of {project_name}: {new_findings} new '
                    f'{"finding" if new_findings == 1 else "findings"}')

@@ -215,7 +215,7 @@ def check_shared_dep_conflicts(projects, settings):
     try:
         from paa_monitor import _budget_allows_ai
         if _budget_allows_ai(settings):
-            from paa_haiku import _run_haiku, _parse_haiku_response
+            from paa_haiku import _run_scan_model, _parse_haiku_response
             conflict_text = '\n'.join(
                 f'- {pkg}: ' + ', '.join(
                     f'{proj}={spec}' for proj, spec in sorted(specs.items())
@@ -232,7 +232,8 @@ def check_shared_dep_conflicts(projects, settings):
                 'Set "critical" to true ONLY for known CVEs or confirmed incompatibilities.\n'
                 'If all conflicts are benign version range differences: {"issues": []}'
             )
-            response, tokens = _run_haiku(prompt, settings)
+            # Cross-project: no single project pin — use global model_default.
+            response, tokens = _run_scan_model(prompt, settings, project_path='')
             if response:
                 ai_issues = _parse_haiku_response(response)
                 for issue in ai_issues:

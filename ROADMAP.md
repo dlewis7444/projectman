@@ -19,20 +19,13 @@ Still optional / polish:
 - Detach/reattach (remote zellij) — disconnect kills process today
 - ControlMaster / async SSH to avoid UI stalls on slow hosts
 
-### 2. Update PAA to use the correct model(s)
+### 2. Update PAA to use the correct model(s) — **shipped in 1.4.4**
 
-PAA (the Proactive Agent Assistant monitor, `paa_monitor.py`) runs its
-on-demand AI scan — the "Haiku Check" — through a **hardcoded Haiku model
-path** (`paa_haiku.run_ai_checks`, gated by the `paa_allow_haiku` toggle).
-That path is frozen to one model and ignores the rest of the user's
-configuration.
-
-Update PAA to use the **correct model(s)** — route its AI scan through the
-model axis (the per-provider tier system / `build_spawn_env`) instead of the
-hardcoded Haiku path, so PAA respects the user's configured provider and tier
-assignments (e.g. Haiku tier → the user's chosen Haiku-tier model on their
-active provider). The `paa_allow_haiku` "Enable AI Scans" toggle stays as the
-on/off gate; what changes is *which model* the scan uses.
+PAA AI scans and Discuss sessions route through the model axis
+(`build_spawn_env` + tier resolution). Scan/chat pick a Claude Code tier
+(Fast/Standard/Capable = Haiku/Sonnet/Opus) mapped to the configured
+provider. Sidebar label is **AI Scan** (was “Haiku Check”). Storage key
+`paa_allow_haiku` kept for settings back-compat.
 
 PAA remains **localhost-only**.
 

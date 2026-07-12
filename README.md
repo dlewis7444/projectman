@@ -38,12 +38,12 @@ continuously scans your projects and surfaces actionable findings in a card-base
 - Context drift — stale file references in `CLAUDE.md` (bare filenames, relative paths,
   and absolute paths all resolved; external references deduplicated automatically)
 
-**AI checks (optional, uses the `claude` CLI + Anthropic credentials):**
+**AI checks (optional — Enable AI Scans in Settings → PAA):**
 
-> The PAA's AI scans run the `claude` CLI against native Anthropic **regardless of
-> your default harness** — they do not route through `grok`, OpenCode, or
-> claude-code-router. A machine with no Anthropic access can still use the
-> filesystem checks above; the AI checks simply stay off.
+> AI scans run **Claude Code** (`claude -p`) with your **Models-page provider**
+> and scan tier (Haiku / Sonnet / Opus tiers mapped to that provider's models).
+> Native Anthropic is used when no custom provider is selected. Filesystem
+> checks stay free either way; turn AI scans off if you do not want model calls.
 
 - Semantic staleness — `CLAUDE.md` no longer describes what the project actually does
 - Outdated or conflicting dependency versions
@@ -56,15 +56,17 @@ continuously scans your projects and surfaces actionable findings in a card-base
 
 **Card window:**
 - Filter by project, criticality, or finding type
-- **Discuss** button — opens an interactive Claude session with the finding pre-loaded as
+- **Discuss** button — opens an interactive PAA agent session with the finding pre-loaded as
   context, plus any other pending findings for the same project so related issues can be
   addressed together
 - Dismiss / Acknowledge actions with persistent ledger (survives restarts)
 - Sparkle button throbs only when new findings appear
 
+Sidebar context menu **AI Scan** forces an on-demand AI scan of one project.
+
 **PAA settings (Settings → PAA):**
 - Enable/disable toggle and scan interval
-- Haiku toggle, monthly token budget, and model selection for scans and chat
+- Enable AI Scans, monthly token budget, and scan/chat tier selection
 
 ## Requirements
 
@@ -183,7 +185,8 @@ Add the following to `~/.claude/settings.json` (create the file if it doesn't ex
 }
 ```
 
-You can also edit this file from within ProjectMan via **Settings → Claude JSON**.
+Edit `~/.claude/settings.json` in your editor if you need to tweak hooks by hand;
+ProjectMan no longer ships an in-app JSON editor for that file.
 
 Status dots work without this step — they just won't update in real time until hooks are configured.
 
