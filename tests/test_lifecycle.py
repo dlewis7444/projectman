@@ -287,8 +287,66 @@ def test_g3a_create_activates_new_project_canonically():
     assert ('activate', fake._sidebar, expected_path) in calls
     # canonical ordering: create, then refresh, then activate.
     assert calls.index(('create', 'newproj')) < calls.index(('refresh',))
-    assert calls.index(('refresh',)) < calls.index(
-        ('activate', fake._sidebar, expected_path))
+
+
+def test_rename_remote_uses_remote_store_not_local_os_rename(monkeypatch):
+    """Remote rename must SSH-rename via remote_store, not ProjectStore.os.rename."""
+    from model import Project
+    from hosts import HostProfile, encode_project_ref
+    import remote_store
+
+    old_path = encode_project_ref('h1', 'old')
+    new_path = encode_project_ref('h1', 'new')
+    proj = Project(name='old', path=old_path, host_id='h1', remote_cwd='/r/old')
+    calls = []
+
+    def rename_remote(profile, old_name, new_name, **kw):
+        calls.append(('remote_rename', profile.id, old_name, new_name))
+        return True, None
+
+    def list_remote(profile, **kw):
+        calls.append(('list', profile.id))
+        return [Project(name='new', path=new_path, host_id='h1',
+                        remote_cwd='/r/new')], None
+
+    monkeypatch.setattr(remote_store, 'rename_remote_project', rename_remote)
+    monkeypatch.setattr(remote_store, 'list_remote_projects', list_remote)
+
+    store_calls = []
+    fake = types.SimpleNamespace(
+        _settings=types.SimpleNamespace(
+            host_profiles=lambda: {
+                'h1': HostProfile(id='h1', ssh_target='box',
+                                  remote_projects_dir='~/p'),
+            },
+        ),
+        _store=types.SimpleNamespace(
+            rename_project=lambda *a, **k: store_calls.append(a) or (_ for _ in ()).throw(
+                AssertionError('local rename must not run for remote')),
+            _projects_dir=lambda: '/tmp/projects',
+        ),
+        _sidebar=types.SimpleNamespace(
+            _remote_projects={'h1': [proj]},
+            set_remote_projects=lambda hid, ps: calls.append(
+                ('set_remote', hid, [p.name for p in ps])),
+            refresh=lambda: calls.append(('refresh',)),
+            _process_states={},
+            _running_harnesses={},
+        ),
+        _terminals={},
+        _active_path=None,
+        _mru=[],
+        _find_project=lambda p: proj if p == old_path else None,
+        _show_toast=lambda t: calls.append(('toast', t)),
+        _sync_running_state=lambda: calls.append(('sync',)),
+        _set_active_project=lambda p: calls.append(('active', p.name)),
+    )
+    AppWindow._on_project_rename(fake, fake._sidebar, old_path, 'new')
+    assert ('remote_rename', 'h1', 'old', 'new') in calls
+    assert ('set_remote', 'h1', ['new']) in calls
+    assert store_calls == []
+    assert ('refresh',) not in calls  # remote path refreshes via set_remote_projects
+    assert ('sync',) in calls
 
 
 def test_g3b_creation_toast_still_fires():

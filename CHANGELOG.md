@@ -7,6 +7,23 @@ All notable changes to ProjectMan will be documented in this file.
 _Deferred UX polish TODOs (editor unsaved-changes affordance; sidebar
 new-project count while inline-edit row is visible) remain open._
 
+## [1.4.3] - 2026-07-11
+
+### Added
+- **Sticky host headers in the sidebar:** host section chrome pins at the
+  top of the project list while you scroll that host's projects (Excel
+  freeze-row style). The next host header pushes the previous pin off.
+  Implemented via per-host section containers (header outside the project
+  `ListBox`) plus a scroll-tracked overlay pin.
+
+### Fixed
+- **Project rename (localhost + remote):** context-menu Rename was cancelled
+  immediately by a focus-leave race when the popover closed (entry never
+  stayed editable). Leave-to-cancel is now armed only after rename focus
+  settles. Remote rename also actually runs over SSH via
+  `remote_store.rename_remote_project` instead of local `os.rename` on an
+  `ssh:` ref (which always failed silently).
+
 ## [1.4.2] - 2026-07-10
 
 ### Changed
