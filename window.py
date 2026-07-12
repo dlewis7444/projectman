@@ -1586,14 +1586,55 @@ class AppWindow(Adw.ApplicationWindow):
         return f"New project '{name}' — harness: {display}"
 
     def _on_project_rename(self, sidebar, old_path, new_name):
+        from hosts import LOCALHOST_ID, encode_project_ref
+        import remote_store
+
         project = self._find_project(old_path)
         if not project:
             return
-        new_path = os.path.join(os.path.dirname(old_path), new_name)
-        try:
-            self._store.rename_project(project, new_name)
-        except OSError:
-            return
+        host_id = getattr(project, 'host_id', LOCALHOST_ID) or LOCALHOST_ID
+
+        if host_id != LOCALHOST_ID:
+            prof = self._settings.host_profiles().get(host_id)
+            if prof is None:
+                self._show_toast(f'Unknown host {host_id}')
+                return
+            ok, err = remote_store.rename_remote_project(
+                prof, project.name, new_name)
+            if not ok:
+                self._show_toast(err or 'Remote rename failed')
+                return
+            new_path = encode_project_ref(host_id, new_name)
+            remote_cwd = remote_store.remote_project_path(
+                prof.remote_projects_dir, new_name)
+            # Refresh host cache so the new name appears under its section.
+            projects, lerr = remote_store.list_remote_projects(prof)
+            if not lerr:
+                self._sidebar.set_remote_projects(host_id, projects)
+            else:
+                # Fall back to swapping the one entry we know about.
+                cached = list(self._sidebar._remote_projects.get(host_id, []))
+                for i, p in enumerate(cached):
+                    if p.path == old_path or p.name == project.name:
+                        cached[i] = Project(
+                            name=new_name, path=new_path, host_id=host_id,
+                            remote_cwd=remote_cwd,
+                        )
+                        break
+                else:
+                    cached.append(Project(
+                        name=new_name, path=new_path, host_id=host_id,
+                        remote_cwd=remote_cwd,
+                    ))
+                self._sidebar.set_remote_projects(host_id, cached)
+        else:
+            try:
+                self._store.rename_project(project, new_name)
+            except OSError as e:
+                self._show_toast(f'Rename failed: {e}')
+                return
+            new_path = os.path.join(self._store._projects_dir(), new_name)
+            remote_cwd = None
 
         # Migrate terminal stack entry so the running session survives the rename
         if old_path in self._terminals:
@@ -1601,16 +1642,28 @@ class AppWindow(Adw.ApplicationWindow):
             self._stack.remove(tv)
             self._stack.add_named(tv, new_path)
             self._terminals[new_path] = tv
-            tv._project = Project(name=new_name, path=new_path)
+            tv._project = Project(
+                name=new_name, path=new_path, host_id=host_id,
+                remote_cwd=remote_cwd if host_id != LOCALHOST_ID
+                else getattr(project, 'remote_cwd', None),
+            )
 
         if self._active_path == old_path:
             self._active_path = new_path
             self._mru = [new_path if p == old_path else p for p in self._mru]
             renamed = self._find_project(new_path) or Project(
-                name=new_name, path=new_path,
-                host_id=getattr(project, 'host_id', 'localhost'),
+                name=new_name, path=new_path, host_id=host_id,
+                remote_cwd=remote_cwd if host_id != LOCALHOST_ID
+                else getattr(project, 'remote_cwd', None),
             )
             self._set_active_project(renamed)
 
-        self._sidebar.refresh()
+        # Durable process-state keys track path; rewrite so dots/counts survive.
+        for bag_name in ('_process_states', '_running_harnesses'):
+            bag = getattr(self._sidebar, bag_name, None)
+            if isinstance(bag, dict) and old_path in bag:
+                bag[new_path] = bag.pop(old_path)
+
+        if host_id == LOCALHOST_ID:
+            self._sidebar.refresh()
         self._sync_running_state()

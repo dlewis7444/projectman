@@ -44,11 +44,13 @@ class Sidebar(Gtk.Box):
         self._settings = settings
         self._watcher = watcher
         self._rows = {}
-        self._section_headers = {}  # host_id → HostSectionHeader
+        self._sections = {}         # host_id → HostSection
+        self._section_headers = {}  # host_id → HostSectionHeader (in-flow)
         self._row_host = {}         # path → host_id
         self._new_project_row = None
         self._new_project_host_id = 'localhost'
         self._filter_text = ''
+        self._sticky_host_id = None
         # Per-project model menu state, pushed in via set_model_options().
         self._model_options = []
         self._model_overrides = {}
@@ -95,15 +97,38 @@ class Sidebar(Gtk.Box):
 
         self.append(btn_row)
 
+        # Overlay: scrollable per-host sections + sticky host header pin.
+        self._overlay = Gtk.Overlay()
+        self._overlay.set_vexpand(True)
         self._scrolled = Gtk.ScrolledWindow()
         self._scrolled.set_vexpand(True)
         self._scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self._listbox = Gtk.ListBox()
-        self._listbox.add_css_class('navigation-sidebar')
-        self._listbox.connect('row-activated', self._on_row_activated)
-        self._listbox.set_filter_func(self._filter_row)
-        self._scrolled.set_child(self._listbox)
-        self.append(self._scrolled)
+        self._sections_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._scrolled.set_child(self._sections_box)
+        self._overlay.set_child(self._scrolled)
+
+        # Sticky clone: same HostSectionHeader chrome, pinned at viewport top.
+        self._sticky_header = HostSectionHeader(
+            host_id='localhost',
+            title='localhost',
+            expanded=True,
+            show_health=False,
+            on_toggle=self._on_section_toggle,
+            on_add_project=self._on_section_add_project,
+        )
+        self._sticky_header.add_css_class('pm-sticky-host')
+        self._sticky_header.set_halign(Gtk.Align.FILL)
+        self._sticky_header.set_valign(Gtk.Align.START)
+        self._sticky_header.set_hexpand(True)
+        self._sticky_header.set_visible(False)
+        self._overlay.add_overlay(self._sticky_header)
+
+        adj = self._scrolled.get_vadjustment()
+        adj.connect('value-changed', self._on_scroll_changed)
+        # Recompute pin after layout settles (filters, rebuilds, resize).
+        self._sections_box.connect(
+            'map', lambda *a: GLib.idle_add(self._update_sticky_header_idle))
+        self.append(self._overlay)
 
         self._count_label = Gtk.Label()
         self._count_label.add_css_class('dim-label')
@@ -134,23 +159,21 @@ class Sidebar(Gtk.Box):
 
         self._populate()
 
-    def _filter_row(self, row):
-        if isinstance(row, HostSectionHeader):
+    def _filter_func_for(self, host_id):
+        """Per-host ListBox filter: section mode + name filter."""
+        def _filter_row(row):
+            if isinstance(row, NewProjectEntryRow):
+                return self._section_mode(host_id) != 'hidden'
+            if isinstance(row, ProjectRow):
+                mode = self._section_mode(host_id)
+                if mode == 'hidden':
+                    return False
+                if mode == 'active' and row._process_state not in ('attached', 'detached'):
+                    return False
+                if self._filter_text and self._filter_text not in row._project.name.lower():
+                    return False
             return True
-        if isinstance(row, NewProjectEntryRow):
-            # Only show while the target section is not fully hidden.
-            return self._section_mode(self._new_project_host_id) != 'hidden'
-        if isinstance(row, ProjectRow):
-            host_id = self._row_host.get(row._project.path, getattr(
-                row._project, 'host_id', 'localhost'))
-            mode = self._section_mode(host_id)
-            if mode == 'hidden':
-                return False
-            if mode == 'active' and row._process_state not in ('attached', 'detached'):
-                return False
-            if self._filter_text and self._filter_text not in row._project.name.lower():
-                return False
-        return True
+        return _filter_row
 
     def _section_mode(self, host_id):
         if self._settings is not None:
@@ -160,9 +183,18 @@ class Sidebar(Gtk.Box):
     def _is_section_expanded(self, host_id):
         return self._section_mode(host_id) != 'hidden'
 
+    def _invalidate_filters(self):
+        for section in self._sections.values():
+            section.listbox.invalidate_filter()
+        GLib.idle_add(self._update_sticky_header_idle)
+
+    def _update_sticky_header_idle(self):
+        self._update_sticky_header()
+        return False
+
     def set_filter_text(self, text):
         self._filter_text = text.lower()
-        self._listbox.invalidate_filter()
+        self._invalidate_filters()
 
     def _host_order(self):
         """localhost first, then remotes in stable settings order."""
@@ -222,9 +254,23 @@ class Sidebar(Gtk.Box):
             self._model_overrides.get(proj.path, FOLLOW_DEFAULT),
             self._global_model_label,
         )
-        self._listbox.append(row)
+        host_id = getattr(proj, 'host_id', 'localhost')
+        section = self._sections.get(host_id)
+        if section is not None:
+            section.listbox.append(row)
         self._rows[proj.path] = row
-        self._row_host[proj.path] = getattr(proj, 'host_id', 'localhost')
+        self._row_host[proj.path] = host_id
+
+    def _clear_sections(self):
+        child = self._sections_box.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            self._sections_box.remove(child)
+            child = nxt
+        self._sections.clear()
+        self._section_headers.clear()
+        self._sticky_host_id = None
+        self._sticky_header.set_visible(False)
 
     def _populate(self):
         from hosts import LOCALHOST_ID
@@ -232,7 +278,9 @@ class Sidebar(Gtk.Box):
         pending_row = self._new_project_row
         pending_host = self._new_project_host_id
         if pending_row is not None:
-            self._listbox.remove(pending_row)
+            parent = pending_row.get_parent()
+            if parent is not None:
+                parent.remove(pending_row)
             self._new_project_row = None
         # Snapshot row state (also mirrored into durable maps by setters).
         running_state = {path: row._process_state for path, row in self._rows.items()}
@@ -240,12 +288,7 @@ class Sidebar(Gtk.Box):
 
         self._rows.clear()
         self._row_host.clear()
-        self._section_headers.clear()
-        while True:
-            row = self._listbox.get_row_at_index(0)
-            if row is None:
-                break
-            self._listbox.remove(row)
+        self._clear_sections()
 
         for host_id in self._host_order():
             title = 'localhost'
@@ -266,7 +309,15 @@ class Sidebar(Gtk.Box):
             header.set_filter_mode(mode)
             health = self._host_health.get(host_id, 'grey')
             header.set_health(health)
-            self._listbox.append(header)
+
+            listbox = Gtk.ListBox()
+            listbox.add_css_class('navigation-sidebar')
+            listbox.connect('row-activated', self._on_row_activated)
+            listbox.set_filter_func(self._filter_func_for(host_id))
+
+            section = HostSection(host_id, header, listbox)
+            self._sections_box.append(section)
+            self._sections[host_id] = section
             self._section_headers[host_id] = header
 
             projects = self._projects_for_host(host_id)
@@ -279,12 +330,13 @@ class Sidebar(Gtk.Box):
             if pending_row is not None and pending_host == host_id:
                 self._new_project_row = pending_row
                 self._new_project_host_id = pending_host
-                self._listbox.append(pending_row)
+                listbox.append(pending_row)
                 GLib.idle_add(lambda: pending_row._entry.grab_focus() and False)
 
         self._refresh_section_counts()
         self._update_count_label()
-        self._listbox.invalidate_filter()
+        self._invalidate_filters()
+        GLib.idle_add(self._update_sticky_header_idle)
 
     def _on_section_toggle(self, host_id):
         """Cycle section filter: hidden → active → all → hidden."""
@@ -300,8 +352,11 @@ class Sidebar(Gtk.Box):
         if header is not None:
             header.set_expanded(nxt != 'hidden')
             header.set_filter_mode(nxt)
+        if self._sticky_host_id == host_id:
+            self._sticky_header.set_expanded(nxt != 'hidden')
+            self._sticky_header.set_filter_mode(nxt)
         self.emit('host-section-toggled', host_id, nxt != 'hidden')
-        self._listbox.invalidate_filter()
+        self._invalidate_filters()
         self._update_count_label()
 
     def _on_section_add_project(self, host_id):
@@ -312,14 +367,14 @@ class Sidebar(Gtk.Box):
             if header is not None:
                 header.set_expanded(True)
                 header.set_filter_mode('all')
+            if self._sticky_host_id == host_id:
+                self._sticky_header.set_expanded(True)
+                self._sticky_header.set_filter_mode('all')
             self.emit('host-section-toggled', host_id, True)
-            self._listbox.invalidate_filter()
+            self._invalidate_filters()
         self._on_add_project(None, host_id=host_id)
 
     def _on_row_activated(self, listbox, row):
-        if isinstance(row, HostSectionHeader):
-            self._on_section_toggle(row.host_id)
-            return
         if isinstance(row, ProjectRow):
             self.emit('project-activated', row._project.path)
 
@@ -335,7 +390,10 @@ class Sidebar(Gtk.Box):
                 actives[hid] += 1
         # Remote hosts with zero cached projects still need 0(0)
         for host_id, header in self._section_headers.items():
-            header.set_counts(actives.get(host_id, 0), totals.get(host_id, 0))
+            a, t = actives.get(host_id, 0), totals.get(host_id, 0)
+            header.set_counts(a, t)
+            if self._sticky_host_id == host_id:
+                self._sticky_header.set_counts(a, t)
 
     def _update_count_label(self):
         active_n = sum(1 for row in self._rows.values()
@@ -358,8 +416,15 @@ class Sidebar(Gtk.Box):
         return
 
     def select_project(self, path):
-        if path in self._rows:
-            self._listbox.select_row(self._rows[path])
+        row = self._rows.get(path)
+        if row is None:
+            return
+        host_id = self._row_host.get(path, 'localhost')
+        for hid, section in self._sections.items():
+            if hid == host_id:
+                section.listbox.select_row(row)
+            else:
+                section.listbox.unselect_all()
 
     def set_project_state(self, path, state: str, is_zellij: bool = None):
         """Record process liveness for *path* even if the row is not built yet.
@@ -372,7 +437,7 @@ class Sidebar(Gtk.Box):
         if path in self._rows:
             self._rows[path].set_process_state(state, is_zellij=is_zellij)
         # Active-only sections need a refilter when process state changes.
-        self._listbox.invalidate_filter()
+        self._invalidate_filters()
         self._refresh_section_counts()
         self._update_count_label()
 
@@ -399,6 +464,8 @@ class Sidebar(Gtk.Box):
         header = self._section_headers.get(host_id)
         if header is not None:
             header.set_health(state)
+        if self._sticky_host_id == host_id:
+            self._sticky_header.set_health(state)
 
     def set_running_harness(self, path, harness_id):
         """Push the live child's actual agent onto a row (C5). ``None`` clears
@@ -518,6 +585,8 @@ class Sidebar(Gtk.Box):
             header = self._section_headers.get(host_id)
             if header is not None:
                 header.set_expanded(True)
+            if self._sticky_host_id == host_id:
+                self._sticky_header.set_expanded(True)
             self.emit('host-section-toggled', host_id, True)
         row = NewProjectEntryRow(
             on_commit=self._commit_new_project,
@@ -525,15 +594,12 @@ class Sidebar(Gtk.Box):
         )
         self._new_project_row = row
         self._new_project_host_id = host_id
-        # Insert after the section header for this host.
-        header = self._section_headers.get(host_id)
-        if header is not None:
-            idx = header.get_index()
-            self._listbox.insert(row, idx + 1)
-        else:
-            self._listbox.prepend(row)
-        self._listbox.invalidate_filter()
+        section = self._sections.get(host_id)
+        if section is not None:
+            section.listbox.prepend(row)
+            section.listbox.invalidate_filter()
         GLib.idle_add(lambda: row._entry.grab_focus() and False)
+        GLib.idle_add(self._update_sticky_header_idle)
 
     def _commit_new_project(self, name):
         row = self._new_project_row
@@ -541,22 +607,129 @@ class Sidebar(Gtk.Box):
         self._new_project_row = None
         self._new_project_host_id = 'localhost'
         if row is not None:
-            self._listbox.remove(row)
+            parent = row.get_parent()
+            if parent is not None:
+                parent.remove(row)
         self.emit('project-create', host_id, name)
 
     def _cancel_new_project(self):
         if self._new_project_row is None:
             return
-        self._listbox.remove(self._new_project_row)
+        parent = self._new_project_row.get_parent()
+        if parent is not None:
+            parent.remove(self._new_project_row)
         self._new_project_row = None
         self._new_project_host_id = 'localhost'
 
+    def _on_scroll_changed(self, *_args):
+        self._update_sticky_header()
 
-class HostSectionHeader(Gtk.ListBoxRow):
+    def _widget_y_in_content(self, widget):
+        """Y of *widget* top edge relative to the sections content box."""
+        if widget is None or not widget.get_mapped():
+            return None
+        try:
+            result = widget.translate_coordinates(self._sections_box, 0, 0)
+        except Exception:
+            return None
+        if result is None:
+            return None
+        # PyGObject may return (ok, x, y) or (x, y)
+        if len(result) == 3:
+            ok, _x, y = result
+            return float(y) if ok else None
+        if len(result) == 2:
+            _x, y = result
+            return float(y)
+        return None
+
+    def _update_sticky_header(self):
+        """Pin the current host header at the top of the scroll viewport.
+
+        Classic section-sticky: header stays put while its projects scroll
+        underneath; the next host header pushes it off.
+        """
+        adj = self._scrolled.get_vadjustment()
+        scroll_y = float(adj.get_value())
+        order = [hid for hid in self._host_order() if hid in self._sections]
+        if not order:
+            self._sticky_header.set_visible(False)
+            self._sticky_host_id = None
+            return
+
+        sticky_host = None
+        next_header_y = None
+        for i, host_id in enumerate(order):
+            section = self._sections[host_id]
+            y = self._widget_y_in_content(section.header)
+            if y is None:
+                continue
+            section_h = float(section.get_allocated_height() or 0)
+            section_bottom = y + section_h
+            # Past this section's header top, still inside the section.
+            if y <= scroll_y < section_bottom:
+                sticky_host = host_id
+                if i + 1 < len(order):
+                    next_header_y = self._widget_y_in_content(
+                        self._sections[order[i + 1]].header)
+                break
+
+        # Don't pin while the in-flow header is still fully visible.
+        if sticky_host is not None:
+            header_y = self._widget_y_in_content(self._sections[sticky_host].header)
+            if header_y is not None and header_y >= scroll_y - 0.5:
+                sticky_host = None
+
+        if sticky_host is None:
+            self._sticky_header.set_visible(False)
+            self._sticky_header.set_margin_top(0)
+            self._sticky_host_id = None
+            return
+
+        src = self._section_headers.get(sticky_host)
+        if src is None:
+            self._sticky_header.set_visible(False)
+            self._sticky_host_id = None
+            return
+
+        if self._sticky_host_id != sticky_host:
+            self._sticky_host_id = sticky_host
+            self._sticky_header.bind_from(src)
+
+        self._sticky_header.set_visible(True)
+
+        # Push sticky up as the next host header approaches (Excel freeze feel).
+        sticky_h = float(self._sticky_header.get_allocated_height() or 0)
+        if sticky_h <= 0:
+            sticky_h = float(src.get_allocated_height() or 0)
+        push = 0.0
+        if next_header_y is not None and sticky_h > 0:
+            dist = next_header_y - scroll_y
+            if dist < sticky_h:
+                push = sticky_h - max(dist, 0.0)
+        self._sticky_header.set_margin_top(int(-push))
+
+
+class HostSection(Gtk.Box):
+    """One host block: sticky-able header + project ListBox."""
+
+    def __init__(self, host_id, header, listbox):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.host_id = host_id
+        self.header = header
+        self.listbox = listbox
+        self.add_css_class('pm-host-section-block')
+        self.append(header)
+        self.append(listbox)
+
+
+class HostSectionHeader(Gtk.Box):
     """Section header for a host (localhost or remote).
 
     Click cycles filter mode: hide all → active only → show all.
     Shows optional health micro-dot and ``active(total)`` counts.
+    Not a ListBoxRow — lives above each host's project list (and as the
+    sticky overlay clone).
     """
 
     _MODE_TIPS = {
@@ -571,31 +744,28 @@ class HostSectionHeader(Gtk.ListBoxRow):
     }
 
     def __init__(self, host_id, title, expanded, show_health, on_toggle, on_add_project):
-        super().__init__()
-        self.set_selectable(False)
-        self.set_activatable(True)
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.host_id = host_id
         self._expanded = expanded
         self._filter_mode = 'all' if expanded else 'hidden'
         self._title_text = title
+        self._show_health = show_health
         self._on_toggle = on_toggle
         self._on_add_project = on_add_project
         self.add_css_class('pm-host-section')
-
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        box.set_margin_start(8)
-        box.set_margin_end(4)
-        box.set_margin_top(8)
-        box.set_margin_bottom(6)
+        self.set_hexpand(True)
 
         self._health_dot = Gtk.Box()
         self._health_dot.add_css_class('host-health-dot')
         self._health_dot.set_valign(Gtk.Align.CENTER)
+        self._health_dot.set_margin_start(8)
         self._health_dot.set_visible(show_health)
-        box.append(self._health_dot)
+        self.append(self._health_dot)
 
         title_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         title_col.set_hexpand(True)
+        title_col.set_margin_top(8)
+        title_col.set_margin_bottom(6)
         self._title_label = Gtk.Label(label=title, xalign=0)
         self._title_label.add_css_class('pm-host-section-title')
         self._title_label.set_ellipsize(Pango.EllipsizeMode.END)
@@ -607,25 +777,30 @@ class HostSectionHeader(Gtk.ListBoxRow):
         self._filter_label.add_css_class('pm-host-section-filter')
         self._filter_label.set_ellipsize(Pango.EllipsizeMode.END)
         title_col.append(self._filter_label)
-        box.append(title_col)
+        self.append(title_col)
 
         self._count_label = Gtk.Label(label='0(0)')
         self._count_label.add_css_class('dim-label')
         self._count_label.add_css_class('caption')
         self._count_label.add_css_class('pm-host-section-count')
         self._count_label.set_valign(Gtk.Align.CENTER)
-        box.append(self._count_label)
+        self.append(self._count_label)
 
-        add_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
-        add_btn.add_css_class('flat')
-        add_btn.add_css_class('circular')
-        add_btn.set_tooltip_text('New Project')
-        add_btn.set_has_frame(False)
-        add_btn.set_valign(Gtk.Align.CENTER)
-        add_btn.connect('clicked', self._on_add_clicked)
-        box.append(add_btn)
+        self._add_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
+        self._add_btn.add_css_class('flat')
+        self._add_btn.add_css_class('circular')
+        self._add_btn.set_tooltip_text('New Project')
+        self._add_btn.set_has_frame(False)
+        self._add_btn.set_valign(Gtk.Align.CENTER)
+        self._add_btn.set_margin_end(4)
+        self._add_btn.connect('clicked', self._on_add_clicked)
+        self.append(self._add_btn)
 
-        self.set_child(box)
+        click = Gtk.GestureClick.new()
+        click.set_button(1)
+        click.connect('released', self._on_header_released)
+        self.add_controller(click)
+
         self.set_expanded(expanded)
         self.set_filter_mode(self._filter_mode)
         if show_health:
@@ -633,6 +808,35 @@ class HostSectionHeader(Gtk.ListBoxRow):
 
     def _on_add_clicked(self, button):
         self._on_add_project(self.host_id)
+
+    def _on_header_released(self, gesture, n_press, x, y):
+        if n_press < 1:
+            return
+        # Ignore clicks on the add button (it handles its own action).
+        if self._add_btn.contains(x, y) if hasattr(self._add_btn, 'contains') else False:
+            return
+        # Fallback: if event is over add_btn allocation.
+        ok = self._add_btn.translate_coordinates(self, 0, 0)
+        if ok is not None:
+            if len(ok) == 3:
+                success, bx, by = ok
+                if success:
+                    alloc = self._add_btn.get_allocation()
+                    if bx <= x <= bx + alloc.width and by <= y <= by + alloc.height:
+                        return
+            elif len(ok) == 2:
+                bx, by = ok
+                alloc = self._add_btn.get_allocation()
+                if bx <= x <= bx + alloc.width and by <= y <= by + alloc.height:
+                    return
+        if self._on_toggle is not None:
+            self._on_toggle(self.host_id)
+
+    def set_title(self, title: str):
+        self._title_text = title
+        self._title_label.set_label(title)
+        tip = self._MODE_TIPS.get(self._filter_mode, '')
+        self._title_label.set_tooltip_text(f'{self._title_text}\n{tip}')
 
     def set_expanded(self, expanded):
         self._expanded = bool(expanded)
@@ -651,6 +855,7 @@ class HostSectionHeader(Gtk.ListBoxRow):
         self._count_label.set_label(f'{int(active)}({int(total)})')
 
     def set_health(self, state: str):
+        self._health_dot.set_visible(self._show_health)
         for s in ('grey', 'green', 'yellow', 'red'):
             self._health_dot.remove_css_class(f'host-health-{s}')
         state = state if state in ('grey', 'green', 'yellow', 'red') else 'grey'
@@ -662,6 +867,22 @@ class HostSectionHeader(Gtk.ListBoxRow):
             'red': 'Unreachable',
         }
         self._health_dot.set_tooltip_text(tips.get(state, ''))
+
+    def bind_from(self, other: 'HostSectionHeader'):
+        """Copy identity + chrome from another header (sticky pin sync)."""
+        self.host_id = other.host_id
+        self._show_health = other._show_health
+        self.set_title(other._title_text)
+        self.set_filter_mode(other._filter_mode)
+        self.set_expanded(other._expanded)
+        self._count_label.set_label(other._count_label.get_label())
+        self._health_dot.set_visible(other._health_dot.get_visible())
+        for s in ('grey', 'green', 'yellow', 'red'):
+            self._health_dot.remove_css_class(f'host-health-{s}')
+            if other._health_dot.has_css_class(f'host-health-{s}'):
+                self._health_dot.add_css_class(f'host-health-{s}')
+                self._health_dot.set_tooltip_text(
+                    other._health_dot.get_tooltip_text() or '')
 
 
 class NewProjectEntryRow(Gtk.ListBoxRow):
@@ -768,13 +989,13 @@ class ProjectRow(Gtk.ListBoxRow):
 
         # Name + an effective-harness subtitle (B3). Vertical so the subtitle
         # sits under the name; the box carries the hexpand the name used to.
-        name_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        name_box.set_hexpand(True)
-        name_box.set_valign(Gtk.Align.CENTER)
+        self._name_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._name_box.set_hexpand(True)
+        self._name_box.set_valign(Gtk.Align.CENTER)
         self._name_label = Gtk.Label(label=project.name)
         self._name_label.set_halign(Gtk.Align.START)
         self._name_label.set_ellipsize(Pango.EllipsizeMode.END)
-        name_box.append(self._name_label)
+        self._name_box.append(self._name_label)
         self._subtitle_label = Gtk.Label()
         self._subtitle_label.set_halign(Gtk.Align.START)
         self._subtitle_label.set_ellipsize(Pango.EllipsizeMode.END)
@@ -782,8 +1003,8 @@ class ProjectRow(Gtk.ListBoxRow):
         self._subtitle_label.add_css_class('caption')
         self._subtitle_label.add_css_class('pm-harness-subtitle')
         self._subtitle_label.set_visible(False)
-        name_box.append(self._subtitle_label)
-        top.append(name_box)
+        self._name_box.append(self._subtitle_label)
+        top.append(self._name_box)
 
         self._rename_entry = Gtk.Entry()
         self._rename_entry.set_hexpand(True)
@@ -792,8 +1013,13 @@ class ProjectRow(Gtk.ListBoxRow):
         rename_key = Gtk.EventControllerKey.new()
         rename_key.connect('key-pressed', self._on_rename_key)
         self._rename_entry.add_controller(rename_key)
+        # Focus-leave cancels rename, but the context-menu popover close
+        # steals/restores focus and would cancel immediately. Arm leave
+        # handling only after rename focus has settled (see _enter_rename_mode).
+        self._rename_active = False
+        self._rename_ignore_leave = True
         rename_focus = Gtk.EventControllerFocus.new()
-        rename_focus.connect('leave', lambda c: self._exit_rename_mode())
+        rename_focus.connect('leave', self._on_rename_focus_leave)
         self._rename_entry.add_controller(rename_focus)
         top.append(self._rename_entry)
 
@@ -1248,31 +1474,58 @@ class ProjectRow(Gtk.ListBoxRow):
         self._status_dot.add_css_class(f'status-{status}')
 
     def _enter_rename_mode(self):
+        self._rename_active = True
+        self._rename_ignore_leave = True
         self._rename_entry.set_text(self._project.name)
-        self._name_label.set_visible(False)
+        # Hide the whole name stack (label + harness subtitle) so the entry
+        # gets the full row width.
+        self._name_box.set_visible(False)
         self._rename_entry.set_visible(True)
-        # Defer grab_focus so the popover menu (which is still closing) doesn't
-        # restore focus to its previous holder and trigger our focus-leave handler.
+        # Defer grab_focus so the closing context-menu popover doesn't win the
+        # focus fight; then arm leave-to-cancel only after settle.
         def _focus():
+            if not self._rename_active:
+                return False
             self._rename_entry.grab_focus()
             self._rename_entry.select_region(0, -1)
+
+            def _arm_leave():
+                if self._rename_active:
+                    self._rename_ignore_leave = False
+                return False
+            # 200ms covers popover popdown + focus restore chatter on GTK4/Adw.
+            GLib.timeout_add(200, _arm_leave)
             return False
         GLib.idle_add(_focus)
 
     def _exit_rename_mode(self):
+        self._rename_active = False
+        self._rename_ignore_leave = True
         self._rename_entry.set_visible(False)
+        self._name_box.set_visible(True)
         self._name_label.set_visible(True)
+        # Subtitle visibility is derived; refresh in case harness text applies.
+        if hasattr(self, '_update_subtitle'):
+            self._update_subtitle()
+
+    def _on_rename_focus_leave(self, *_args):
+        if self._rename_ignore_leave or not self._rename_active:
+            return
+        self._exit_rename_mode()
 
     def _on_rename_activate(self, entry):
         name = entry.get_text().strip()
         valid = (name and '/' not in name
                  and not name.startswith('.') and name != self._project.name)
+        # Ignore leave while we tear down (activate moves focus).
+        self._rename_ignore_leave = True
         self._exit_rename_mode()
         if valid:
             self.emit('project-rename', name)
 
     def _on_rename_key(self, ctrl, keyval, keycode, state):
         if keyval == Gdk.KEY_Escape:
+            self._rename_ignore_leave = True
             self._exit_rename_mode()
             return True
         return False
