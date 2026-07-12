@@ -7,6 +7,21 @@ All notable changes to ProjectMan will be documented in this file.
 _Deferred UX polish TODOs (editor unsaved-changes affordance; sidebar
 new-project count while inline-edit row is visible) remain open._
 
+## [1.4.5] - 2026-07-11
+
+### Fixed
+- **Harness / provider restart continues the conversation:** choosing a new
+  harness (or provider) on a project with a live session and accepting
+  **Restart Now** re-spawns with continue semantics (`-c`), same as activating
+  the project. Previously this path always used **New Session** (`spawn_fresh`),
+  so existing conversations in the newly selected harness were ignored. **New
+  Session** in the sidebar still starts fresh.
+
+### Changed
+- **README reorganized** for clearer onboarding (table of contents, two-track
+  how-to-run, installation lifecycle, cross-harness spawn/continue/resume table,
+  PAA subsections, See also links).
+
 ## [1.4.4] - 2026-07-11
 
 ### Changed
