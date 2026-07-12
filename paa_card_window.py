@@ -309,12 +309,27 @@ class PAACardWindow(Adw.Window):
         paa_dir = self._deploy_harness()
         claude_cmd = self._settings.resolved_claude_binary
         self._spawn_cancelled = False
-        # PAA intentionally uses native Anthropic — no ccr env injection here.
-        model = self._settings.paa_chat_model
+        # Route Discuss/chat through the model axis (global default provider —
+        # PAA has no project pin). Same native-fallback contract as terminals.
+        from models import build_spawn_env, resolve_tier_model
+        env_dict, _reason = build_spawn_env(self._settings, '')
+        tier = (self._settings.paa_chat_model or 'sonnet').strip() or 'sonnet'
+        model = tier
+        env_list = None
+        if env_dict is not None:
+            # VTE wants a complete strv; coerce values (build_spawn_env is
+            # already stringly, but belt-and-suspenders).
+            env_list = [f'{k}={v}' for k, v in env_dict.items()
+                        if v is not None]
+            if tier in ('haiku', 'sonnet', 'opus', 'fable', 'subagent'):
+                resolved = resolve_tier_model(
+                    self._settings, self._settings.effective_provider(''), tier)
+                if resolved:
+                    model = resolved
         self._vte.spawn_async(
             Vte.PtyFlags(0), paa_dir,
             [claude_cmd, '--model', model, prompt],
-            None, GLib.SpawnFlags.SEARCH_PATH,
+            env_list, GLib.SpawnFlags.SEARCH_PATH,
             None, None, -1, None,
             self._on_spawn_done,
         )
@@ -681,7 +696,7 @@ class PAACardWindow(Adw.Window):
 
         discuss_btn = Gtk.ToggleButton(label='Discuss')
         discuss_btn.add_css_class('paa-discuss-btn')
-        discuss_btn.set_tooltip_text('Discuss this finding with Claude')
+        discuss_btn.set_tooltip_text('Discuss this finding with the PAA agent')
         discuss_btn.set_active(
             self._terminal_panel.get_visible()
             and self._discussing_item_id == item.id

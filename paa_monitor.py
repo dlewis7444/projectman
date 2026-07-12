@@ -335,13 +335,12 @@ class PAAMonitor(GObject.GObject):
     __gsignals__ = {
         'findings-changed': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         'scan-progress': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
-        # M-UX.4: an on-demand AI scan (Haiku Check) was REFUSED because the
-        # guards weren't met — carries a human reason for window.py to toast.
-        # NO model call is made when this fires (the billing-leak fix).
+        # M-UX.4: an on-demand AI scan was REFUSED because the guards weren't
+        # met — carries a human reason for window.py to toast. NO model call
+        # is made when this fires (the billing-leak fix).
         'scan-blocked': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         # M-UX.4: an on-demand AI scan finished — carries (project_name,
-        # new_findings) so window.py can SHOW the result (the sweep found Haiku
-        # Check produced no visible output).
+        # new_findings) so window.py can SHOW the result.
         'single-scan-complete': (GObject.SignalFlags.RUN_FIRST, None, (str, int,)),
     }
 
@@ -381,22 +380,21 @@ class PAAMonitor(GObject.GObject):
         GLib.idle_add(lambda n=names: self.emit('scan-progress', n) or False)
 
     def scan_single_project(self, project_name, project_path):
-        """Force an AI scan of a single project (Haiku Check) in the background.
+        """Force an AI scan of a single project (sidebar "AI Scan") in the background.
 
-        M-UX.4 (C2/C4/C6 — the billing leak): the AI scan calls the `claude`
-        CLI and bills Anthropic, so it MUST be gated. BOTH guards are checked
+        M-UX.4 (C2/C4/C6 — the billing leak): the AI scan uses Claude Code with
+        the configured provider, so it MUST be gated. BOTH guards are checked
         SYNCHRONOUSLY here, BEFORE any thread or model call:
 
           * ``paa_enabled``     — the master PAA toggle, and
-          * ``paa_allow_haiku`` — the "Enable AI Scans" toggle.
+          * ``paa_allow_haiku`` — the "Enable AI Scans" toggle (storage key).
 
         If either is off, the method emits ``scan-blocked`` and RETURNS without
         starting the worker thread — so the disabled path provably makes ZERO
-        ``run_ai_checks`` calls (the sweep saw paa_budget_used jump 0→298 with
-        PAA disabled). On the allowed path the worker runs and emits
-        ``single-scan-complete`` so the result is actually SHOWN (the sweep found
-        no visible output). Returns True when the scan was started, False when
-        blocked (also lets headless tests assert the decision without threads).
+        ``run_ai_checks`` calls. On the allowed path the worker runs and emits
+        ``single-scan-complete`` so the result is actually SHOWN. Returns True
+        when the scan was started, False when blocked (also lets headless tests
+        assert the decision without threads).
         """
         if not (self._settings.paa_enabled and self._settings.paa_allow_haiku):
             self.emit('scan-blocked', 'AI scans are disabled (Settings → PAA)')

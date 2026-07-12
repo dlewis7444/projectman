@@ -232,14 +232,26 @@ class PAAWindow(Adw.Window):
         return box
 
     def spawn_claude(self, paa_dir):
-        """Spawn claude 'WELCOME' in the PAA directory."""
+        """Spawn claude 'WELCOME' in the PAA directory (model-axis env)."""
         self._spawn_cancelled = False
         claude_cmd = self._settings.resolved_claude_binary
+        from models import build_spawn_env, resolve_tier_model
+        env_dict, _reason = build_spawn_env(self._settings, '')
+        tier = (self._settings.paa_chat_model or 'sonnet').strip() or 'sonnet'
+        model = tier
+        env_list = None
+        if env_dict is not None:
+            env_list = [f'{k}={v}' for k, v in env_dict.items() if v is not None]
+            if tier in ('haiku', 'sonnet', 'opus', 'fable', 'subagent'):
+                resolved = resolve_tier_model(
+                    self._settings, self._settings.effective_provider(''), tier)
+                if resolved:
+                    model = resolved
         self._terminal.spawn_async(
             Vte.PtyFlags(0),
             paa_dir,
-            [claude_cmd, 'WELCOME'],
-            None,
+            [claude_cmd, '--model', model, 'WELCOME'],
+            env_list,
             GLib.SpawnFlags.SEARCH_PATH,
             None, None, -1, None,
             self._on_spawn_done,

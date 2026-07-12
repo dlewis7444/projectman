@@ -25,7 +25,7 @@ class Sidebar(Gtk.Box):
         # host_id, project name
         'project-create':       (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         'show-paa-window':      (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'project-haiku-check':  (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        'project-ai-scan':      (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         'project-harness-change': (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         # host_id, expanded
@@ -241,8 +241,8 @@ class Sidebar(Gtk.Box):
                     lambda r, p=proj.path: self.emit('project-zellij', p))
         row.connect('project-ntfy-toggle',
                     lambda r, p=proj.path: self.emit('project-ntfy-toggle', p))
-        row.connect('project-haiku-check',
-                    lambda r, p=proj.path: self.emit('project-haiku-check', p))
+        row.connect('project-ai-scan',
+                    lambda r, p=proj.path: self.emit('project-ai-scan', p))
         row.connect('project-rename',
                     lambda r, new_name, p=proj.path: self.emit('project-rename', p, new_name))
         row.connect('project-model-change',
@@ -940,7 +940,7 @@ class ProjectRow(Gtk.ListBoxRow):
         'project-new-session': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-zellij':     (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-ntfy-toggle': (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'project-haiku-check': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'project-ai-scan':    (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-rename':     (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-harness-change': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
@@ -1209,7 +1209,7 @@ class ProjectRow(Gtk.ListBoxRow):
         self._menu = Gio.Menu()
         self._menu.append('New Session',        'row.new-session')
         self._menu.append('New Zellij Session', 'row.zellij')
-        self._menu.append('Haiku Check',        'row.haiku-check')
+        self._menu.append('AI Scan',            'row.ai-scan')
         self._harness_submenu = Gio.Menu()
         self._menu.append_submenu('Harness', self._harness_submenu)
         self._model_submenu = Gio.Menu()
@@ -1230,7 +1230,7 @@ class ProjectRow(Gtk.ListBoxRow):
 
         self._new_session_action = _add('new-session', 'project-new-session')
         _add('zellij',       'project-zellij')
-        _add('haiku-check',  'project-haiku-check')
+        _add('ai-scan',      'project-ai-scan')
         if getattr(self._project, 'host_id', _LH) == _LH:
             _add('archive',      'project-archive')
 

@@ -7,6 +7,20 @@ All notable changes to ProjectMan will be documented in this file.
 _Deferred UX polish TODOs (editor unsaved-changes affordance; sidebar
 new-project count while inline-edit row is visible) remain open._
 
+## [1.4.4] - 2026-07-11
+
+### Changed
+- **PAA model axis (roadmap #2):** AI scans and Discuss use
+  `build_spawn_env` + tier resolution so custom providers (e.g. Ollama) and
+  per-tier model maps apply. Bare native Anthropic only when no provider is
+  configured (same fallback as project terminals).
+- **Terminology:** sidebar **AI Scan** (was “Haiku Check”); Settings scan/chat
+  pickers labeled Fast/Standard/Capable with Haiku/Sonnet/Opus tier names;
+  copy no longer claims scans always bill native Anthropic.
+- **Settings cleanup:** removed duplicate Claude Code binary row from General
+  (Harnesses page is the sole editor). Removed **Claude JSON** settings tab —
+  no in-app editing of `~/.claude/settings.json`.
+
 ## [1.4.3] - 2026-07-11
 
 ### Added
