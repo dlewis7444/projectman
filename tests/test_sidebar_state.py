@@ -63,6 +63,69 @@ def test_update_status_attached_no_file_shows_done():
     assert not row._status_dot.has_css_class('status-idle')
 
 
+def test_set_active_only_switches_host_to_active_mode():
+    """Spawn/restore call sites flip only the affected host to active-only."""
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+
+    class FakeStore:
+        def load_projects(self):
+            return [
+                Project(name='alpha', path='/tmp/pm-alpha', host_id='localhost'),
+                Project(name='beta', path='/tmp/pm-beta', host_id='localhost'),
+            ]
+
+    settings = Settings()
+    settings.set_section_mode('localhost', 'all')
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=settings)
+    sb.set_active_only(True, path='/tmp/pm-alpha')
+    assert settings.section_mode('localhost') == 'active'
+    assert sb._section_headers['localhost']._filter_mode == 'active'
+
+
+def test_set_active_only_false_reveals_only_active_host():
+    """C7: spawn failure drops active-only on the failed host only."""
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+
+    class FakeStore:
+        def load_projects(self):
+            return [
+                Project(name='alpha', path='/tmp/pm-alpha', host_id='localhost'),
+            ]
+
+    settings = Settings()
+    settings.set_section_mode('localhost', 'active')
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=settings)
+    sb.set_active_only(False, path='/tmp/pm-alpha')
+    assert settings.section_mode('localhost') == 'all'
+
+
+def test_set_active_only_paths_restore_touches_each_host():
+    """Restore arms active-only per host that has sessions to reopen."""
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from hosts import encode_project_ref
+
+    class FakeStore:
+        def load_projects(self):
+            return [
+                Project(name='local', path='/tmp/pm-local', host_id='localhost'),
+            ]
+
+    settings = Settings(hosts={'bench': {'name': 'Bench', 'hostname': 'bench'}})
+    settings.set_section_mode('localhost', 'all')
+    settings.set_section_mode('bench', 'all')
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=settings)
+    remote = encode_project_ref('bench', 'remote-proj')
+    sb.set_active_only(True, paths=['/tmp/pm-local', remote])
+    assert settings.section_mode('localhost') == 'active'
+    assert settings.section_mode('bench') == 'active'
+
+
 def test_sidebar_uses_per_host_sections_with_sticky_header():
     """Host chrome lives outside project ListBoxes; sticky pin exists."""
     from model import Project, HistoryReader, StatusWatcher

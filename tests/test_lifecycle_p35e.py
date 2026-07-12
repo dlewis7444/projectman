@@ -121,7 +121,8 @@ class _FeedTerm:
 def _latedeath_fake(active_path):
     calls = []
     sidebar = types.SimpleNamespace()
-    sidebar.set_active_only = lambda v: calls.append(('set_active_only', v))
+    sidebar.set_active_only = lambda v, path=None, paths=None: calls.append(
+        ('set_active_only', v, path, paths))
     fake = types.SimpleNamespace(_active_path=active_path, _sidebar=sidebar)
     return fake, calls
 
@@ -206,7 +207,8 @@ def test_zellij_kill_session_never_raises(monkeypatch):
 
 def _spawnfail_fake():
     toasts = []
-    sidebar = types.SimpleNamespace(set_active_only=lambda v: None)
+    sidebar = types.SimpleNamespace(
+        set_active_only=lambda v, path=None, paths=None: None)
     fake = types.SimpleNamespace(
         _sidebar=sidebar,
         _warned_spawn_fail=set(),
