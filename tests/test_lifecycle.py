@@ -440,3 +440,104 @@ def test_p35d_debug_flag_argv_parsing():
     assert constructed['flag'] is True
     assert '--debug' not in run_argv['argv']
     assert 'extra' in run_argv['argv']
+
+
+# ── Harness/provider restart continues, does not force a fresh session ────────
+
+def test_restart_session_continue_uses_spawn_continue_not_fresh():
+    """Harness-change "Restart Now" must continue the new harness's conversation
+    (same as project activation), not spawn_fresh via New Session."""
+    calls = []
+    project = types.SimpleNamespace(name='demo', path='/p/demo', host_id='localhost')
+    tv = types.SimpleNamespace(
+        spawn_continue=lambda project_name=None: calls.append(('continue', project_name)),
+        spawn_fresh=lambda project_name=None: calls.append(('fresh', project_name)),
+        get_terminal=lambda: types.SimpleNamespace(
+            grab_focus=lambda: calls.append(('focus',))),
+    )
+    stack = types.SimpleNamespace(
+        set_visible_child_name=lambda p: calls.append(('stack', p)))
+    fake = types.SimpleNamespace(
+        _find_project=lambda path: project if path == '/p/demo' else None,
+        _get_or_create_terminal=lambda proj: tv,
+        _stack=stack,
+        _set_active_project=lambda proj: calls.append(('active', proj.name)),
+        _push_mru=lambda path: calls.append(('mru', path)),
+        _active_path=None,
+    )
+    AppWindow._restart_session_continue(fake, '/p/demo')
+    assert ('continue', 'demo') in calls
+    assert not any(c[0] == 'fresh' for c in calls)
+    assert fake._active_path == '/p/demo'
+    assert ('stack', '/p/demo') in calls
+    assert ('focus',) in calls
+
+
+def test_maybe_prompt_restart_wires_continue_not_new_session(monkeypatch):
+    """The restart dialog response must call _restart_session_continue, not
+    _on_project_new_session (fresh)."""
+    from window import AppWindow as AW
+    import gi
+    gi.require_version('Adw', '1')
+    from gi.repository import Adw
+
+    captured = {}
+
+    class FakeDialog:
+        def __init__(self, *a, **k):
+            self._handlers = []
+
+        def add_response(self, *a, **k):
+            pass
+
+        def set_response_appearance(self, *a, **k):
+            pass
+
+        def set_default_response(self, *a, **k):
+            pass
+
+        def set_close_response(self, *a, **k):
+            pass
+
+        def connect(self, signal, handler):
+            self._handlers.append((signal, handler))
+            captured['dialog'] = self
+
+        def present(self, parent):
+            captured['presented'] = True
+
+    monkeypatch.setattr(Adw.AlertDialog, 'new',
+                        lambda *a, **k: FakeDialog(*a, **k))
+
+    path = '/p/demo'
+    project = types.SimpleNamespace(name='demo', path=path, host_id='localhost')
+    tv = types.SimpleNamespace(
+        _child_pid=1234,
+        _project=project,
+        spawned_model_signature=lambda: 'old-model',
+        spawned_harness_signature=lambda: 'claude',
+    )
+    settings = types.SimpleNamespace(
+        model_axis_signature=lambda p: 'new-model',
+        effective_harness=lambda p, host_id=None: 'opencode',
+    )
+    continue_calls = []
+    new_session_calls = []
+    fake = types.SimpleNamespace(
+        _terminals={path: tv},
+        _settings=settings,
+        _find_project=lambda p: project,
+        _restart_session_continue=lambda p: continue_calls.append(p),
+        _on_project_new_session=lambda sb, p: new_session_calls.append(p),
+        _sidebar=object(),
+    )
+    # Bind unbound methods that _maybe_prompt_restart needs on self
+    AW._maybe_prompt_restart(fake, path)
+    assert captured.get('presented') is True
+    dialog = captured['dialog']
+    # Fire the response handler as if the user clicked Restart Now
+    for signal, handler in dialog._handlers:
+        if signal == 'response':
+            handler(dialog, 'restart')
+    assert continue_calls == [path]
+    assert new_session_calls == []
