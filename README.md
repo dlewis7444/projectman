@@ -4,73 +4,95 @@
 
 A GTK4/Adwaita desktop cockpit for AI coding harnesses.
 
-ProjectMan displays a project sidebar on the left and an embedded VTE terminal on the right,
-running your chosen coding harness — [Claude Code](https://claude.ai/code), [OpenCode](https://opencode.ai),
-or [Grok Build](https://x.ai/cli) — per project. Projects are directories under
-`~/.ProjectMan/projects/` (configurable via Settings).
+Sidebar of projects on the left, embedded VTE terminal on the right. Each project
+runs the harness you choose — [Claude Code](https://claude.ai/code),
+[OpenCode](https://opencode.ai), or [Grok Build](https://x.ai/cli) — with session
+restore, live status dots, and optional Zellij multiplexing. Projects live under
+`~/.ProjectMan/projects/` by default (configurable in Settings).
+
+## Table of contents
+
+- [How to run](#how-to-run)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation lifecycle](#installation-lifecycle)
+- [Harnesses](#harnesses)
+  - [Claude Code](#claude-code)
+  - [OpenCode](#opencode)
+  - [Grok Build](#grok-build)
+- [First-run setup](#first-run-setup)
+- [Projects Admin Agent (PAA)](#projects-admin-agent-paa)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
+- [See also](#see-also)
+- [License](#license)
+
+## How to run
+
+Two tracks — pick one.
+
+### Installed (recommended)
+
+```bash
+git clone https://github.com/dlewis7444/projectman.git
+cd projectman
+./install.sh
+```
+
+Then ensure `~/.local/bin` is on your `PATH` and launch from your app menu, or run:
+
+```bash
+projectman
+```
+
+If `projectman` is not found:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### From source (development)
+
+From a checkout, with system packages installed (see [Requirements](#requirements)):
+
+```bash
+python main.py
+```
+
+```bash
+python -m pytest
+```
+
+**First success checklist** (either track):
+
+1. System packages + D-Bus session bus (Requirements)
+2. At least one harness binary on `PATH` ([Harnesses](#harnesses))
+3. Projects under `~/.ProjectMan/projects/` (or change the directory in Settings)
+4. Optional but recommended: [First-run setup](#first-run-setup) so status dots update live
 
 ## Features
 
 - Per-project harness sessions with automatic session restore
-- Pluggable coding harnesses — **Claude Code**, **OpenCode**, and **Grok Build**
-  side by side, pick per project (see "Using OpenCode" / "Using Grok Build")
+- Pluggable harnesses — Claude Code, OpenCode, and Grok Build side by side
 - Live status indicators: working / waiting / done / idle
 - Session history with expand/collapse per project
-- Zellij multiplexer integration (optional)
+- Optional [Zellij](https://zellij.dev) multiplexer integration
 - Project archive with search
-
-- Ctrl+Tab to switch between recently active projects
-- Multiple color themes: Argonaut, Candyland, Phosphor, Salt Spray
+- Ctrl+Tab between recently active projects
+- Color themes: Argonaut, Candyland, Phosphor, Salt Spray
 - Sidebar pin/collapse with persistent width
 - Terminal right-click menu (Copy, Paste, Select All, Open URL / Copy URL)
 - Ctrl+click to open URLs and file paths
 - Process-tree CPU / RAM resource bar
-- ntfy push notifications on session completion
+- [ntfy](https://ntfy.sh) push notifications on session completion
+- **Projects Admin Agent (PAA)** — background health monitor for your project tree
+  ([details](#projects-admin-agent-paa))
 
-### Projects Admin Agent (PAA)
-
-The sparkle (✦) button in the sidebar opens the PAA — a background health monitor that
-continuously scans your projects and surfaces actionable findings in a card-based window.
-
-**Filesystem checks (always on while PAA is enabled):**
-- Missing `CLAUDE.md`
-- No git repository
-- Context drift — stale file references in `CLAUDE.md` (bare filenames, relative paths,
-  and absolute paths all resolved; external references deduplicated automatically)
-
-**AI checks (optional — Enable AI Scans in Settings → PAA):**
-
-> AI scans run **Claude Code** (`claude -p`) with your **Models-page provider**
-> and scan tier (Haiku / Sonnet / Opus tiers mapped to that provider's models).
-> Native Anthropic is used when no custom provider is selected. Filesystem
-> checks stay free either way; turn AI scans off if you do not want model calls.
-
-- Semantic staleness — `CLAUDE.md` no longer describes what the project actually does
-- Outdated or conflicting dependency versions
-- General project health
-
-**Cross-project analysis:**
-- Stale projects (configurable inactivity threshold)
-- Broken `../sibling/` references between projects
-- Shared dependency version conflicts
-
-**Card window:**
-- Filter by project, criticality, or finding type
-- **Discuss** button — opens an interactive PAA agent session with the finding pre-loaded as
-  context, plus any other pending findings for the same project so related issues can be
-  addressed together
-- Dismiss / Acknowledge actions with persistent ledger (survives restarts)
-- Sparkle button throbs only when new findings appear
-
-Sidebar context menu **AI Scan** forces an on-demand AI scan of one project.
-
-**PAA settings (Settings → PAA):**
-- Enable/disable toggle and scan interval
-- Enable AI Scans, monthly token budget, and scan/chat tier selection
+![Archive window](images/screencap_archive.jpg)
 
 ## Requirements
 
-**System packages** (install before running `install.sh`):
+**System packages** (install before running `install.sh` or `python main.py`):
 
 | Distro | Command |
 |--------|---------|
@@ -79,75 +101,56 @@ Sidebar context menu **AI Scan** forces an on-demand AI scan of one project.
 | Arch | `sudo pacman -S python-gobject gtk4 libadwaita vte3` |
 
 A D-Bus **session bus** is required at runtime. Full desktop sessions already
-have one (systemd user bus). On minimal/headless installs, install `dbus-x11`
-(provides `dbus-launch`) or ensure `$XDG_RUNTIME_DIR/bus` exists — without a
-session bus ProjectMan crashes hard on first launch.
+have one. On minimal or headless installs, install `dbus-x11` (provides
+`dbus-launch`) or ensure `$XDG_RUNTIME_DIR/bus` exists — without a session bus,
+ProjectMan crashes on first launch.
 
 **Also required:**
-- Python 3.10+
-- Node.js (for the status-indicator hook script)
+
+| Component | Notes |
+|-----------|--------|
+| Python 3.10+ | Application runtime |
+| Node.js | Claude Code status-indicator hook only |
+| At least one harness binary | `claude`, `opencode`, and/or `grok` on `PATH` |
 
 **Optional:** `zellij` for multiplexed terminal sessions.
 
-### Harnesses (install at least one)
+### Coding harnesses (install at least one)
 
-ProjectMan is a cockpit for coding harnesses — it does not bundle one. Install
-whichever you use; each is optional and they work side by side:
+ProjectMan is a cockpit — it does not bundle a coding agent. Install whichever
+you use; each is optional and they work side by side. A harness appears in the
+sidebar **Harness** submenu only when its binary is on your `PATH`.
 
-| Harness | Install (puts the binary on your `PATH`) |
-|---------|------------------------------------------|
-| **Claude Code** (`claude`) | `curl -fsSL https://claude.ai/install.sh \| bash` |
-| **OpenCode** (`opencode`) | `curl -fsSL https://opencode.ai/install \| bash` — see [Using OpenCode](#using-opencode) |
-| **Grok Build** (`grok`) | `curl -fsSL https://x.ai/cli/install.sh \| bash` — see [Installing Grok Build](#installing-grok-build) |
+| Harness | Binary | Install |
+|---------|--------|---------|
+| **Claude Code** | `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| **OpenCode** | `opencode` | `curl -fsSL https://opencode.ai/install \| bash` |
+| **Grok Build** | `grok` | `curl -fsSL https://x.ai/cli/install.sh \| bash` |
 
-You can run ProjectMan with just one harness installed; the others appear in the
-**Harness** submenu only when their binary is on your PATH.
+Deep spawn/continue/resume behavior and model flags live under
+[Harnesses](#harnesses). Bridge/hook registration is under
+[First-run setup](#first-run-setup).
 
-## Installation
+## Installation lifecycle
 
-1. **Clone and run the installer:**
-
-   ```bash
-   git clone https://github.com/dlewis7444/projectman.git
-   cd projectman
-   ./install.sh
-   ```
-
-   This installs ProjectMan to `~/.local/share/projectman/`, creates a
-   `projectman` launcher in `~/.local/bin/`, and registers it with your desktop
-   environment (GNOME, KDE, etc.) so it appears in your app launcher.
-
-2. **Ensure `~/.local/bin` is on your `PATH`.** If the `projectman` command
-   isn't found after install, add this to your shell profile (`~/.bashrc`,
-   `~/.zshrc`, etc.) and open a new shell:
-
-   ```bash
-   export PATH="$HOME/.local/bin:$PATH"
-   ```
-
-3. **Install at least one harness** (see [Harnesses](#harnesses-install-at-least-one)
-   above) so ProjectMan has something to drive.
-
-### Installing Grok Build
-
-To use xAI's [Grok Build](https://x.ai/cli) CLI as a harness:
+### Install
 
 ```bash
-curl -fsSL https://x.ai/cli/install.sh | bash
+git clone https://github.com/dlewis7444/projectman.git
+cd projectman
+./install.sh
 ```
 
-This installs the `grok` binary (typically to `~/.grok/bin/grok`). By default
-grok signs in with a **SuperGrok / xAI account** (browser OAuth on first run). To
-run grok against a **local Ollama / OpenAI-compatible pool with no xAI account**,
-see [Grok + the ollama pool](#grok--the-ollama-pool) below — the per-model
-`api_key` is what lets it skip the browser sign-in. After installing, pick
-**Grok Build** from the sidebar **Harness** submenu or set it as the default in
-**Settings → Harnesses**.
+This installs ProjectMan to `~/.local/share/projectman/`, creates a `projectman`
+launcher in `~/.local/bin/`, and registers a desktop entry so it appears in your
+app launcher (GNOME, KDE, etc.). The installer also places harness status bridges
+where it can (Claude hook script, OpenCode plugin, Grok hooks) — see
+[First-run setup](#first-run-setup) for any manual registration still required.
 
-### Migrating existing Claude projects
+### Migrate existing projects
 
-If you already have Claude Code project directories, move or symlink them into
-`~/.ProjectMan/projects/` so ProjectMan can find them:
+If you already keep Claude Code (or other) project directories elsewhere, move or
+symlink them into the projects tree:
 
 ```bash
 mkdir -p ~/.ProjectMan/projects
@@ -155,19 +158,147 @@ mkdir -p ~/.ProjectMan/projects
 # Move a project
 mv ~/my-project ~/.ProjectMan/projects/
 
-# Or symlink it (leaves the original in place)
+# Or symlink (leaves the original in place)
 ln -s ~/my-project ~/.ProjectMan/projects/my-project
 ```
 
-You can also point ProjectMan at a different directory entirely via **Settings → Projects Directory**.
+You can also point ProjectMan at a different directory via
+**Settings → Projects Directory**.
 
-### Enabling status indicators
+### Update
 
-The coloured status dots (working / waiting / done) require a hook script to be registered
-with Claude Code. The script is installed to `~/.claude/projectman/hook.js` automatically —
-you just need to tell Claude Code to run it.
+```bash
+cd projectman
+git pull
+./install.sh
+```
 
-Add the following to `~/.claude/settings.json` (create the file if it doesn't exist):
+### Uninstall
+
+```bash
+./install.sh --uninstall
+```
+
+Removes the installed files, launcher, and desktop entry. Your data directory
+(`~/.ProjectMan/`) and harness-side hooks/bridges are left in place.
+
+### Run from source
+
+No install required for day-to-day development:
+
+```bash
+python main.py
+python -m pytest
+```
+
+## Harnesses
+
+Pick a harness per project from the sidebar right-click **Harness** menu, or set
+a default under **Settings → Harnesses**.
+
+**Activation vs New Session:** clicking a project (or accepting **Restart Now**
+after a harness/provider change) continues the most recent conversation in the
+effective harness (`-c` / continue, with per-harness fallback to a fresh session
+when nothing can be continued). **New Session** in the sidebar always starts
+fresh.
+
+### Spawn / continue / resume
+
+| Harness | Spawn | Continue | Resume |
+|---------|-------|----------|--------|
+| **Claude Code** | `claude` | `claude -c` (falls back to fresh `claude` if nothing to continue) | `claude --resume <session_id>` |
+| **OpenCode** | `opencode` | `opencode -c` | `opencode -s <id>` |
+| **Grok Build** | `grok` | `grok -c` (falls back to fresh `grok` if nothing to continue) | `grok -r <id>` |
+
+### Claude Code
+
+- **Per-project model** follows ProjectMan’s Models / provider settings (including
+  optional router setups).
+- **Status dots** need the Claude hook registered once — see
+  [First-run setup](#first-run-setup).
+- Session history and restore use Claude’s own continue/resume flags as in the
+  table above.
+
+### OpenCode
+
+- Session history is listed with `opencode session list`, run **from the project
+  directory** (cwd-scoped). Older OpenCode builds that kept per-session JSON on
+  disk have a storage-scan fallback; current builds use SQLite (`opencode.db`),
+  which that fallback does not read — on those versions the CLI is the session
+  source.
+- **Per-project model** is passed as `-m <provider>/<model>` (e.g.
+  `ollama/qwen3.5:cloud`). OpenCode is multi-provider natively; no
+  claude-code-router is involved.
+- **Status dots** need the OpenCode bridge plugin — installed by `install.sh` or
+  **Settings → Harnesses → Install bridge**. Details:
+  [`bridges/opencode/README.md`](bridges/opencode/README.md).
+
+For local Ollama / OpenAI-compatible endpoints and headless `opencode run`
+quirks, see [Troubleshooting](#troubleshooting).
+
+### Grok Build
+
+- Session history uses `grok sessions list` from the project directory
+  (cwd-scoped). Session ids are UUIDv7. If `grok -c` has nothing to continue, it
+  exits cleanly and ProjectMan falls back to a fresh `grok`.
+- **Per-project model** is passed as `-m <value>`, where `<value>` is a **config
+  key** from `~/.grok/config.toml` (not a `provider/model` string). Grok reaches
+  custom endpoints through its own config.
+- **Status dots** need the Grok bridge (`~/.grok/hooks/`) — installed by
+  `install.sh` or **Settings → Harnesses → Install bridge**. Details:
+  [`bridges/grok/README.md`](bridges/grok/README.md).
+- **Waiting (blue) dot is inferred.** Grok does not fire a hook while a
+  permission prompt is on screen, so ProjectMan promotes to `waiting` when a tool
+  start goes unanswered for 5 seconds. A long-running *approved* tool can briefly
+  show a false `waiting` until the tool completes — a false “needs you” beats a
+  silently stalled session.
+
+By default grok signs in with a SuperGrok / xAI account (browser OAuth on first
+run). To use a local Ollama / OpenAI-compatible endpoint without an xAI account,
+see [Grok + local endpoints](#grok--local-endpoints).
+
+`install.sh` also sets `[compat.claude] hooks = false` in `~/.grok/config.toml`
+(idempotently) so Claude’s ProjectMan hook does not double-fire on grok events.
+If you manage that file by hand, keep that setting.
+
+Grok auto-updates by default; ProjectMan does not suppress it. To pin a version:
+
+```toml
+# ~/.grok/config.toml
+[cli]
+auto_update = false
+```
+
+#### Grok + local endpoints
+
+To run grok against a local Ollama / OpenAI-compatible API with **no xAI
+account**, add a model entry that **includes `api_key`**:
+
+```toml
+[model.local-qwen]
+model = "qwen3.5:9b"
+base_url = "http://<host>:11434/v1"
+name = "Qwen3.5 9B (local)"
+context_window = 32768
+api_key = "ollama"
+```
+
+The `api_key` value can be any non-empty string (Ollama ignores it) — but it
+**must be present**. Without a per-model `api_key`, grok starts browser OAuth
+even for a custom endpoint. With it, turns complete offline of xAI and no
+`~/.grok/auth.json` is created. Set the per-project model in ProjectMan to the
+config **key** (`local-qwen` in the example).
+
+## First-run setup
+
+Status dots (working / waiting / done) need a small bridge on each harness so it
+can write ProjectMan’s status files under `~/.ProjectMan/status/`. Dots still
+appear without this; they just won’t update in real time.
+
+### Claude Code hooks
+
+`install.sh` installs the hook script to `~/.claude/projectman/hook.js`. Register
+it in `~/.claude/settings.json` (create the file if needed):
 
 ```json
 {
@@ -185,55 +316,125 @@ Add the following to `~/.claude/settings.json` (create the file if it doesn't ex
 }
 ```
 
-Edit `~/.claude/settings.json` in your editor if you need to tweak hooks by hand;
-ProjectMan no longer ships an in-app JSON editor for that file.
+Edit that file in your editor if you need to merge with existing hooks; ProjectMan
+does not ship an in-app JSON editor for it.
 
-Status dots work without this step — they just won't update in real time until hooks are configured.
+### OpenCode bridge
 
-## Using OpenCode
+`install.sh` drops the plugin into `~/.config/opencode/plugins/projectman.js`
+(idempotent), or use **Settings → Harnesses → Install bridge**. See
+[`bridges/opencode/README.md`](bridges/opencode/README.md).
 
-ProjectMan can drive [OpenCode](https://opencode.ai) (CLI binary `opencode`) as a
-first-class harness alongside Claude Code. Pick it per project from the sidebar
-right-click **Harness** submenu, or set it as the default in **Settings → Harnesses**.
+### Grok Build bridge
 
-- **Spawn / continue / resume** map to `opencode`, `opencode -c`, and
-  `opencode -s <id>`; the session-history expander lists a project's recent
-  OpenCode sessions via `opencode session list`, run **from the project
-  directory** (the command is cwd-scoped). A storage-scan fallback exists for
-  old OpenCode builds that kept per-session JSON files on disk; current builds
-  store sessions in SQLite (`opencode.db`), which the fallback does not read —
-  on those versions the CLI is the only session source (SQLite support is
-  planned P3 hardening).
-- **Per-project model** is passed verbatim as `-m <provider>/<model>` — e.g.
-  `ollama/qwen3.5:cloud`. OpenCode is natively multi-provider, so no
-  claude-code-router is involved.
-- **Status dots** require the OpenCode status bridge plugin. `install.sh`
-  drops it into `~/.config/opencode/plugins/projectman.js` for you (idempotent),
-  or install it from **Settings → Harnesses → Install bridge**. See
-  [`bridges/opencode/README.md`](bridges/opencode/README.md).
+`install.sh` installs a JSON hook definition plus an executable Python status
+script under `~/.grok/hooks/` (paths rewritten to absolute at install time), or
+use **Settings → Harnesses → Install bridge**. See
+[`bridges/grok/README.md`](bridges/grok/README.md).
 
-### OpenCode + the ollama pool: the `opencode run` empty-render note
+## Projects Admin Agent (PAA)
 
-On some OpenCode builds, scripting it **headlessly** with
-`opencode run -m ollama/...` against an Ollama/OpenAI-compatible endpoint
-prints **empty output** with exit code 0 even though the endpoint returned a
-valid answer. Verified so far: OpenCode **1.16.2** exhibits it while
-**1.2.15** renders the same command correctly against the same endpoint and an
-equivalent provider config — so it is OpenCode-version-dependent, not an
-endpoint or config-shape problem. The endpoint was independently exonerated
-(it returns the answer, plus a nonstandard `reasoning` field from the
-OpenAI-compat layer). The leading hypothesis — unconfirmed — is that the
-affected renderer mishandles responses carrying that `reasoning` field,
-folding the answer into the thinking channel that `--thinking`
-(off by default) controls.
+The sparkle (✦) button in the sidebar opens the PAA — a background health monitor
+that scans your projects and surfaces findings in a card-based window.
 
-ProjectMan itself spawns the **interactive TUI** (`opencode` / `opencode -c`),
-not the headless `run` path, so PM sessions may be unaffected — that is the
-first thing to determine on an affected build. If you hit the empty render in
-your own `opencode run` scripting: try `--thinking`, and try a different
-OpenCode version. A known-good ollama provider shape for
-`~/.config/opencode/opencode.json` (verified working on 1.2.15 — note the
-models need **no** special flags):
+### Filesystem checks
+
+Always on while PAA is enabled:
+
+- Missing `CLAUDE.md`
+- No git repository
+- Context drift — stale file references in `CLAUDE.md` (bare filenames, relative
+  paths, and absolute paths resolved; external references deduplicated)
+
+### AI checks
+
+Optional — **Settings → PAA → Enable AI Scans**.
+
+AI scans run Claude Code (`claude -p`) with your **Models-page provider** and
+scan tier (Haiku / Sonnet / Opus tiers mapped to that provider’s models). Native
+Anthropic is used when no custom provider is selected. Filesystem checks stay
+free either way; turn AI scans off if you do not want model calls.
+
+- Semantic staleness — `CLAUDE.md` no longer matches what the project does
+- Outdated or conflicting dependency versions
+- General project health
+
+Sidebar context menu **AI Scan** forces an on-demand AI scan of one project.
+
+### Cross-project analysis
+
+- Stale projects (configurable inactivity threshold)
+- Broken `../sibling/` references between projects
+- Shared dependency version conflicts
+
+### Card UI
+
+- Filter by project, criticality, or finding type
+- **Discuss** — opens an interactive PAA agent session with the finding (and other
+  pending findings for the same project) as context
+- Dismiss / Acknowledge with a persistent ledger (survives restarts)
+- Sparkle button throbs only when new findings appear
+
+### Settings
+
+**Settings → PAA:** enable/disable, scan interval, Enable AI Scans, monthly token
+budget, and scan/chat tier.
+
+## Configuration
+
+| Path | Purpose |
+|------|---------|
+| `~/.ProjectMan/settings.json` | App settings |
+| `~/.ProjectMan/session.json` | Session restore data |
+| `~/.ProjectMan/status/` | Per-project harness status files |
+| `~/.ProjectMan/projects/` | Default projects directory |
+| `~/.ProjectMan/paa-ledger.json` | PAA findings ledger |
+| `~/.claude/projectman/hook.js` | Claude Code status hook script |
+| `~/.claude/settings.json` | Claude Code settings (hook registration) |
+| `~/.config/opencode/plugins/projectman.js` | OpenCode status bridge |
+| `~/.grok/hooks/projectman.json` + `projectman-status.py` | Grok Build status bridge |
+| `~/.grok/config.toml` | Grok config (compat hooks, models, auto-update) |
+
+## Troubleshooting
+
+### App crashes immediately / D-Bus errors
+
+**Symptom:** ProjectMan exits on launch with D-Bus errors, or never opens a window
+on a minimal/headless box.
+
+**Fix:** Provide a D-Bus session bus. On a full desktop this is normal; on minimal
+setups install `dbus-x11` or ensure `$XDG_RUNTIME_DIR/bus` exists.
+
+### Harness missing from the Harness menu
+
+**Symptom:** Claude Code, OpenCode, or Grok Build does not appear under the
+sidebar **Harness** submenu.
+
+**Fix:** Its binary is not on `PATH` (`claude`, `opencode`, or `grok`). Install
+the harness and open a new shell (or restart ProjectMan) so the updated `PATH`
+is visible.
+
+### Status dots stuck or not updating
+
+**Symptom:** Sidebar dots stay idle or never move through working / waiting / done
+while a session is active.
+
+**Fix:** Complete [First-run setup](#first-run-setup) for that harness. Confirm
+the hook or plugin is installed and that the harness process is the one
+ProjectMan spawned for that project directory.
+
+### OpenCode: empty output from headless `opencode run` against Ollama
+
+**Symptom:** `opencode run -m ollama/...` prints empty output (exit 0) even when
+the endpoint returned a valid answer.
+
+**Fix:** This is OpenCode-version-dependent, not a ProjectMan bug. ProjectMan
+spawns the **interactive TUI** (`opencode` / `opencode -c`), not the headless
+`run` path.
+
+If you hit it in your own scripting: try `--thinking`, try another OpenCode
+version, and use a straightforward provider config. Example shape for
+`~/.config/opencode/opencode.json`:
 
 ```jsonc
 {
@@ -249,154 +450,27 @@ models need **no** special flags):
 }
 ```
 
-## Using Grok Build
-
-ProjectMan can drive [Grok Build](https://x.ai/cli) — xAI's terminal coding CLI
-(binary `grok`) — as a first-class harness alongside Claude Code and OpenCode.
-Pick it per project from the sidebar right-click **Harness** submenu, or set it as
-the default in **Settings → Harnesses**.
-
-- **Spawn / continue / resume** map to `grok`, `grok -c`, and `grok -r <id>`;
-  the session-history expander lists a project's recent grok sessions via
-  `grok sessions list`, run **from the project directory** (the command is
-  cwd-scoped). Session ids are UUIDv7. `grok -c` exits cleanly when there's
-  nothing to continue, so PM falls back to a fresh `grok` exactly as it does for
-  Claude.
-- **Per-project model** is passed verbatim as `-m <value>`. For grok the value
-  is a **config key** from your `~/.grok/config.toml`, not a `provider/model`
-  string — grok reaches custom endpoints through its own config, so no
-  claude-code-router is involved.
-- **Status dots** require the grok status bridge. `install.sh` installs it into
-  `~/.grok/hooks/` for you (idempotent — a JSON hook definition plus an
-  executable python3 status script; the JSON's command paths are rewritten to
-  the absolute script path at install time), or install it from
-  **Settings → Harnesses → Install bridge** (both share the same installer). See
-  [`bridges/grok/README.md`](bridges/grok/README.md).
-- **The `waiting` (blue) dot is inferred, with a known quirk.** Grok fires no
-  hook event while its permission prompt is on screen (the wire goes silent),
-  so ProjectMan infers `waiting` when a tool start goes unanswered for 5
-  seconds. Accepted limitation: a long-running *approved* tool also crosses
-  the 5s mark and briefly shows a false `waiting`, self-correcting the moment
-  the tool completes — a false "needs you" beats a silently stalled session.
-
-### Grok + the ollama pool
-
-To run grok against a local Ollama / OpenAI-compatible pool with **no xAI
-account**, add a model entry to `~/.grok/config.toml` — and it **must include
-`api_key`**:
-
-```toml
-[model.pool-qwen]
-model = "qwen3.5:9b"
-base_url = "http://<host>:11434/v1"
-name = "Qwen3.5 9B (Ollama pool)"
-context_window = 32768
-api_key = "ollama"
-```
-
-The `api_key` value can be any non-empty string (Ollama ignores it) — but it
-**must be present**: without a per-model `api_key`, grok triggers its browser
-OAuth sign-in flow even for a custom endpoint. With it, turns complete fully
-offline of xAI and no `~/.grok/auth.json` is ever created. Then set the
-per-project model to `pool-qwen` (the config **key**) in ProjectMan.
-
-### Auto-update note
-
-grok auto-updates by default and ships frequent point releases. ProjectMan
-injects **nothing** to suppress this — it is your tool and your policy. To pin a
-version (e.g. for reproducible test benches), set it in `~/.grok/config.toml`:
-
-```toml
-[cli]
-auto_update = false
-```
-
-### Claude-compat hooks are disabled
-
-grok reads `~/.claude/settings.json` hooks by default, which would make Claude's
-ProjectMan hook **double-fire** on grok events and fight the grok bridge for the
-status dot. So `install.sh` sets `[compat.claude] hooks = false` in
-`~/.grok/config.toml` (idempotently, preserving every other key) — the grok
-bridge is then the sole status writer for grok sessions. If you manage that
-config by hand, keep that line in place.
-
-## Updating
-
-```bash
-cd projectman
-git pull
-./install.sh
-```
-
-## Uninstalling
-
-```bash
-./install.sh --uninstall
-```
-
-This removes the installed files, launcher, and desktop entry. Your data directory
-(`~/.ProjectMan/`) and hook script (`~/.claude/projectman/hook.js`) are left in place.
-
-## Running from Source
-
-No install required for development:
-
-```bash
-python main.py
-```
-
-```bash
-python -m pytest
-```
-
-## Configuration
-
-| Path | Purpose |
-|------|---------|
-| `~/.ProjectMan/settings.json` | App settings |
-| `~/.ProjectMan/session.json` | Session restore data |
-| `~/.ProjectMan/status/` | Per-project harness status files (harness-neutral location) |
-| `~/.ProjectMan/projects/` | Default projects directory |
-| `~/.ProjectMan/paa-ledger.json` | PAA findings ledger |
-| `~/.claude/projectman/hook.js` | Claude Code hook script for status updates |
-| `~/.claude/settings.json` | Claude Code settings (hook registration) |
-| `~/.config/opencode/plugins/projectman.js` | OpenCode status bridge plugin |
-| `~/.grok/hooks/projectman.json` + `projectman-status.py` | Grok Build status bridge (hook definition + script) |
-| `~/.grok/config.toml` | Grok Build config (`[compat.claude] hooks = false`; pool model + `api_key`) |
-
-## Troubleshooting
-
 ### Text selection / copy broken in remote (SSH) harness sessions
 
-**Symptom:** Inside a ProjectMan terminal attached to a **remote** host (SSH),
-dragging to select text in Claude Code, OpenCode, or Grok Build behaves oddly:
+Longer guide — apply only if you drive harnesses over SSH inside ProjectMan.
 
-- Selection highlight looks like an **app** selection (often a blue overlay), not
-  the terminal's native selection.
-- Copy fails or a toast mentions **OSC 52** / “hold Shift (or Fn) and drag to
-  select & copy natively”.
-- Right-click or normal drag breaks the selection; **Shift+drag** still works.
+**Symptom:** On a **remote** host (SSH), selecting text in Claude Code, OpenCode,
+or Grok Build looks like an app selection (often a blue overlay); copy fails or a
+toast mentions **OSC 52**; **Shift+drag** still works.
 
-**Why:** Modern harness TUIs enable **mouse reporting** by default. They capture
-click/drag for in-app selection and scroll, and send copy to the system clipboard
-via **OSC 52** escape sequences. Local terminals with a real clipboard often hide
-the problem. Over SSH, ProjectMan's VTE does not fully implement OSC 52 clipboard
-write, so app-level copy fails. Shift+drag bypasses mouse reporting and uses the
-terminal's native selection (what ProjectMan's Ctrl+Shift+C / right-click Copy can
-then read).
+**Why:** Modern harness TUIs enable **mouse reporting**. They capture click/drag
+for in-app selection and send copy via **OSC 52**. Over SSH, ProjectMan’s VTE
+does not fully implement OSC 52 clipboard write, so app-level copy fails.
+Shift+drag bypasses mouse reporting and uses native terminal selection (which
+Ctrl+Shift+C and right-click **Copy** can read).
 
-ProjectMan does **not** rewrite your harness settings for you. If you hit this on
-a remote host, apply the fix **on that host** (the machine running the harness
-process), then restart the harness session.
+ProjectMan does not rewrite harness settings for you. Apply the fix **on the
+remote host** (where the harness process runs), then restart the session.
 
-#### Immediate workaround (any harness)
+**Immediate workaround (any harness):** hold **Shift** while dragging, then copy
+with **Ctrl+Shift+C** or the terminal right-click **Copy** menu.
 
-Hold **Shift** while dragging to use native terminal selection, then copy with
-**Ctrl+Shift+C** (or the terminal right-click **Copy** menu).
-
-#### Claude Code
-
-Disable mouse tracking in the remote user's Claude Code settings:
+**Claude Code** — disable mouse tracking on the remote host:
 
 ```json
 // ~/.claude/settings.json  (on the remote host)
@@ -407,13 +481,10 @@ Disable mouse tracking in the remote user's Claude Code settings:
 }
 ```
 
-Merge into an existing `"env"` block if one is already present. Restart Claude Code
-after saving. Related env: `CLAUDE_CODE_DISABLE_MOUSE_CLICKS` (keeps wheel scroll,
-disables click/drag only).
+Merge into an existing `"env"` block if present. Related:
+`CLAUDE_CODE_DISABLE_MOUSE_CLICKS` (keeps wheel scroll, disables click/drag only).
 
-#### OpenCode
-
-Disable mouse capture in the remote user's TUI config:
+**OpenCode** — disable mouse capture on the remote host:
 
 ```json
 // ~/.config/opencode/tui.json  (on the remote host)
@@ -423,17 +494,13 @@ Disable mouse capture in the remote user's TUI config:
 }
 ```
 
-Or set the environment variable `OPENCODE_DISABLE_MOUSE=1` for the same effect.
-Restart OpenCode after changing either. See the [OpenCode TUI docs](https://opencode.ai/docs/tui/).
+Or set `OPENCODE_DISABLE_MOUSE=1`. See the
+[OpenCode TUI docs](https://opencode.ai/docs/tui/).
 
-#### Grok Build
+**Grok Build** — no single “always off” mouse flag. Options:
 
-Grok does not ship a single “always off” mouse flag comparable to Claude Code.
-Use one of:
-
-1. **Per session:** run `/toggle-mouse-reporting` (or the mouse-reporting keybind,
-   often **Ctrl+R** when scrollback is focused) to turn mouse reporting **off**
-   so native click-drag select/copy works. You may need the toggle enabled first:
+1. Per session: `/toggle-mouse-reporting` (or the mouse-reporting keybind, often
+   **Ctrl+R** when scrollback is focused). You may need:
 
    ```toml
    # ~/.grok/config.toml  (on the remote host)
@@ -441,11 +508,17 @@ Use one of:
    mouse_reporting_toggle = true
    ```
 
-2. **Without toggling:** always **Shift+drag** for native selection, then
-   Ctrl+Shift+C / right-click Copy.
+2. Always **Shift+drag** for native selection, then Ctrl+Shift+C / right-click Copy.
 
-Copy-on-select over SSH may still emit OSC 52 when mouse reporting is on; native
-selection (Shift or mouse reporting off) is the reliable path inside ProjectMan.
+## See also
+
+| Document | Purpose |
+|----------|---------|
+| [LICENSE](LICENSE) | MIT license text |
+| [CHANGELOG.md](CHANGELOG.md) | Release history |
+| [ROADMAP.md](ROADMAP.md) | Planned work |
+| [bridges/opencode/README.md](bridges/opencode/README.md) | OpenCode status bridge details |
+| [bridges/grok/README.md](bridges/grok/README.md) | Grok Build status bridge details |
 
 ## License
 

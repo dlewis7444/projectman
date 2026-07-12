@@ -90,11 +90,13 @@ def test_readme_de_clauded():
     src = _read(os.path.join(REPO, 'README.md'))
     assert 'managing Claude Code sessions' not in src
     assert 'cockpit for AI coding harnesses' in src
-    # grok install subsection + curl installer present
-    assert 'Installing Grok Build' in src
-    assert 'curl -fsSL https://x.ai/cli/install.sh | bash' in src
-    # claude moved out of a hard "required" list into the optional Harnesses table
-    assert '### Harnesses (install at least one)' in src
+    # grok install + curl installer present (section title evolved with README reorg)
+    assert '### Grok Build' in src
+    # Table cells escape the pipe: `\| bash`
+    assert 'curl -fsSL https://x.ai/cli/install.sh' in src
+    assert 'x.ai/cli/install.sh' in src
+    # claude is optional in the harnesses table (install at least one)
+    assert '### Coding harnesses (install at least one)' in src
 
 
 # ── M-UX.7: PAA AI-scan copy names Claude Code + configured provider ──────────
@@ -214,9 +216,9 @@ def test_paa_disabled_window_points_to_settings_with_shortcut():
 
 
 def test_readme_always_on_qualified_by_paa_enabled():
-    """BINDING (FB-6): README 'always on' → 'always on while PAA is enabled'
+    """BINDING (FB-6): README 'always on' is qualified by PAA being enabled
     (the disabled-window reality: nothing scans when PAA is off)."""
     src = _read(os.path.join(REPO, 'README.md'))
-    assert 'always on while PAA is enabled' in src
+    assert re.search(r'always on while PAA is enabled', src, re.I)
     # The bare, over-promising 'always on)' header is gone.
     assert 'checks (always on):' not in src

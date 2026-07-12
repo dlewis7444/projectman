@@ -1430,6 +1430,27 @@ class AppWindow(Adw.ApplicationWindow):
         self._show_toast(f'Harness for {name}: {display}')
         self._maybe_prompt_restart(path)
 
+    def _restart_session_continue(self, path):
+        """Kill the live child and re-spawn with continue semantics.
+
+        Used when a harness/provider change is applied to a running session.
+        Matches project activation (``_switch_to_project``): ``-c`` / continue
+        so an existing conversation in the *new* effective harness is resumed;
+        adapters that fall back to fresh when there is nothing to continue still
+        do so. Intentionally NOT ``_on_project_new_session`` (which is
+        ``spawn_fresh`` / no ``-c``).
+        """
+        project = self._find_project(path)
+        if not project:
+            return
+        tv = self._get_or_create_terminal(project)
+        self._stack.set_visible_child_name(path)
+        self._set_active_project(project)
+        self._active_path = path
+        self._push_mru(path)
+        tv.spawn_continue(project_name=project.name)
+        tv.get_terminal().grab_focus()
+
     def _maybe_prompt_restart(self, path):
         """If a live session's harness OR provider just changed, offer to restart it.
 
@@ -1437,6 +1458,9 @@ class AppWindow(Adw.ApplicationWindow):
         session keeps its old harness/model until re-spawned. Never auto-kill —
         that would lose context. The dialog wording adapts to which of the two
         (or both) changed (B3 generalization of the Model-only prompt).
+
+        Restart continues the new harness's conversation (same as clicking the
+        project to activate), not a brand-new session.
         """
         tv = self._terminals.get(path)
         if tv is None or tv._child_pid is None:
@@ -1460,7 +1484,9 @@ class AppWindow(Adw.ApplicationWindow):
         dialog = Adw.AlertDialog.new(
             title,
             f'The new {what} for "{name}" applies to the next session. '
-            f'Restart this session now?',
+            f'Restart this session now? '
+            f'(Continues an existing conversation when one exists, same as '
+            f'activating the project.)',
         )
         dialog.add_response('later', 'Apply Later')
         dialog.add_response('restart', 'Restart Now')
@@ -1470,7 +1496,7 @@ class AppWindow(Adw.ApplicationWindow):
 
         def on_response(d, response_id):
             if response_id == 'restart':
-                self._on_project_new_session(self._sidebar, path)
+                self._restart_session_continue(path)
 
         dialog.connect('response', on_response)
         dialog.present(self)
