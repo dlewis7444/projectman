@@ -82,9 +82,17 @@
 /* ── Project row action buttons — visible on hover ───────────────── */
 .project-row-actions { opacity: 0; transition: opacity 150ms; }
 row:hover .project-row-actions { opacity: 1; }
+/* Pending deactivate: actions box loses .project-row-actions in Python so
+   UNDO is always visible until the grace timer fires (no hover needed). */
+.project-row-actions-pending { opacity: 1; }
 
 /* ── Detached zellij session ──────────────────────────────────────── */
 .project-row-detached { font-style: italic; }
+
+/* ── Pending deactivate grace period ──────────────────────────────── */
+/* Italic only on the name label (class applied there). Row also gets the
+   same class so themes can wash the entry background while the timer runs. */
+label.project-row-pending-deactivate { font-style: italic; }
 
 /* ── Polling sweeper caught an exit our pidfd watch missed ───────── */
 /* Brief italic flash on the project name. See window._sweep_dead_terminals. */

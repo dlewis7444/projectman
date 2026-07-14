@@ -78,9 +78,9 @@ class StatusSnapshot:
 
 # F11: how long a ``phase == 'pre_tool_use'`` working snapshot may age before
 # the watcher promotes it to 'waiting'. Auto-approved tools complete in <0.3s
-# (mini-probe observed), so 5s of pre-tool silence almost always means a
+# (mini-probe observed), so 10s of pre-tool silence almost always means a
 # permission prompt is on screen waiting for the human.
-PHASE_WAITING_THRESHOLD = 5.0
+PHASE_WAITING_THRESHOLD = 10.0
 
 
 class ProjectStore:

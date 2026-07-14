@@ -49,6 +49,17 @@ row.active-project {
     border-left: 2px solid #0096c7;
 }
 
+/* Pending deactivate grace — amber warning wash (wins over hover/selected). */
+.pm-sidebar list.navigation-sidebar row.project-row-pending-deactivate {
+    background-color: alpha(#f4a124, 0.18);
+}
+.pm-sidebar list.navigation-sidebar row.project-row-pending-deactivate:hover {
+    background-color: alpha(#f4a124, 0.26);
+}
+.pm-sidebar list.navigation-sidebar row.project-row-pending-deactivate:selected {
+    background-color: alpha(#f4a124, 0.30);
+}
+
 /* Status dots — bright and clear as signal flags on open water */
 .status-dot.status-stopped { background: alpha(#0a2540, 0.10); }
 .status-dot.status-idle    { background: alpha(#0a2540, 0.26); }
