@@ -64,6 +64,10 @@ class Sidebar(Gtk.Box):
         self._process_states = {}
         # path → harness_id | None (C5 running harness)
         self._running_harnesses = {}
+        # Deferred deactivate grace: path stays 'attached' until timer fires.
+        self._pending_deactivates = set()
+        self._pending_deactivate_timers = {}  # path → GLib timeout id
+        self.PENDING_DEACTIVATE_MS = 5000
 
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         btn_row.set_halign(Gtk.Align.END)
@@ -233,8 +237,12 @@ class Sidebar(Gtk.Box):
         if getattr(proj, 'host_id', LOCALHOST_ID) == LOCALHOST_ID:
             row.connect('project-archive',
                         lambda r, p=proj.path: self.emit('project-archive', p))
-        row.connect('project-deactivate',
-                    lambda r, p=proj.path: self.emit('project-deactivate', p))
+        row.connect('deactivate-requested',
+                    lambda r, p=proj.path: self._begin_pending_deactivate(p))
+        row.connect('deactivate-undo',
+                    lambda r, p=proj.path: self.cancel_pending_deactivate(p))
+        if proj.path in self._pending_deactivates:
+            row.set_pending_deactivate(True)
         row.connect('project-new-session',
                     lambda r, p=proj.path: self.emit('project-new-session', p))
         row.connect('project-zellij',
@@ -462,12 +470,66 @@ class Sidebar(Gtk.Box):
         sidebar (instant reattach on click, grey dots, wrong active counts).
         """
         self._process_states[path] = (state, is_zellij)
+        if state == 'inactive':
+            self.cancel_pending_deactivate(path)
         if path in self._rows:
             self._rows[path].set_process_state(state, is_zellij=is_zellij)
         # Active-only sections need a refilter when process state changes.
         self._invalidate_filters()
         self._refresh_section_counts()
         self._update_count_label()
+
+    def _cancel_pending_deactivate_timer(self, path):
+        tid = self._pending_deactivate_timers.pop(path, None)
+        if tid is not None:
+            GLib.source_remove(tid)
+
+    def cancel_pending_deactivate(self, path):
+        """Cancel a pending deactivate (UNDO, natural exit, or immediate-kill paths)."""
+        if path not in self._pending_deactivates:
+            return
+        self._pending_deactivates.discard(path)
+        self._cancel_pending_deactivate_timer(path)
+        if path in self._rows:
+            self._rows[path].set_pending_deactivate(False)
+
+    def cancel_all_pending_deactivates(self):
+        """Clear every pending deactivate without killing sessions."""
+        for path in list(self._pending_deactivates):
+            self.cancel_pending_deactivate(path)
+
+    def migrate_pending_deactivate(self, old_path, new_path):
+        """Rewrite pending-deactivate keys when a project path changes (rename)."""
+        if old_path not in self._pending_deactivates:
+            return
+        self._pending_deactivates.discard(old_path)
+        self._pending_deactivates.add(new_path)
+        self._cancel_pending_deactivate_timer(old_path)
+        self._pending_deactivate_timers[new_path] = GLib.timeout_add(
+            self.PENDING_DEACTIVATE_MS, self._fire_pending_deactivate, new_path)
+
+    def _begin_pending_deactivate(self, path):
+        """Start the hidden grace period; kill only when the timer fires."""
+        if path in self._pending_deactivates:
+            return
+        row = self._rows.get(path)
+        if row is None or row._process_state != 'attached':
+            return
+        self._pending_deactivates.add(path)
+        row.set_pending_deactivate(True)
+        self._cancel_pending_deactivate_timer(path)
+        self._pending_deactivate_timers[path] = GLib.timeout_add(
+            self.PENDING_DEACTIVATE_MS, self._fire_pending_deactivate, path)
+
+    def _fire_pending_deactivate(self, path):
+        self._pending_deactivate_timers.pop(path, None)
+        if path not in self._pending_deactivates:
+            return False
+        self._pending_deactivates.discard(path)
+        if path in self._rows:
+            self._rows[path].set_pending_deactivate(False)
+        self.emit('project-deactivate', path)
+        return False
 
     def set_remote_projects(self, host_id, projects):
         """Replace the cached project list for a remote host.
@@ -964,7 +1026,8 @@ class ProjectRow(Gtk.ListBoxRow):
     __gsignals__ = {
         'session-activated':  (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         'project-archive':    (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'project-deactivate': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'deactivate-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'deactivate-undo':      (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-new-session': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-zellij':     (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-ntfy-toggle': (GObject.SignalFlags.RUN_FIRST, None, ()),
@@ -983,6 +1046,7 @@ class ProjectRow(Gtk.ListBoxRow):
         self._expanded = False
         self._sessions_loaded = False
         self._process_state = 'inactive'
+        self._pending_deactivate = False
         self._is_zellij = False
         self._new_session_row = None
         # The harness id the LIVE child is actually running (C5 truth), pushed in
@@ -1060,9 +1124,19 @@ class ProjectRow(Gtk.ListBoxRow):
         self._deactivate_btn.set_valign(Gtk.Align.CENTER)
         self._deactivate_btn.set_tooltip_text('Deactivate session')
         self._deactivate_btn.set_sensitive(False)  # only enabled when process running
-        self._deactivate_btn.connect('clicked', lambda b: self._show_confirm_popover(b, lambda: self.emit('project-deactivate')))
+        self._deactivate_btn.connect('clicked',
+                                     lambda b: self.emit('deactivate-requested'))
         actions_box.append(self._deactivate_btn)
 
+        self._undo_btn = Gtk.Button(label='UNDO')
+        self._undo_btn.add_css_class('flat')
+        self._undo_btn.set_valign(Gtk.Align.CENTER)
+        self._undo_btn.set_tooltip_text('Cancel deactivate')
+        self._undo_btn.set_visible(False)
+        self._undo_btn.connect('clicked', lambda b: self.emit('deactivate-undo'))
+        actions_box.append(self._undo_btn)
+
+        self._actions_box = actions_box
         top.append(actions_box)
 
         outer.append(top)
@@ -1459,6 +1533,32 @@ class ProjectRow(Gtk.ListBoxRow):
         elif isinstance(row, SessionHistoryRow):
             self.emit('session-activated', self._project.path, row._ref.id)
 
+    def set_pending_deactivate(self, pending: bool):
+        """Visual grace-period state: italics + row wash + always-visible UNDO.
+
+        While pending, strip the hover-only opacity class so UNDO stays
+        visible even when the pointer leaves the row. Session state remains
+        attached until the sidebar timer fires. Row class drives theme
+        background wash; name label class drives italic.
+        """
+        self._pending_deactivate = pending
+        if pending:
+            self.add_css_class('project-row-pending-deactivate')
+            self._name_label.add_css_class('project-row-pending-deactivate')
+            # Drop hover-hide entirely (more reliable than opacity !important).
+            self._actions_box.remove_css_class('project-row-actions')
+            self._actions_box.add_css_class('project-row-actions-pending')
+            self._deactivate_btn.set_visible(False)
+            self._undo_btn.set_visible(True)
+        else:
+            self.remove_css_class('project-row-pending-deactivate')
+            self._name_label.remove_css_class('project-row-pending-deactivate')
+            self._actions_box.remove_css_class('project-row-actions-pending')
+            self._actions_box.add_css_class('project-row-actions')
+            self._undo_btn.set_visible(False)
+            self._deactivate_btn.set_visible(True)
+            self._deactivate_btn.set_sensitive(self._process_state == 'attached')
+
     def set_process_state(self, state: str, is_zellij: bool = None):
         """state: 'inactive' | 'attached' | 'detached'"""
         self._process_state = state
@@ -1468,7 +1568,10 @@ class ProjectRow(Gtk.ListBoxRow):
             self._is_zellij = True
         elif state == 'inactive':
             self._is_zellij = False
-        self._deactivate_btn.set_sensitive(state == 'attached')
+            if self._pending_deactivate:
+                self.set_pending_deactivate(False)
+        if not self._pending_deactivate:
+            self._deactivate_btn.set_sensitive(state == 'attached')
         self._new_session_action.set_enabled(not self._is_zellij)
         if self._new_session_row is not None:
             self._new_session_row.set_sensitive(not self._is_zellij)

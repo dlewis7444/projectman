@@ -87,6 +87,9 @@ class TerminalView(Gtk.Box):
         # raw bash error + a vanished row. process-exited still fires too (the
         # row goes 'inactive'); this is the explanatory layer on top.
         'process-spawn-failed': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # Fired at spawn entry (before kill) so window.py can cancel a pending
+        # deferred deactivate before the grace timer can race a respawn.
+        'spawn-begin': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
     def __init__(self, project, settings, harness_id=None):
@@ -383,6 +386,7 @@ class TerminalView(Gtk.Box):
         # (which runs build_spawn_env for claude) sets a fresh reason below; clearing here
         # avoids a stale reason from a prior failed spawn leaking through.
         self._fallback_reason = None
+        self.emit('spawn-begin')
         # FB-4 (C4/C6): a harness-change / new-session DIRECT spawn over a live
         # zellij project must tear down the zellij SERVER session first — the
         # deactivate path already does this; the spawn path used to kill only the
@@ -524,6 +528,7 @@ class TerminalView(Gtk.Box):
         # custom-model spawn would otherwise raise a spurious toast on a healthy
         # attach.
         self._fallback_reason = None
+        self.emit('spawn-begin')
         self._kill_child()
         self._terminal.reset(True, True)
         self._is_zellij = True

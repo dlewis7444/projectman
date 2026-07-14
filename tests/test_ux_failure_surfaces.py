@@ -89,7 +89,7 @@ def test_is_spawn_failure_signal_death_is_not_failure():
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# M-UX.10a — the toast text + one-shot dedup (window, unbound)
+# M-UX.10a — install dialog + one-shot dedup (window, unbound)
 # ════════════════════════════════════════════════════════════════════════════
 
 def _win(settings=None, toasts=None, sidebar=None):
@@ -101,57 +101,73 @@ def _win(settings=None, toasts=None, sidebar=None):
     # A recorder sidebar so handlers that touch the filter (_on_spawn_failed
     # drops Active Only — P3.5d Item 2/C7) have a faithful seam to record on.
     fake._sidebar = sidebar if sidebar is not None else _Sidebar()
-    # Real one-shot toast helper from window.py — exercises the actual Adw.Toast
-    # plumbing (headless-safe) so handlers that call self._show_toast work.
     from window import AppWindow
     fake._show_toast = lambda text, timeout=5: AppWindow._show_toast(fake, text, timeout)
+    fake._find_project = lambda path: None
+    fake._spawn_failure_binary = (
+        lambda aid, rb: AppWindow._spawn_failure_binary(fake, aid, rb)
+    )
+    fake._spawn_failure_host_ssh_target = (
+        lambda project_path: AppWindow._spawn_failure_host_ssh_target(fake, project_path)
+    )
+    fake._spawn_failure_recovery = (
+        lambda project_path, aid, rb: AppWindow._spawn_failure_recovery(
+            fake, project_path, aid, rb)
+    )
     return fake
 
 
-def test_spawn_failure_toast_text_names_binary_display_and_hint():
-    """BINDING T-a (text): claude miss → '<binary> not found — Claude Code
-    isn't installed. <install hint>'."""
+def test_spawn_failure_binary_names_adapter_binary():
     from window import AppWindow
     fake = _win(Settings())
-    text = AppWindow._spawn_failure_toast_text(fake, 'claude', 'claude')
-    assert 'claude not found' in text
-    assert "Claude Code isn't installed" in text
-    assert 'claude.ai/code' in text
+    assert AppWindow._spawn_failure_binary(fake, 'claude', 'claude') == 'claude'
 
 
-def test_spawn_failure_toast_prefers_adapter_binary_over_bash_wrapper():
-    """Under the continue wrapper argv[0] is 'bash'; the toast must still name
+def test_spawn_failure_binary_prefers_adapter_binary_over_bash_wrapper():
+    """Under the continue wrapper argv[0] is 'bash'; messaging must still name
     the AGENT's binary, not bash."""
     from window import AppWindow
     fake = _win(Settings())
-    text = AppWindow._spawn_failure_toast_text(fake, 'claude', 'bash')
-    assert 'bash not found' not in text
-    assert 'claude not found' in text
+    assert AppWindow._spawn_failure_binary(fake, 'claude', 'bash') == 'claude'
 
 
-def test_spawn_failure_toast_claude_uses_resolved_binary():
+def test_spawn_failure_binary_claude_uses_resolved_binary():
     from window import AppWindow
     fake = _win(Settings(claude_binary='/opt/claude'))
-    text = AppWindow._spawn_failure_toast_text(fake, 'claude', 'bash')
-    assert '/opt/claude not found' in text
-    assert "Claude Code isn't installed" in text
-    assert 'claude.ai/code' in text
+    assert AppWindow._spawn_failure_binary(fake, 'claude', 'bash') == '/opt/claude'
 
 
-def test_on_spawn_failed_fires_one_toast_then_dedups():
-    """BINDING T-a (one-shot): a restore storm of the same miss → exactly one
-    toast; the row is NOT removed here (process-exited owns 'inactive')."""
+def test_spawn_failure_recovery_remote_includes_ssh_target():
     from window import AppWindow
-    toasts = []
-    fake = _win(Settings(), toasts)
-    fake._spawn_failure_toast_text = lambda aid, rb: AppWindow._spawn_failure_toast_text(fake, aid, rb)
+    settings = Settings(hosts={
+        'abc123': {
+            'id': 'abc123',
+            'ssh_target': 'dev@vm.example',
+            'display_name': 'VM',
+        },
+    })
+    fake = _win(settings)
+    fake._find_project = lambda path: None
+    rec = AppWindow._spawn_failure_recovery(
+        fake, 'ssh:abc123:proj', 'grok', 'grok')
+    assert rec.host_label == 'dev@vm.example'
+    assert rec.is_remote is True
+
+
+def test_on_spawn_failed_fires_one_dialog_then_dedups(monkeypatch):
+    """BINDING T-a (one-shot): a restore storm of the same miss → exactly one
+    dialog; the row is NOT removed here (process-exited owns 'inactive')."""
+    from window import AppWindow
+    dialogs = []
+    monkeypatch.setattr(
+        'harness_install_dialog.present_harness_install_dialog',
+        lambda parent, recovery, on_copied=None: dialogs.append(recovery),
+    )
+    fake = _win(Settings())
     AppWindow._on_spawn_failed(fake, '/p', 'claude', 'claude')
     AppWindow._on_spawn_failed(fake, '/p', 'claude', 'claude')  # repeat → dedup
-    assert len(toasts) == 1
-    assert "Claude Code isn't installed" in str(toasts[0].get_title())
-    # No set_project_state / row REMOVAL lives in this handler — process-exited
-    # owns the 'inactive' state. (The handler does drop the filter; see the T5
-    # P3.5d test below.)
+    assert len(dialogs) == 1
+    assert dialogs[0].dialog_title == 'Claude Code not installed'
     assert fake._sidebar.states == []
 
 
@@ -216,29 +232,35 @@ def test_active_only_set_when_process_starts():
 # restore path is untouched.
 # ════════════════════════════════════════════════════════════════════════════
 
-def test_t5_spawn_failure_drops_active_only_filter():
+def test_t5_spawn_failure_drops_active_only_filter(monkeypatch):
     """T5 (the reveal): _on_spawn_failed calls set_active_only(False) — a failure
     always reveals the board. Reverting that line leaves active_only_calls empty
     and FAILS this."""
     from window import AppWindow
     sb = _Sidebar()
     fake = _win(Settings(), sidebar=sb)
-    fake._spawn_failure_toast_text = lambda aid, rb: AppWindow._spawn_failure_toast_text(fake, aid, rb)
+    monkeypatch.setattr(
+        'harness_install_dialog.present_harness_install_dialog',
+        lambda *a, **k: None,
+    )
     AppWindow._on_spawn_failed(fake, '/proj', 'claude', 'claude')
     assert sb.active_only_calls == [(False, '/proj', None)]  # filter dropped
 
 
-def test_t5_spawn_failure_drops_filter_every_time_even_when_deduped():
-    """The toast is one-shot (dedup), but the filter drop is NOT — a second
+def test_t5_spawn_failure_drops_filter_every_time_even_when_deduped(monkeypatch):
+    """The dialog is one-shot (dedup), but the filter drop is NOT — a second
     failure of the same miss still reveals the board (idempotent)."""
     from window import AppWindow
-    toasts = []
+    dialogs = []
     sb = _Sidebar()
-    fake = _win(Settings(), toasts, sidebar=sb)
-    fake._spawn_failure_toast_text = lambda aid, rb: AppWindow._spawn_failure_toast_text(fake, aid, rb)
+    fake = _win(Settings(), sidebar=sb)
+    monkeypatch.setattr(
+        'harness_install_dialog.present_harness_install_dialog',
+        lambda parent, recovery, on_copied=None: dialogs.append(recovery),
+    )
     AppWindow._on_spawn_failed(fake, '/proj', 'claude', 'claude')
-    AppWindow._on_spawn_failed(fake, '/proj', 'claude', 'claude')  # deduped toast
-    assert len(toasts) == 1                     # toast one-shot
+    AppWindow._on_spawn_failed(fake, '/proj', 'claude', 'claude')  # deduped dialog
+    assert len(dialogs) == 1                    # dialog one-shot
     assert sb.active_only_calls == [(False, '/proj', None), (False, '/proj', None)]
 
 

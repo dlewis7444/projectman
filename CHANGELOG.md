@@ -7,6 +7,29 @@ All notable changes to ProjectMan will be documented in this file.
 _Deferred UX polish TODOs (editor unsaved-changes affordance; sidebar
 new-project count while inline-edit row is visible) remain open._
 
+## [1.4.7] - 2026-07-14
+
+### Added
+- **Deferred deactivate with UNDO:** the stop control starts a 5s grace period
+  instead of an immediate confirm-popover kill. An always-visible **UNDO**
+  button cancels; the timer then deactivates. Pending rows italicize the name
+  and take a theme warning wash (hover-hidden actions stay visible for UNDO).
+  Cancel paths cover natural exit, archive, rename, respawn (`spawn-begin`),
+  and shutdown.
+- **Missing-harness install dialog (M-UX.10a):** a missing binary no longer
+  relies on a persistent toast alone. A dialog offers copy-to-clipboard for the
+  official install command and for an AI install prompt (local vs remote SSH
+  wording). Per-adapter `install_command` one-liners for Claude, OpenCode, and
+  Grok Build.
+
+### Fixed
+- **Timer-fired deactivate with no terminal:** missing `TerminalView` paths
+  now set the row inactive instead of leaving a stuck pending/attached state.
+
+### Changed
+- **Grok waiting threshold:** `PHASE_WAITING_THRESHOLD` 5s → 10s before a
+  long `pre_tool_use` working snapshot is promoted to waiting.
+
 ## [1.4.6] - 2026-07-12
 
 ### Fixed
