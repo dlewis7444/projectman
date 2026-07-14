@@ -405,7 +405,7 @@ def test_phase_aged_past_threshold_promotes_to_waiting(tmp_path, monkeypatch):
 
 
 def test_phase_at_exact_threshold_promotes(tmp_path, monkeypatch):
-    """Promotion semantics are age >= threshold ('ages past 5s')."""
+    """Promotion semantics are age >= PHASE_WAITING_THRESHOLD."""
     import model
     proj_dir = tmp_path / 'p'
     proj_dir.mkdir()
@@ -435,8 +435,8 @@ def test_phase_fresh_stays_working_and_arms_timer(tmp_path, monkeypatch):
     assert w.get_project_status(proj) == 'working'   # not aged yet
     assert len(sched.calls) == 1
     delay, callback = sched.calls[0]
-    # remaining = threshold - age = 3s, plus the small cushion.
-    assert 3.0 <= delay <= 3.2
+    remaining = model.PHASE_WAITING_THRESHOLD - (1002.0 - 1000.0)
+    assert remaining <= delay <= remaining + 0.2
     emits_before = len(emits)
     # The clock crosses the threshold; the timer fires.
     clock['now'] = 1000.0 + model.PHASE_WAITING_THRESHOLD + 0.1

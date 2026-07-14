@@ -174,6 +174,7 @@ class ClaudeAdapter:
     # M-UX.10 (C7): shown in the one-shot toast when a spawn fails because the
     # binary isn't installed — a recovery path, not a raw bash error.
     install_hint = 'Install from claude.ai/code'
+    install_command = 'curl -fsSL https://claude.ai/install.sh | bash'
     caps = HarnessCaps(
         continue_=True,
         resume_by_id=True,
@@ -486,6 +487,7 @@ class OpencodeAdapter:
     display_name = 'OpenCode'
     # M-UX.10 (C7): recovery hint surfaced on a missing-binary spawn failure.
     install_hint = 'Install from opencode.ai'
+    install_command = 'curl -fsSL https://opencode.ai/install | bash'
     caps = HarnessCaps(
         continue_=True,
         resume_by_id=True,
@@ -757,6 +759,7 @@ class GrokAdapter:
     # M-UX.10 (C7): recovery hint surfaced on a missing-binary spawn failure —
     # the curl one-liner from the README's "Installing Grok Build".
     install_hint = 'Install: curl -fsSL https://x.ai/cli/install.sh | bash'
+    install_command = 'curl -fsSL https://x.ai/cli/install.sh | bash'
     caps = HarnessCaps(
         continue_=True,
         resume_by_id=True,
@@ -910,6 +913,103 @@ ADAPTERS = {
 }
 
 DEFAULT_HARNESS = 'claude'
+
+
+# ---------------------------------------------------------------------------
+# Spawn-failure recovery copy (M-UX.10a dialog — pure, no GTK).
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SpawnFailureRecovery:
+    """Copy targets for the missing-harness install dialog."""
+    harness_id: str
+    display_name: str
+    binary: str
+    host_label: str
+    is_remote: bool
+    install_command: str
+    dialog_title: str
+    dialog_body: str
+    install_command_blurb: str
+    ai_prompt_blurb: str
+
+
+def harness_install_command(harness_id: str) -> str:
+    """Return the official one-liner install command for a harness."""
+    adapter = ADAPTERS.get(harness_id)
+    if adapter is not None:
+        cmd = getattr(adapter, 'install_command', '')
+        if cmd:
+            return cmd
+    return ''
+
+
+def build_spawn_failure_recovery(
+    harness_id: str,
+    *,
+    binary: str,
+    host_ssh_target: str | None = None,
+) -> SpawnFailureRecovery:
+    """Assemble dialog + clipboard blurbs for a missing-binary spawn failure."""
+    adapter = ADAPTERS.get(harness_id)
+    display = getattr(adapter, 'display_name', harness_id) if adapter else harness_id
+    install_cmd = harness_install_command(harness_id)
+    is_remote = bool((host_ssh_target or '').strip())
+    host_label = (host_ssh_target or '').strip() or 'this machine'
+
+    if is_remote:
+        dialog_body = (
+            f'{binary} was not found on {host_label}. '
+            f'Install {display} on that host, then reopen the project.'
+        )
+        ai_intro = f'Install {display} on the remote host {host_label}.'
+        ai_host_step = (
+            f'SSH to {host_label}, run the install command, and confirm that '
+            f'`{binary}` is available on PATH when done.'
+        )
+    else:
+        dialog_body = (
+            f'{binary} was not found on this machine. '
+            f'Install {display} locally, then reopen the project.'
+        )
+        ai_intro = f'Install {display} on this machine (localhost).'
+        ai_host_step = (
+            f'Run the install command in a terminal and confirm that '
+            f'`{binary}` is available on PATH when done.'
+        )
+
+    verify_line = (
+        f'Please verify this is still the current official install command '
+        f'for {display} (check the vendor documentation).'
+    )
+    if install_cmd:
+        install_command_blurb = install_cmd
+        ai_prompt_blurb = (
+            f'{ai_intro}\n\n'
+            f'Recommended install command:\n{install_cmd}\n\n'
+            f'{verify_line} {ai_host_step}'
+        )
+    else:
+        install_command_blurb = getattr(adapter, 'install_hint', '') if adapter else ''
+        ai_prompt_blurb = (
+            f'{ai_intro}\n\n'
+            f'{getattr(adapter, "install_hint", "")}\n\n'
+            f'{verify_line} {ai_host_step}'
+        )
+
+    return SpawnFailureRecovery(
+        harness_id=harness_id,
+        display_name=display,
+        binary=binary,
+        host_label=host_label,
+        is_remote=is_remote,
+        install_command=install_cmd,
+        dialog_title=f'{display} not installed',
+        dialog_body=dialog_body,
+        install_command_blurb=install_command_blurb,
+        ai_prompt_blurb=ai_prompt_blurb,
+    )
+
 
 # Ids that ship with ProjectMan. A custom/user-supplied adapter may NEVER claim
 # one of these (M-P3.5): builtins win, no silent dict shadowing.

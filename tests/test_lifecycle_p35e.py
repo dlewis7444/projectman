@@ -205,34 +205,42 @@ def test_zellij_kill_session_never_raises(monkeypatch):
 # FB-10 — the spawn-failure toast is persistent (timeout=0) (RB-1 / H2)
 # ════════════════════════════════════════════════════════════════════════════
 
-def _spawnfail_fake():
-    toasts = []
+def _spawnfail_fake(monkeypatch):
+    dialogs = []
     sidebar = types.SimpleNamespace(
         set_active_only=lambda v, path=None, paths=None: None)
     fake = types.SimpleNamespace(
         _sidebar=sidebar,
         _warned_spawn_fail=set(),
     )
-    fake._show_toast = lambda text, timeout=5: toasts.append((text, timeout))
-    fake._spawn_failure_toast_text = lambda harness_id, raw: f'{harness_id} not found'
-    return fake, toasts
+    fake._show_toast = lambda text, timeout=5: None
+    fake._spawn_failure_recovery = lambda project_path, harness_id, raw: types.SimpleNamespace(
+        dialog_title=f'{harness_id} not installed',
+        dialog_body=f'{harness_id} not found',
+        install_command_blurb='',
+        ai_prompt_blurb='',
+        is_remote=False,
+        host_label='this machine',
+    )
+    monkeypatch.setattr(
+        'harness_install_dialog.present_harness_install_dialog',
+        lambda parent, recovery, on_copied=None: dialogs.append(recovery),
+    )
+    return fake, dialogs
 
 
-def test_spawn_failure_toast_is_persistent():
-    """BINDING (FB-10): the spawn-failure toast call pins timeout=0 (persistent,
-    like the ccr fallback toast) — reverting to the default timeout=5 FAILS."""
-    fake, toasts = _spawnfail_fake()
+def test_spawn_failure_opens_install_dialog(monkeypatch):
+    """BINDING (FB-10): missing-binary spawn → install-recovery dialog."""
+    fake, dialogs = _spawnfail_fake(monkeypatch)
     AppWindow._on_spawn_failed(fake, '/p', 'grok', 'grok')
-    assert len(toasts) == 1
-    text, timeout = toasts[0]
-    assert timeout == 0
-    assert 'grok not found' in text
+    assert len(dialogs) == 1
+    assert dialogs[0].dialog_title == 'grok not installed'
 
 
-def test_spawn_failure_toast_dedup_unchanged():
+def test_spawn_failure_dialog_dedup_unchanged(monkeypatch):
     """The one-shot dedup is unchanged: a second identical (path, agent) miss is
-    NOT re-toasted."""
-    fake, toasts = _spawnfail_fake()
+    NOT re-shown."""
+    fake, dialogs = _spawnfail_fake(monkeypatch)
     AppWindow._on_spawn_failed(fake, '/p', 'grok', 'grok')
     AppWindow._on_spawn_failed(fake, '/p', 'grok', 'grok')   # same key
-    assert len(toasts) == 1                                   # deduped
+    assert len(dialogs) == 1                                   # deduped
