@@ -1,4 +1,5 @@
 # tests/test_sidebar_state.py
+import types
 import pytest
 import gi
 gi.require_version('Gtk', '4.0')
@@ -960,3 +961,216 @@ def test_paa_count_label_renders_count_and_scanning_states():
     sb.set_paa_pending_count(0)
     assert sb._paa_count_label.get_label() == ''
     assert sb._paa_count_label.get_visible() is False
+
+
+# ===========================================================================
+# Deferred deactivate + UNDO grace period
+# ===========================================================================
+
+def _sidebar_with_projects(paths=None):
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+
+    paths = paths or ['/tmp/pm-alpha']
+    names = [p.rsplit('/', 1)[-1] for p in paths]
+
+    class FakeStore:
+        def load_projects(self):
+            return [
+                Project(name=n, path=p, host_id='localhost')
+                for n, p in zip(names, paths)
+            ]
+
+    settings = Settings()
+    return Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=settings)
+
+
+def test_pending_deactivate_shows_italic_and_undo():
+    row = _make_row()
+    row.set_process_state('attached')
+    row.set_pending_deactivate(True)
+    # Row class → theme bg wash; name label class → italic.
+    assert row.has_css_class('project-row-pending-deactivate')
+    assert row._name_label.has_css_class('project-row-pending-deactivate')
+    assert row._actions_box.has_css_class('project-row-actions-pending')
+    # Hover-hide class must be gone so UNDO stays visible without hover.
+    assert not row._actions_box.has_css_class('project-row-actions')
+    assert row._undo_btn.get_visible() is True
+    assert row._deactivate_btn.get_visible() is False
+    assert row._process_state == 'attached'
+
+
+def test_undo_clears_pending_ui():
+    row = _make_row()
+    row.set_process_state('attached')
+    row.set_pending_deactivate(True)
+    row.set_pending_deactivate(False)
+    assert not row.has_css_class('project-row-pending-deactivate')
+    assert not row._name_label.has_css_class('project-row-pending-deactivate')
+    assert not row._actions_box.has_css_class('project-row-actions-pending')
+    # Hover-hide restored after UNDO / cancel.
+    assert row._actions_box.has_css_class('project-row-actions')
+    assert row._undo_btn.get_visible() is False
+    assert row._deactivate_btn.get_visible() is True
+    assert row._deactivate_btn.get_sensitive() is True
+
+
+def test_begin_pending_deactivate_schedules_timer_not_immediate(monkeypatch):
+    captured = {}
+
+    def fake_timeout_add(ms, fn, *args):
+        captured['ms'] = ms
+        captured['fn'] = fn
+        captured['args'] = args
+        return 99
+
+    monkeypatch.setattr('sidebar.GLib.timeout_add', fake_timeout_add)
+    sb = _sidebar_with_projects(['/tmp/pm-alpha'])
+    path = '/tmp/pm-alpha'
+    sb.set_project_state(path, 'attached')
+    emitted = []
+    sb.connect('project-deactivate', lambda s, p: emitted.append(p))
+
+    sb._begin_pending_deactivate(path)
+
+    assert path in sb._pending_deactivates
+    assert emitted == []
+    assert captured['ms'] == sb.PENDING_DEACTIVATE_MS
+    assert captured['args'] == (path,)
+    row = sb._rows[path]
+    assert row._pending_deactivate is True
+
+
+def test_fire_pending_deactivate_emits_signal(monkeypatch):
+    monkeypatch.setattr('sidebar.GLib.source_remove', lambda tid: None)
+    sb = _sidebar_with_projects(['/tmp/pm-alpha'])
+    path = '/tmp/pm-alpha'
+    sb.set_project_state(path, 'attached')
+    sb._pending_deactivates.add(path)
+    sb._rows[path].set_pending_deactivate(True)
+    emitted = []
+    sb.connect('project-deactivate', lambda s, p: emitted.append(p))
+
+    sb._fire_pending_deactivate(path)
+
+    assert emitted == [path]
+    assert path not in sb._pending_deactivates
+    assert sb._rows[path]._pending_deactivate is False
+
+
+def test_cancel_pending_deactivate_on_undo(monkeypatch):
+    removed = []
+    monkeypatch.setattr('sidebar.GLib.source_remove',
+                        lambda tid: removed.append(tid))
+    monkeypatch.setattr('sidebar.GLib.timeout_add', lambda *a, **k: 77)
+
+    sb = _sidebar_with_projects(['/tmp/pm-alpha'])
+    path = '/tmp/pm-alpha'
+    sb.set_project_state(path, 'attached')
+    sb._begin_pending_deactivate(path)
+    sb.cancel_pending_deactivate(path)
+
+    assert path not in sb._pending_deactivates
+    assert removed == [77]
+    assert sb._rows[path]._pending_deactivate is False
+
+
+def test_set_project_state_inactive_clears_pending(monkeypatch):
+    monkeypatch.setattr('sidebar.GLib.source_remove', lambda tid: None)
+    monkeypatch.setattr('sidebar.GLib.timeout_add', lambda *a, **k: 1)
+
+    sb = _sidebar_with_projects(['/tmp/pm-alpha'])
+    path = '/tmp/pm-alpha'
+    sb.set_project_state(path, 'attached')
+    sb._begin_pending_deactivate(path)
+    sb.set_project_state(path, 'inactive')
+
+    assert path not in sb._pending_deactivates
+    assert sb._rows[path]._pending_deactivate is False
+
+
+def test_pending_deactivate_survives_populate(monkeypatch):
+    monkeypatch.setattr('sidebar.GLib.source_remove', lambda tid: None)
+    monkeypatch.setattr('sidebar.GLib.timeout_add', lambda *a, **k: 5)
+
+    sb = _sidebar_with_projects(['/tmp/pm-alpha'])
+    path = '/tmp/pm-alpha'
+    sb.set_project_state(path, 'attached')
+    sb._begin_pending_deactivate(path)
+    sb.refresh()
+
+    row = sb._rows[path]
+    assert path in sb._pending_deactivates
+    assert row._pending_deactivate is True
+    assert row._undo_btn.get_visible() is True
+    assert row._process_state == 'attached'
+
+
+def test_active_filter_keeps_pending_row_visible(monkeypatch):
+    monkeypatch.setattr('sidebar.GLib.timeout_add', lambda *a, **k: 1)
+    monkeypatch.setattr('sidebar.GLib.source_remove', lambda tid: None)
+
+    sb = _sidebar_with_projects(['/tmp/pm-alpha', '/tmp/pm-beta'])
+    sb.set_host_section_mode('localhost', 'active')
+    sb.set_project_state('/tmp/pm-alpha', 'attached')
+    sb.set_project_state('/tmp/pm-beta', 'inactive')
+    sb._begin_pending_deactivate('/tmp/pm-alpha')
+
+    filt = sb._filter_func_for('localhost')
+    assert filt(sb._rows['/tmp/pm-alpha']) is True
+    assert filt(sb._rows['/tmp/pm-beta']) is False
+
+
+def test_deactivate_signals_exist():
+    from sidebar import ProjectRow
+    assert GObject_signal_exists(ProjectRow, 'deactivate-requested')
+    assert GObject_signal_exists(ProjectRow, 'deactivate-undo')
+
+
+def test_on_project_deactivate_without_terminal_sets_inactive():
+    """Timer-fired deactivate with no TerminalView must not leave a stuck row."""
+    from window import AppWindow
+    states = []
+    fake = types.SimpleNamespace(
+        _terminals={},
+        _sidebar=types.SimpleNamespace(
+            cancel_pending_deactivate=lambda p: None,
+            set_project_state=lambda p, s, is_zellij=False: states.append((p, s)),
+        ),
+    )
+    AppWindow._on_project_deactivate(fake, None, '/missing')
+    assert states == [('/missing', 'inactive')]
+
+
+def test_spawn_begin_cancels_pending_deactivate(monkeypatch):
+    """Respawn must cancel grace before kill so the timer cannot hit the new child."""
+    monkeypatch.setattr('sidebar.GLib.source_remove', lambda tid: None)
+    monkeypatch.setattr('sidebar.GLib.timeout_add', lambda *a, **k: 42)
+
+    sb = _sidebar_with_projects(['/tmp/pm-alpha'])
+    path = '/tmp/pm-alpha'
+    sb.set_project_state(path, 'attached')
+    sb._begin_pending_deactivate(path)
+
+    # window.py wires spawn-begin → cancel_pending_deactivate
+    sb.cancel_pending_deactivate(path)
+
+    assert path not in sb._pending_deactivates
+    assert sb._rows[path]._pending_deactivate is False
+
+
+def test_migrate_pending_deactivate_rewrites_path(monkeypatch):
+    monkeypatch.setattr('sidebar.GLib.source_remove', lambda tid: None)
+    added = []
+    monkeypatch.setattr('sidebar.GLib.timeout_add',
+                        lambda ms, fn, path: added.append(path) or 3)
+
+    sb = _sidebar_with_projects(['/tmp/old'])
+    sb._pending_deactivates.add('/tmp/old')
+    sb._pending_deactivate_timers['/tmp/old'] = 2
+    sb.migrate_pending_deactivate('/tmp/old', '/tmp/new')
+
+    assert '/tmp/old' not in sb._pending_deactivates
+    assert '/tmp/new' in sb._pending_deactivates
+    assert added == ['/tmp/new']

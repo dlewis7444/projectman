@@ -80,14 +80,22 @@ def test_emergency_shutdown_saves_before_kill_and_skips_zellij():
         '/zellij': _term(222, is_zellij=True, calls=calls, path='/zellij'),
         '/dead': _term(None, is_zellij=False, calls=calls, path='/dead'),
     }
-    fake = types.SimpleNamespace(_terminals=terminals)
+    fake = types.SimpleNamespace(
+        _terminals=terminals,
+        _sidebar=types.SimpleNamespace(
+            cancel_all_pending_deactivates=lambda: calls.append(
+                ('cancel_pending', None)),
+        ),
+    )
     fake._save_session = lambda: calls.append(('save', None))
 
     killed = AppWindow.emergency_shutdown(fake)
 
     assert killed == ['/direct']
-    # save first, exactly one kill (the direct one), ccr stop last.
-    assert calls == [('save', None), ('kill', '/direct')]
+    # cancel pending → save → kill (direct only).
+    assert calls == [
+        ('cancel_pending', None), ('save', None), ('kill', '/direct'),
+    ]
     # zellij _kill_child never fired.
     assert ('kill', '/zellij') not in calls
     # save strictly precedes every kill.
@@ -330,6 +338,8 @@ def test_rename_remote_uses_remote_store_not_local_os_rename(monkeypatch):
             set_remote_projects=lambda hid, ps: calls.append(
                 ('set_remote', hid, [p.name for p in ps])),
             refresh=lambda: calls.append(('refresh',)),
+            migrate_pending_deactivate=lambda o, n: calls.append(
+                ('migrate_pending', o, n)),
             _process_states={},
             _running_harnesses={},
         ),

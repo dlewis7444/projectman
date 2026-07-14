@@ -38,8 +38,8 @@ class AppWindow(Adw.ApplicationWindow):
         self._restore_harnesses: dict = {}
         # Distinct missing-harness ids already toasted (A6 one-shot dedup).
         self._warned_harnesses: set = set()
-        # (project_path, harness_id) pairs already toasted for a spawn failure
-        # (M-UX.10a one-shot dedup — a restore storm of the same miss is one toast).
+        # (project_path, harness_id) pairs already shown for a spawn failure
+        # (M-UX.10a one-shot dedup — a restore storm of the same miss is one dialog).
         self._warned_spawn_fail: set = set()
         # FB-2 (C7/C8): did ANY agent child actually start this run? Set in the
         # process-started handler. The close-time save consults this so a FAILED
@@ -460,6 +460,7 @@ class AppWindow(Adw.ApplicationWindow):
         dialog.present(self)
 
     def _open_shutdown_window(self, running):
+        self._sidebar.cancel_all_pending_deactivates()
         self._save_session()      # snapshot before SIGTERM
         ShutdownWindow(parent=self, running=running, on_complete=self._quit)
 
@@ -492,6 +493,7 @@ class AppWindow(Adw.ApplicationWindow):
         Returns the list of killed paths (for the signal handler / logging).
         Never prompts, never waits on children.
         """
+        self._sidebar.cancel_all_pending_deactivates()
         self._save_session()
         killed = plan_emergency_kill(self._terminals)
         for path in killed:
@@ -845,17 +847,14 @@ class AppWindow(Adw.ApplicationWindow):
         toast.set_timeout(timeout)
         self._toast_overlay.add_toast(toast)
 
-    def _spawn_failure_toast_text(self, harness_id, raw_binary):
-        """The M-UX.10a toast string: '<binary> not found — <display> isn't
-        installed. <install hint>'.
+    def _spawn_failure_binary(self, harness_id, raw_binary):
+        """Resolve the harness binary name for spawn-failure messaging.
 
-        Resolves the harness's REAL binary + display name + install hint from the
-        adapter (the raw argv[0] can be 'bash' under the continue wrapper, so we
-        prefer the adapter's binary). Pure string assembly; no GTK."""
+        The raw argv[0] can be 'bash' under the continue wrapper, so we prefer
+        the adapter's binary. Pure resolution; no GTK."""
         import harnesses
-        adapter = harnesses.ADAPTERS.get(harness_id) or harnesses.get_adapter(harness_id, self._settings)
-        display = getattr(adapter, 'display_name', harness_id)
-        hint = getattr(adapter, 'install_hint', '')
+        adapter = (harnesses.ADAPTERS.get(harness_id)
+                   or harnesses.get_adapter(harness_id, self._settings))
         binary = harness_id
         try:
             if harness_id == 'claude':
@@ -864,28 +863,48 @@ class AppWindow(Adw.ApplicationWindow):
                 binary = adapter._binary(self._settings)
         except Exception:
             pass
-        # If the raw argv[0] was a concrete path (not the bash wrapper), prefer it.
         if raw_binary and os.path.basename(raw_binary) not in ('bash', 'sh', ''):
             binary = raw_binary
-        msg = f"{binary} not found — {display} isn't installed."
-        if hint:
-            msg = f"{msg} {hint}"
-        return msg
+        return binary
+
+    def _spawn_failure_host_ssh_target(self, project_path):
+        """Return the remote SSH target for a project path, or None for local."""
+        from hosts import LOCALHOST_ID, decode_project_ref
+        project = self._find_project(project_path)
+        host_id = getattr(project, 'host_id', LOCALHOST_ID) if project else LOCALHOST_ID
+        if host_id == LOCALHOST_ID and isinstance(project_path, str):
+            if project_path.startswith('ssh:'):
+                host_id, _ = decode_project_ref(project_path)
+        if host_id == LOCALHOST_ID:
+            return None
+        prof = self._settings.host_profiles().get(host_id)
+        if prof is None:
+            return None
+        return (prof.ssh_target or '').strip() or None
+
+    def _spawn_failure_recovery(self, project_path, harness_id, raw_binary):
+        """Build dialog + clipboard blurbs for a missing-binary spawn failure."""
+        import harnesses
+        return harnesses.build_spawn_failure_recovery(
+            harness_id,
+            binary=self._spawn_failure_binary(harness_id, raw_binary),
+            host_ssh_target=self._spawn_failure_host_ssh_target(project_path),
+        )
 
     def _on_spawn_failed(self, project_path, harness_id, raw_binary):
-        """M-UX.10a (C7): a missing-binary spawn → one-shot install-hint toast.
+        """M-UX.10a (C7): a missing-binary spawn → one-shot install dialog.
 
         The row is NOT removed here — process-exited already set it 'inactive'
         (kept visible because set_active_only no longer fires on the activation
         attempt, M-UX.10b). This adds the in-app explanation + recovery path the
         triple-whammy lacked. Warned once per (project, agent) so a restore storm
-        doesn't stack toasts.
+        doesn't stack dialogs.
 
         A failure ALWAYS reveals the board (C7): restore arms "Active Only"
         eagerly for the successful case, but a spawn that FAILS would then leave
         the user with LESS UI — the just-failed 'inactive' row hidden behind a
         filter they didn't set. So a failed spawn drops the filter, every time
-        (idempotent — the toast is one-shot, this is not, and dropping an
+        (idempotent — the dialog is one-shot, this is not, and dropping an
         already-off filter is a no-op). Restore's eager filter for the
         successful path is untouched."""
         self._sidebar.set_active_only(False, path=project_path)
@@ -893,13 +912,17 @@ class AppWindow(Adw.ApplicationWindow):
         if key in self._warned_spawn_fail:
             return
         self._warned_spawn_fail.add(key)
-        # FB-10 (RB-1, H2): the spawn-failure toast is PERSISTENT (timeout=0, like
-        # the provider fallback toast). RB-1's repro proved the mechanism fired — but
-        # at timeout=5 it auto-dismissed before an unfocused user looked, reading
-        # as "no toast". A missing-binary failure (C7) needs a recovery hint that
-        # waits to be read. Dedup (_warned_spawn_fail) is unchanged.
-        self._show_toast(self._spawn_failure_toast_text(harness_id, raw_binary),
-                         timeout=0)
+        from harness_install_dialog import present_harness_install_dialog
+        recovery = self._spawn_failure_recovery(project_path, harness_id, raw_binary)
+        present_harness_install_dialog(
+            self,
+            recovery,
+            on_copied=lambda kind: self._show_toast(
+                'Install command copied to clipboard'
+                if kind == 'command'
+                else 'AI prompt copied to clipboard',
+            ),
+        )
 
     def _handle_late_death(self, tv, status, path):
         """FB-3 (C7): a child exited — surface it in the pane.
@@ -1051,6 +1074,8 @@ class AppWindow(Adw.ApplicationWindow):
                 # can attest; drop the C5 mismatch subtitle (detach-to-none).
                 self._sidebar.set_running_harness(p, None)
 
+            tv.connect('spawn-begin',
+                       lambda t, p=project.path: self._sidebar.cancel_pending_deactivate(p))
             tv.connect('process-started', _on_started)
             tv.connect('process-exited', _on_exited)
             tv.connect('process-detached', _on_detached)
@@ -1146,8 +1171,11 @@ class AppWindow(Adw.ApplicationWindow):
     # --- deactivate (kill process, keep in sidebar as inactive) ---
 
     def _on_project_deactivate(self, sidebar, path):
+        # Timer-fired deactivate only; immediate-kill paths bypass the grace period.
+        self._sidebar.cancel_pending_deactivate(path)
         tv = self._terminals.get(path)
         if tv is None:
+            self._sidebar.set_project_state(path, 'inactive')
             return
         if tv._is_zellij:
             import zellij as z
@@ -1174,6 +1202,7 @@ class AppWindow(Adw.ApplicationWindow):
     # --- archive (move to .archive, remove terminal) ---
 
     def _on_project_archive(self, sidebar, path):
+        self._sidebar.cancel_pending_deactivate(path)
         if path in self._terminals:
             tv = self._terminals.pop(path)
             tv._kill_child()
@@ -1696,6 +1725,7 @@ class AppWindow(Adw.ApplicationWindow):
             bag = getattr(self._sidebar, bag_name, None)
             if isinstance(bag, dict) and old_path in bag:
                 bag[new_path] = bag.pop(old_path)
+        self._sidebar.migrate_pending_deactivate(old_path, new_path)
 
         if host_id == LOCALHOST_ID:
             self._sidebar.refresh()
