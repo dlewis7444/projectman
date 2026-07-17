@@ -6,18 +6,86 @@ spawn + sessions seam: an ``HarnessAdapter`` declares its capabilities and turns
 ``(settings, project, mode)`` request into a concrete ``SpawnPlan`` (argv + env)
 that ``terminal.py`` executes below the line, unchanged.
 
-P1 shipped exactly one adapter — ``ClaudeAdapter`` — wrapping today's behavior
-bit-for-bit. P2 makes the seam load-bearing (every consumer goes THROUGH it, not
-around it) and adds ``OpencodeAdapter`` as the second, first-class backend. The
-module is pure (no GTK, like ``zellij.py``/``session.py``) so it is fully
-unit-testable headless; the golden tests in ``tests/test_agent_seam.py`` pin the
-Claude adapter to the pre-refactor spawn argv/env/zellij strings.
+Shipped first-class adapters: ``ClaudeAdapter``, ``OpencodeAdapter``,
+``GrokAdapter``, and ``KimiAdapter``. The module is pure (no GTK, like
+``zellij.py``/``session.py``) so it is fully unit-testable headless; golden
+tests pin spawn argv/env/zellij strings.
 
 Design source: docs/superpowers/specs/2026-06-09-llm-agnostic-agents-design.md
 (Part I, "Architecture: four contracts" + "HarnessAdapter protocol").
 """
+import os
+import re
 import shlex
 from dataclasses import dataclass
+
+
+# Install locations used by official harness installers (often only added to
+# interactive ``.bashrc``, so a GUI-launched ProjectMan process never sees them
+# until restart — and a newly installed harness is invisible until then).
+# Prepended to PATH for local spawns + doctor so bare names (``kimi``, ``grok``,
+# …) resolve without requiring the user to re-login. Order is search priority.
+HARNESS_USER_BIN_DIRS = (
+    '~/.kimi-code/bin',
+    '~/.opencode/bin',
+    '~/.grok/bin',
+    '~/.local/bin',
+    '~/.npm-global/bin',
+    '~/bin',
+)
+
+
+def harness_user_bin_dirs(*, home=None):
+    """Absolute existing dirs from ``HARNESS_USER_BIN_DIRS`` (skip missing).
+
+    ``home`` overrides ``~`` for tests. Never raises.
+    """
+    out = []
+    for raw in HARNESS_USER_BIN_DIRS:
+        if home is not None and raw.startswith('~/'):
+            path = os.path.join(home, raw[2:])
+        elif home is not None and raw == '~':
+            path = home
+        else:
+            path = os.path.expanduser(raw)
+        try:
+            if os.path.isdir(path):
+                out.append(path)
+        except OSError:
+            continue
+    return out
+
+
+def with_harness_path(env=None, *, home=None):
+    """Return a copy of *env* (or ``os.environ``) with harness bin dirs on PATH.
+
+    Prepends only dirs that exist and are not already on PATH (idempotent).
+    Pure aside from reading the environment and the filesystem; never raises.
+    """
+    base = dict(env) if env is not None else dict(os.environ)
+    existing = base.get('PATH', '') or ''
+    parts = [p for p in existing.split(os.pathsep) if p]
+    seen = set(parts)
+    prefix = []
+    for d in harness_user_bin_dirs(home=home):
+        if d not in seen:
+            prefix.append(d)
+            seen.add(d)
+    if prefix:
+        base['PATH'] = os.pathsep.join(prefix + parts) if parts else os.pathsep.join(prefix)
+    return base
+
+
+def ensure_process_harness_path(*, home=None):
+    """Mutate ``os.environ['PATH']`` so this process can resolve harness binaries.
+
+    Called once at app startup so doctor / any PATH-based lookup sees the same
+    bins as a shell that sourced the installers' ``.bashrc`` snippets. Safe to
+    call repeatedly (idempotent). Returns the new PATH string.
+    """
+    env = with_harness_path(os.environ, home=home)
+    os.environ['PATH'] = env.get('PATH', '')
+    return os.environ['PATH']
 
 
 @dataclass
@@ -119,6 +187,108 @@ def build_zellij_continue_command(continue_argv, fresh_argv, *, fallback=True):
     if not fallback:
         return cont
     return f'{cont} || {shlex.join(fresh_argv)}'
+
+
+# Resume flag tokens across shipped adapters (flag, then session id).
+# Claude: --resume; Kimi: -S / --session; OpenCode: -s; Grok: -r.
+_RESUME_FLAGS = frozenset(('--resume', '--session', '-S', '-s', '-r'))
+
+
+def _extract_model_flags(argv):
+    """Return ``['-m'|--model, value, …]`` pairs from a direct (non-bash) argv."""
+    out = []
+    i = 0
+    while i < len(argv):
+        if argv[i] in ('-m', '--model') and i + 1 < len(argv):
+            out.extend([argv[i], argv[i + 1]])
+            i += 2
+        else:
+            i += 1
+    return out
+
+
+def _extract_model_flags_from_script(script: str):
+    """Best-effort ``-m <model>`` / ``--model <model>`` from a bash wrapper body."""
+    if not script:
+        return []
+    # Match the first model flag; harnesses only ever pass one.
+    m = re.search(r'(?:^|[\s;])(-m|--model)\s+(\S+)', script)
+    if not m:
+        return []
+    val = m.group(2).strip('\'"')
+    if not val:
+        return []
+    return [m.group(1), val]
+
+
+def _extract_resume(argv):
+    """Return ``(flag, session_id)`` for a resume spawn, or None.
+
+    Scans for known resume flags with a following id. Does not treat bare
+    ``-c`` (continue) as resume.
+    """
+    for i, tok in enumerate(argv):
+        if tok in _RESUME_FLAGS and i + 1 < len(argv):
+            sid = argv[i + 1]
+            if sid and not sid.startswith('-'):
+                return tok, sid
+    return None
+
+
+def rebuild_remote_spawn_argv(
+    argv,
+    *,
+    remote_bin,
+    adapter_id='',
+    continue_falls_back_to_fresh=True,
+):
+    """Rebuild a local spawn argv for a remote host binary (SSH rewrite).
+
+    Local plans often embed an absolute local binary path; remotes must use the
+    host's binary (PATH name or host override). This preserves:
+
+      * resume flags + session id (``--resume``, ``-S``, ``--session``, ``-s``,
+        ``-r``) — not just Claude's ``--resume``
+      * ``-m`` / ``--model`` pairs (from direct argv or inside a bash continue
+        wrapper script)
+      * continue mode (bash wrapper or bare ``-c``) via
+        :func:`build_continue_wrapper` with the adapter's fallback policy
+      * grok's ``--cwd .`` pin
+
+    Pure; never raises on odd shapes (falls back to ``[remote_bin, …]``).
+    """
+    mode_argv = list(argv) if argv else []
+    grok_cwd = ['--cwd', '.'] if adapter_id == 'grok' else []
+
+    # Model flags: direct tokens, or scrape from bash -c script body.
+    if mode_argv and mode_argv[0] == 'bash' and len(mode_argv) >= 3:
+        model_flags = _extract_model_flags_from_script(mode_argv[2])
+    else:
+        model_flags = _extract_model_flags(mode_argv)
+
+    base = [remote_bin, *grok_cwd, *model_flags]
+    fallback = bool(continue_falls_back_to_fresh)
+
+    # Continue via bash trap wrapper.
+    if mode_argv and mode_argv[0] == 'bash' and len(mode_argv) >= 3:
+        return build_continue_wrapper(
+            [*base, '-c'], list(base), fallback=fallback,
+        )
+
+    # Resume by id (any shipped harness flag).
+    resume = _extract_resume(mode_argv)
+    if resume is not None:
+        flag, sid = resume
+        return [*base, flag, sid]
+
+    # Bare continue: `-c` present as a flag after the binary (not bash -c).
+    if any(tok == '-c' for tok in mode_argv[1:]):
+        return build_continue_wrapper(
+            [*base, '-c'], list(base), fallback=fallback,
+        )
+
+    # Fresh (or unrecognized shape → bare binary + model).
+    return list(base)
 
 
 # Generalized zellij shell wrapper. Unlike the pre-refactor script it does NOT
@@ -906,10 +1076,292 @@ class GrokAdapter:
 # Registry.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# KimiAdapter — backend #3. Moonshot AI "Kimi Code" (binary ``kimi``).
+# ---------------------------------------------------------------------------
+
+def parse_kimi_session_index_lines(text):
+    """Parse ``~/.kimi-code/session_index.jsonl`` into raw entry dicts.
+
+    Each non-empty line is a JSON object with at least ``sessionId``,
+    ``sessionDir``, and ``workDir``. Defensive: bad lines / non-dicts are
+    skipped; never raises. Returns a list in file order (typically oldest
+    first — callers re-order by ``updatedAt`` after loading state).
+    """
+    import json as _json
+    out = []
+    for raw in (text or '').splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            entry = _json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        sid = entry.get('sessionId') or entry.get('session_id') or ''
+        if not sid:
+            continue
+        out.append({
+            'sessionId': str(sid),
+            'sessionDir': str(entry.get('sessionDir') or entry.get('session_dir') or ''),
+            'workDir': str(entry.get('workDir') or entry.get('work_dir') or ''),
+        })
+    return out
+
+
+def _kimi_iso_to_epoch(value):
+    """Parse a Kimi ISO-8601 timestamp (e.g. ``2026-07-17T07:19:54.816Z``) to
+    epoch seconds. Defensive — returns 0 on any surprise."""
+    if isinstance(value, (int, float)):
+        # Already epoch? Treat ms vs s heuristically.
+        v = float(value)
+        if v > 1e12:  # ms
+            return int(v / 1000)
+        return int(v)
+    if not isinstance(value, str) or not value.strip():
+        return 0
+    s = value.strip()
+    # Strip trailing Z / timezone and fractional seconds for strptime.
+    try:
+        from datetime import datetime, timezone
+        if s.endswith('Z'):
+            s = s[:-1] + '+00:00'
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except (ValueError, TypeError, OverflowError):
+        return 0
+
+
+def _normalize_workdir(path):
+    """Strip trailing slashes for exact workDir match (except root ``/``)."""
+    if not path:
+        return ''
+    p = str(path).replace('\\', '/')
+    if p != '/':
+        p = p.rstrip('/')
+    return p
+
+
+def session_ref_from_kimi_state(session_id, state_dict):
+    """Build a ``SessionRef`` from a Kimi ``state.json`` dict.
+
+    Uses ``title`` (or ``lastPrompt`` fallback) and ``updatedAt`` (or
+    ``createdAt``). Never raises; missing fields degrade gracefully.
+    """
+    if not isinstance(state_dict, dict):
+        state_dict = {}
+    title = state_dict.get('title') or state_dict.get('lastPrompt') or ''
+    last = state_dict.get('updatedAt')
+    if last is None or last == '':
+        last = state_dict.get('createdAt', 0)
+    return SessionRef(
+        id=str(session_id),
+        title=str(title) if title is not None else '',
+        last_active=_kimi_iso_to_epoch(last),
+    )
+
+
+def list_kimi_sessions_from_home(home, project_path, *, cap=_SESSIONS_CAP,
+                                 realpath=None):
+    """Storage-scan Kimi sessions under ``home/.kimi-code`` for ``project_path``.
+
+    Reads ``session_index.jsonl``, keeps entries whose ``workDir`` matches
+    ``project_path`` (trailing-slash-normalized; ``realpath`` when available),
+    loads each matching ``state.json``, sorts newest-first by ``updatedAt``,
+    caps at ``cap``. Never raises — any structural surprise → [].
+    """
+    import json as _json
+    import os as _os
+    if realpath is None:
+        realpath = _os.path.realpath
+    if not home or not project_path:
+        return []
+    index_path = _os.path.join(home, '.kimi-code', 'session_index.jsonl')
+    try:
+        with open(index_path, encoding='utf-8') as f:
+            index_text = f.read()
+    except OSError:
+        return []
+    entries = parse_kimi_session_index_lines(index_text)
+    if not entries:
+        return []
+    try:
+        target = _normalize_workdir(realpath(project_path))
+    except OSError:
+        target = _normalize_workdir(project_path)
+    refs = []
+    for entry in entries:
+        wd = entry.get('workDir') or ''
+        if not wd:
+            continue
+        try:
+            same = _normalize_workdir(realpath(wd)) == target
+        except OSError:
+            same = _normalize_workdir(wd) == target
+        if not same:
+            continue
+        sid = entry['sessionId']
+        sdir = entry.get('sessionDir') or ''
+        state = {}
+        if sdir:
+            state_path = _os.path.join(sdir, 'state.json')
+            try:
+                with open(state_path, encoding='utf-8') as f:
+                    state = _json.load(f)
+            except (OSError, ValueError, TypeError):
+                state = {}
+            if not isinstance(state, dict):
+                state = {}
+        refs.append(session_ref_from_kimi_state(sid, state))
+    refs.sort(key=lambda r: r.last_active, reverse=True)
+    return refs[:cap]
+
+
+class KimiAdapter:
+    """Moonshot AI "Kimi Code" adapter — backend #3, full capabilities.
+
+    Spawn modes:
+      * ``fresh``    — ``kimi``
+      * ``continue`` — ``kimi -c`` under the signal trap, **without** a fresh
+        fallback (``caps.continue_falls_back_to_fresh=False``). PROBED: when
+        nothing is continuable, kimi itself starts a FRESH session inside the
+        same process and exits 0 ("No sessions to continue under …; starting
+        a fresh session."). A PM-level ``kimi -c || kimi`` would therefore be
+        wrong (and unreachable on the success path). Model folds into the
+        continue argv when set, even though there is no outer fallback half.
+      * ``resume``   — ``kimi -S <id>`` (official ``--session``; prefer ``-S``
+        over the hidden ``-r``/``--resume`` alias).
+
+    Model: per-project model string passed as ``-m <value>`` when set — a Kimi
+    config model alias (e.g. ``kimi-code/kimi-for-coding``). NO env injection,
+    NO ccr — kimi reaches providers via its own ``~/.kimi-code/config.toml``.
+
+    Sessions: NO ``kimi sessions list`` CLI. Contract is a storage-scan of
+    ``~/.kimi-code/session_index.jsonl`` + per-session ``state.json``, filtered
+    by exact ``workDir`` match to the project path.
+    """
+    id = 'kimi'
+    display_name = 'Kimi Code'
+    install_hint = (
+        'Install: curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash'
+    )
+    install_command = (
+        'curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash'
+    )
+    caps = HarnessCaps(
+        continue_=True,
+        resume_by_id=True,
+        sessions=True,
+        rich_status=True,
+        model_select=True,
+        headless_json=True,
+        # Probed: kimi -c already falls through to a fresh session itself and
+        # exits 0 when nothing is continuable — PM must NOT wrap with || kimi.
+        continue_falls_back_to_fresh=False,
+    )
+
+    def __init__(self, *, home=None):
+        # ``home`` overrides ``~`` for session storage scan (tests).
+        self._home = home
+
+    # --- binary -----------------------------------------------------------
+
+    def _binary(self, settings):
+        """``harnesses['kimi']['binary']`` if set, else ``kimi``."""
+        cfg = settings.harnesses.get('kimi') if isinstance(settings.harnesses, dict) else None
+        if isinstance(cfg, dict):
+            b = (cfg.get('binary') or '').strip()
+            if b:
+                return b
+        return 'kimi'
+
+    def _model_args(self, settings, project):
+        """``['-m', value]`` for a set per-project model, else ``[]``."""
+        model = settings.effective_model(project.path)
+        if model and self.caps.model_select:
+            return ['-m', model]
+        return []
+
+    # --- spawn contract ---------------------------------------------------
+
+    def fresh_argv(self, settings, project):
+        return [self._binary(settings)] + self._model_args(settings, project)
+
+    def continue_argv(self, settings, project):
+        # Model folds into the continue half even though there is no outer
+        # fresh fallback (opencode/grok review-n3 precedent for the -m fold).
+        return ([self._binary(settings)] + self._model_args(settings, project)
+                + ['-c'])
+
+    def resume_argv(self, settings, project, session_id):
+        return ([self._binary(settings)] + self._model_args(settings, project)
+                + ['-S', session_id])
+
+    def spawn_plan(self, settings, project, mode, session_id=None):
+        """Uniform spawn contract. kimi reaches providers via its own config,
+        so env is always None. Continue uses the no-fallback wrapper (trap +
+        exec continue only) because kimi already handles nothing-to-continue
+        by starting a fresh session itself.
+        """
+        if mode == 'resume':
+            if not session_id:
+                raise ValueError("resume mode requires a session_id")
+            argv = self.resume_argv(settings, project, session_id)
+        elif mode == 'fresh':
+            argv = self.fresh_argv(settings, project)
+        elif mode == 'continue':
+            argv = build_continue_wrapper(
+                self.continue_argv(settings, project),
+                self.fresh_argv(settings, project),
+                fallback=self.caps.continue_falls_back_to_fresh,
+            )
+        else:
+            raise ValueError(f"unknown spawn mode: {mode!r}")
+        return SpawnPlan(argv=argv, env=None, fallback_reason=None)
+
+    # --- zellij path ------------------------------------------------------
+
+    def zellij_continue_command(self, settings, project=None):
+        """Flag-file content: ``kimi -c`` (optionally with ``-m``) alone —
+        NO ``|| kimi`` tail, because continue_falls_back_to_fresh is False.
+        """
+        fallback = self.caps.continue_falls_back_to_fresh
+        if project is None:
+            return build_zellij_continue_command(
+                [self._binary(settings), '-c'], [self._binary(settings)],
+                fallback=fallback)
+        return build_zellij_continue_command(
+            self.continue_argv(settings, project),
+            self.fresh_argv(settings, project),
+            fallback=fallback,
+        )
+
+    def zellij_spawn_env(self, settings, project):
+        """No env override for kimi — providers via its own config.toml."""
+        return (None, None)
+
+    # --- sessions contract ------------------------------------------------
+
+    def list_sessions(self, project, settings=None):
+        """Recent kimi sessions for ``project`` as SessionRefs (cap 7).
+
+        Storage-scan of ``~/.kimi-code/session_index.jsonl`` + ``state.json``;
+        filtered by exact ``workDir`` match. No CLI list command exists.
+        """
+        import os as _os
+        home = self._home if self._home is not None else _os.path.expanduser('~')
+        return list_kimi_sessions_from_home(home, project.path)
+
+
 ADAPTERS = {
     'claude': ClaudeAdapter(),
     'opencode': OpencodeAdapter(),
     'grok': GrokAdapter(),
+    'kimi': KimiAdapter(),
 }
 
 DEFAULT_HARNESS = 'claude'
@@ -1139,6 +1591,15 @@ _BRIDGE_MANIFEST = {
          'dest': '.grok/hooks/projectman-status.py',
          'executable': True, 'transform': None},
     ],
+    # Kimi: status script only in the file manifest. Hooks live as [[hooks]]
+    # tables inside ~/.kimi-code/config.toml (no separate hooks JSON), so
+    # install_harness_bridge / bridge_state call ensure_kimi_hooks_registered
+    # as a post-install step after the file copy.
+    'kimi': [
+        {'src': ('kimi', 'projectman-status.py'),
+         'dest': '.kimi-code/hooks/projectman-status.py',
+         'executable': True, 'transform': None},
+    ],
 }
 
 
@@ -1213,7 +1674,33 @@ def install_harness_bridge(app_dir, harness_id, *, home=None):
                 if not (mode & 0o111):
                     _os.chmod(dest, mode | 0o111)
                     changed = True  # repairing a lost exec bit is a change
-        return 'installed' if changed else 'already'
+        result = 'installed' if changed else 'already'
+        # Kimi post-step: merge [[hooks]] into config.toml (idempotent).
+        if harness_id == 'kimi':
+            try:
+                from bridges.kimi.register_hooks import ensure_kimi_hooks_registered
+                hook_result = ensure_kimi_hooks_registered(home=home)
+            except Exception:
+                # Fall back to a path-based import when running from install.sh
+                # with app_dir on sys.path but bridges not as a package.
+                try:
+                    import importlib.util as _ilu
+                    reg_path = _os.path.join(
+                        app_dir, 'bridges', 'kimi', 'register_hooks.py')
+                    spec = _ilu.spec_from_file_location(
+                        'kimi_register_hooks', reg_path)
+                    mod = _ilu.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    hook_result = mod.ensure_kimi_hooks_registered(home=home)
+                except Exception:
+                    hook_result = 'error'
+            if hook_result == 'error':
+                # Half-install is not success: script may be written but hooks
+                # never registered → status bridge will never fire.
+                return 'error'
+            if hook_result == 'installed':
+                result = 'installed'
+        return result
     except OSError:
         return 'error'
 
@@ -1278,6 +1765,25 @@ def bridge_state(app_dir, harness_id, *, home=None):
             except OSError:
                 all_current = False
     if all_current and any_present:
+        # Kimi also needs [[hooks]] registered in config.toml.
+        if harness_id == 'kimi':
+            try:
+                from bridges.kimi.register_hooks import kimi_hooks_are_registered
+                if not kimi_hooks_are_registered(home=home):
+                    return 'stale'
+            except Exception:
+                try:
+                    import importlib.util as _ilu
+                    reg_path = _os.path.join(
+                        app_dir, 'bridges', 'kimi', 'register_hooks.py')
+                    spec = _ilu.spec_from_file_location(
+                        'kimi_register_hooks', reg_path)
+                    mod = _ilu.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    if not mod.kimi_hooks_are_registered(home=home):
+                        return 'stale'
+                except Exception:
+                    return 'stale'
         return 'current'
     return 'stale'
 
@@ -1322,8 +1828,13 @@ def harness_doctor(settings, harness_id, *, run_fn=None):
         def run_fn(argv):
             import subprocess
             try:
-                r = subprocess.run(argv, capture_output=True, text=True,
-                                   timeout=5, stdin=subprocess.DEVNULL)
+                # Bare harness names (``kimi``, ``grok``) live under installer
+                # bin dirs often missing from a GUI process PATH.
+                r = subprocess.run(
+                    argv, capture_output=True, text=True,
+                    timeout=5, stdin=subprocess.DEVNULL,
+                    env=with_harness_path(),
+                )
                 return (r.returncode, r.stdout)
             except (OSError, subprocess.SubprocessError):
                 return None

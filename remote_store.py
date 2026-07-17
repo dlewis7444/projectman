@@ -214,19 +214,21 @@ done
 def discover_remote_binaries(
     profile: HostProfile, *, timeout: float = 10,
 ) -> dict[str, str]:
-    """Return ``{harness_id: absolute_path}`` for claude/opencode/grok on the host.
+    """Return ``{harness_id: absolute_path}`` for claude/opencode/grok/kimi on the host.
 
     Non-interactive login shells often early-return from ``.bashrc`` before
-    user PATH tweaks (e.g. ``~/.opencode/bin``), so ``command -v`` alone
-    misses binaries that work in an interactive terminal. We also probe
-    well-known install locations.
+    user PATH tweaks (e.g. ``~/.opencode/bin``, ``~/.kimi-code/bin``), so
+    ``command -v`` alone misses binaries that work in an interactive terminal.
+    We also probe well-known install locations.
     """
     script = r'''
-for c in claude opencode grok; do
+for c in claude opencode grok kimi; do
   p=$(command -v "$c" 2>/dev/null || true)
   if [ -z "$p" ]; then
     for cand in \
+      "$HOME/.kimi-code/bin/$c" \
       "$HOME/.opencode/bin/$c" \
+      "$HOME/.grok/bin/$c" \
       "$HOME/.local/bin/$c" \
       "$HOME/.npm-global/bin/$c" \
       "$HOME/bin/$c" \
@@ -250,6 +252,6 @@ done
         line = line.strip()
         if '=' in line:
             k, v = line.split('=', 1)
-            if k in ('claude', 'opencode', 'grok') and v:
+            if k in ('claude', 'opencode', 'grok', 'kimi') and v:
                 found[k] = v
     return found

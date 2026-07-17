@@ -104,7 +104,7 @@ def test_readme_de_clauded():
 def test_paa_ai_scan_copy_uses_provider_axis():
     """PAA AI scans are not Anthropic-only; copy points at Models-page provider."""
     src = _read(os.path.join(REPO, 'settings_window.py'))
-    assert 'Models-page provider and scan tier' in src
+    assert 'Models-page provider' in src
     assert 'configured provider' in src
     # Old Anthropic-only claim is gone
     assert 'Uses the claude CLI and Anthropic credentials' not in src

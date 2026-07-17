@@ -33,6 +33,7 @@ import urllib.request
 NATIVE_LABEL = 'Anthropic (native)'
 GROK_NATIVE_LABEL = 'Grok (native)'
 OPENCODE_NATIVE_LABEL = 'OpenCode (native)'
+KIMI_NATIVE_LABEL = 'Kimi (native)'
 
 # Claude Code treats a trailing ``[1m]`` on a model id as a 1M-token context
 # window (modelMax = 1_000_000) and strips the suffix before the API call.
@@ -48,6 +49,7 @@ FOLLOW_DEFAULT = '__default__'
 # Distinct from real provider ids and from FOLLOW_DEFAULT.
 NATIVE_GROK = '__native_grok__'
 NATIVE_OPENCODE = '__native_opencode__'
+NATIVE_KIMI = '__native_kimi__'
 
 # The label shown for a tier's "use the provider's default model" entry.
 TIER_DEFAULT_LABEL = 'Default'
@@ -100,6 +102,8 @@ def provider_label(providers, pid):
         return GROK_NATIVE_LABEL
     if pid == NATIVE_OPENCODE:
         return OPENCODE_NATIVE_LABEL
+    if pid == NATIVE_KIMI:
+        return KIMI_NATIVE_LABEL
     if not isinstance(providers, dict):
         return pid
     prov = providers.get(pid)
@@ -117,6 +121,7 @@ def build_provider_menu_entries(settings, harness_id):
       * Claude  → Anthropic (native) + every custom Settings provider
       * Grok    → Grok (native) only
       * OpenCode → OpenCode (native) only
+      * Kimi    → Kimi (native) only
 
     Returns ``[(id, label, selectable)]`` — ``selectable`` is always True for
     listed entries. Pure + defensive — never raises on bad settings shapes.
@@ -126,6 +131,8 @@ def build_provider_menu_entries(settings, harness_id):
         return [(NATIVE_GROK, GROK_NATIVE_LABEL, True)]
     if hid == 'opencode':
         return [(NATIVE_OPENCODE, OPENCODE_NATIVE_LABEL, True)]
+    if hid == 'kimi':
+        return [(NATIVE_KIMI, KIMI_NATIVE_LABEL, True)]
     # Claude (or unknown): Anthropic native + customs.
     entries = [('', NATIVE_LABEL, True)]
     providers = getattr(settings, 'providers', None)
@@ -152,6 +159,8 @@ def provider_menu_current(settings, project_path='', harness_id=None):
         return NATIVE_GROK
     if harness_id == 'opencode':
         return NATIVE_OPENCODE
+    if harness_id == 'kimi':
+        return NATIVE_KIMI
     try:
         return settings.effective_provider(project_path) or ''
     except Exception:

@@ -14,7 +14,7 @@ from window import AppWindow
 from settings import Settings
 
 
-VERSION = '1.4.7'
+VERSION = '1.5.0'
 
 # Single source of truth for the real DBus application id. A test or harness
 # overrides it via PM_APP_ID so it can never share identity with the user's
@@ -46,6 +46,14 @@ class ProjectManApp(Adw.Application):
             settings.debug_logging = True
 
     def _on_startup(self, app):
+        # Harness installers (kimi/opencode/grok) put binaries under ~/.*/bin and
+        # only export PATH from interactive .bashrc. A desktop-launched process
+        # never sees those dirs; ensure they are on PATH for doctor + spawns.
+        try:
+            import harnesses as _harnesses
+            _harnesses.ensure_process_harness_path()
+        except Exception:
+            pass
         Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
 
         provider = Gtk.CssProvider()
@@ -94,8 +102,15 @@ class ProjectManApp(Adw.Application):
         # Signal-safe shutdown: SIGTERM (logout/system stop) and SIGHUP
         # (terminal hangup) must save the session and tear down direct children
         # cleanly instead of orphaning setsid process groups.
+        # Prefer GLibUnix.signal_add (GLib.unix_signal_add is deprecated in newer GI).
+        try:
+            gi.require_version('GLibUnix', '2.0')
+            from gi.repository import GLibUnix
+            _signal_add = GLibUnix.signal_add
+        except (ValueError, ImportError):
+            _signal_add = GLib.unix_signal_add
         for sig in (signal.SIGTERM, signal.SIGHUP):
-            GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self._on_unix_signal)
+            _signal_add(GLib.PRIORITY_HIGH, sig, self._on_unix_signal)
 
     def _on_unix_signal(self):
         """SIGTERM/SIGHUP handler: emergency shutdown, then quit. One-shot.
@@ -153,12 +168,20 @@ class ProjectManApp(Adw.Application):
         self._projects_watcher.connect('projects-changed', self._on_projects_changed)
         self.connect('settings-changed', self._on_settings_changed)
         self._window.present()
-        # Kick async remote list; restore on idle so the window is realized
-        # and so a remote spawn fault cannot block first paint. Locals are
-        # restored before remotes inside _restore_session.
-        self._window._refresh_remote_hosts()
+        # After first paint: restore sessions and kick remote list at IDLE
+        # priority so map/drag/input can run before heavy work. Window.__init__
+        # also arms remote refresh on idle — one is enough; start thread here
+        # once the window is shown. Locals restore before remotes inside
+        # _restore_session.
         from gi.repository import GLib
-        GLib.idle_add(self._window._restore_session_idle)
+        GLib.idle_add(
+            self._window._restore_session_idle,
+            priority=GLib.PRIORITY_DEFAULT_IDLE,
+        )
+        GLib.idle_add(
+            self._window._refresh_remote_hosts,
+            priority=GLib.PRIORITY_DEFAULT_IDLE,
+        )
         if self._settings.paa_enabled:
             self._paa_monitor.start()
 
