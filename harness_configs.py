@@ -29,6 +29,7 @@ OPENCODE_CONFIG_PATHS = (
     '~/.config/opencode/opencode.json',
     '~/.config/opencode/config.json',  # older builds named it config.json
 )
+KIMI_CONFIG_PATH = '~/.kimi-code/config.toml'
 
 # Auth / account presence files (B2). These are checked for EXISTENCE + SIZE
 # only — the credential CONTENTS are never read (a token file's mere presence is
@@ -37,11 +38,15 @@ OPENCODE_CONFIG_PATHS = (
 #   * grok:    ~/.grok/auth.json            (README.md: grok's OAuth flow writes
 #              this file on sign-in; "no ~/.grok/auth.json is ever created" when
 #              running offline with a per-model api_key).
+#   * kimi:    ~/.kimi-code/credentials/kimi-code.json and/or
+#              ~/.kimi-code/oauth/kimi-code  (presence-only; contents never read).
 # opencode has NO verifiable auth-file location in this repo's fixtures or docs,
 # so B2 reports opencode's account state from its PARSED config (providers
 # found) instead of inventing an auth path (flagged-not-guessed applies to code).
 CLAUDE_CREDENTIALS_PATH = '~/.claude/.credentials.json'
 GROK_AUTH_PATH = '~/.grok/auth.json'
+KIMI_CREDENTIALS_PATH = '~/.kimi-code/credentials/kimi-code.json'
+KIMI_OAUTH_PATH = '~/.kimi-code/oauth/kimi-code'
 
 
 @dataclass
@@ -319,17 +324,84 @@ def load_opencode_config(*, home=None, path=None):
     return HarnessModelConfig(harness_id='opencode', source_path=primary, exists=False)
 
 
+# ── kimi: ~/.kimi-code/config.toml ────────────────────────────────────────────
+
+def parse_kimi_config(text, *, source_path=''):
+    """Parse Kimi Code's ``config.toml`` into an ``HarnessModelConfig``.
+
+    Reads top-level ``default_model`` and every ``[models."<alias>"]`` block
+    (``display_name`` / ``model`` / linked provider ``base_url`` when present).
+    Defensive: bad TOML → ``exists=True`` with no entries; empty → exists False.
+    NEVER raises.
+    """
+    cfg = HarnessModelConfig(harness_id='kimi', source_path=source_path)
+    if not text or not text.strip():
+        return cfg
+    try:
+        import tomllib
+        data = tomllib.loads(text)
+    except Exception:
+        cfg.exists = True
+        return cfg
+    if not isinstance(data, dict):
+        cfg.exists = True
+        return cfg
+    cfg.exists = True
+    default = data.get('default_model')
+    if isinstance(default, str):
+        cfg.default_key = default
+    # Provider base_urls keyed by provider id for optional join.
+    providers = data.get('providers')
+    base_by_provider = {}
+    if isinstance(providers, dict):
+        for pid, pblock in providers.items():
+            if isinstance(pblock, dict):
+                bu = pblock.get('base_url') or ''
+                if isinstance(bu, str):
+                    base_by_provider[str(pid)] = bu
+    models_tbl = data.get('models')
+    if isinstance(models_tbl, dict):
+        for key in sorted(models_tbl):
+            block = models_tbl.get(key)
+            if not isinstance(block, dict):
+                continue
+            prov = block.get('provider') or ''
+            base_url = ''
+            if isinstance(prov, str) and prov in base_by_provider:
+                base_url = base_by_provider[prov]
+            cfg.models.append(ModelEntry(
+                key=str(key),
+                name=str(block.get('display_name') or block.get('name') or ''),
+                model=str(block.get('model') or ''),
+                base_url=base_url,
+            ))
+    return cfg
+
+
+def load_kimi_config(*, home=None, path=None):
+    """Load + parse kimi's config from disk (defensive). Never raises."""
+    src = path or _expand(KIMI_CONFIG_PATH, home)
+    try:
+        with open(src, 'r', encoding='utf-8') as f:
+            text = f.read()
+    except OSError:
+        return HarnessModelConfig(harness_id='kimi', source_path=src, exists=False)
+    return parse_kimi_config(text, source_path=src)
+
+
 def load_harness_config(harness_id, *, home=None):
     """Dispatch to the right native-config loader for ``harness_id``.
 
-    Returns an ``HarnessModelConfig`` for grok/opencode, or None for agents with
-    no native model-config surface (claude routes models via the Models page (provider axis), which has
-    its own Models-page surface; an unknown id → None). Never raises.
+    Returns an ``HarnessModelConfig`` for grok/opencode/kimi, or None for agents
+    with no native model-config surface (claude routes models via the Models
+    page; an unknown id → None). Never raises.
     """
     if harness_id == 'grok':
         return load_grok_config(home=home)
     if harness_id == 'opencode':
         return load_opencode_config(home=home)
+    if harness_id == 'kimi':
+        return load_kimi_config(home=home)
     return None
 
 
@@ -639,11 +711,27 @@ def _opencode_provider_count(cfg):
     return len(providers)
 
 
+def kimi_account_line(*, home=None, credentials_path=None, oauth_path=None):
+    """The Agents-page account status line for kimi (B2). Presence-based.
+
+    Checks existence + size of ``~/.kimi-code/credentials/kimi-code.json``
+    and/or ``~/.kimi-code/oauth/kimi-code`` — never opens credential contents.
+
+      * either path present and non-empty → "Signed in (credentials present)";
+      * else → "Not signed in — run `kimi login`".
+    """
+    cred = credentials_path or _expand(KIMI_CREDENTIALS_PATH, home)
+    oauth = oauth_path or _expand(KIMI_OAUTH_PATH, home)
+    if _nonempty_file(cred) or _nonempty_file(oauth):
+        return 'Signed in (credentials present)'
+    return 'Not signed in — run `kimi login`'
+
+
 def account_status_line(harness_id, *, home=None):
     """Dispatch to the right B2 account-status line for ``harness_id``.
 
-    Returns the presence-based status string for claude/grok/opencode, or None
-    for agents with no account surface (an unknown id → None). Never raises.
+    Returns the presence-based status string for claude/grok/opencode/kimi, or
+    None for agents with no account surface (an unknown id → None). Never raises.
     """
     if harness_id == 'claude':
         return claude_account_line(home=home)
@@ -651,6 +739,8 @@ def account_status_line(harness_id, *, home=None):
         return grok_account_line(home=home)
     if harness_id == 'opencode':
         return opencode_account_line(home=home)
+    if harness_id == 'kimi':
+        return kimi_account_line(home=home)
     return None
 
 

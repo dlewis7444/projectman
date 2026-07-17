@@ -6,15 +6,20 @@ import pytest
 
 from ssh_transport import (
     HealthState,
+    REMOTE_GROUPS_MAX_BYTES,
+    REMOTE_GROUPS_REL,
     build_ensure_projects_dir_argv,
+    build_fetch_project_groups_argv,
     build_list_projects_argv,
     build_mkdir_project_argv,
+    build_push_project_groups_argv,
     build_remote_shell_command,
     build_rename_project_argv,
     build_rmdir_project_argv,
     build_ssh_base_argv,
     build_ssh_spawn_argv,
     classify_health,
+    parse_fetch_groups_stdout,
     parse_ls_project_names,
     run_ssh,
 )
@@ -193,6 +198,49 @@ def test_rmdir_rejects_unsafe():
             build_rmdir_project_argv('box', '/p', bad)
 
 
+# ── project groups fetch/push argv ────────────────────────────────────────────
+
+def test_fetch_project_groups_argv():
+    argv = build_fetch_project_groups_argv('box')
+    assert argv[-2] == 'box'
+    script = _remote_script_body(argv)
+    assert REMOTE_GROUPS_REL in script or 'project_groups.json' in script
+    # Missing early exit 0; no trailing unconditional exit 0 after read.
+    assert 'if [ ! -f "$f" ]; then exit 0; fi' in script
+    assert f'head -c {REMOTE_GROUPS_MAX_BYTES + 1}' in script
+    assert not script.rstrip().endswith('exit 0')
+    assert 'BatchMode=yes' in argv
+
+
+def test_push_project_groups_argv_no_raw_json():
+    payload = '{"version":1,"groups":[]}'
+    argv = build_push_project_groups_argv('box', payload)
+    script = _remote_script_body(argv)
+    assert 'base64 -d' in script
+    assert 'mktemp' in script
+    assert 'mv -f' in script
+    assert '"version":1' not in script
+
+
+def test_push_project_groups_argv_too_large():
+    with pytest.raises(ValueError, match='too large'):
+        build_push_project_groups_argv('box', 'y' * (REMOTE_GROUPS_MAX_BYTES + 1))
+
+
+def test_parse_fetch_groups_stdout_matrix():
+    assert parse_fetch_groups_stdout('') == (None, None)
+    d, e = parse_fetch_groups_stdout('{"a":1}')
+    assert e is None and d == {'a': 1}
+    d, e = parse_fetch_groups_stdout('[1]')
+    assert d is None and e == 'invalid top-level type'
+    d, e = parse_fetch_groups_stdout('{', max_bytes=REMOTE_GROUPS_MAX_BYTES)
+    assert d is None and e is not None and e.startswith('invalid json')
+    d, e = parse_fetch_groups_stdout('x' * 100, max_bytes=10)
+    assert d is None and e == 'too large'
+    d, e = parse_fetch_groups_stdout('x' * (REMOTE_GROUPS_MAX_BYTES + 1))
+    assert d is None and e == 'too large'
+
+
 # ── parse_ls_project_names ────────────────────────────────────────────────────
 
 def test_parse_ls_skips_dots_and_empty():
@@ -285,6 +333,10 @@ def test_remote_scripts_are_valid_bash_syntax():
         _remote_script_body(build_mkdir_project_argv('t', '~/p', 'proj1')),
         _remote_script_body(build_rename_project_argv('t', '~/p', 'a', 'b')),
         _remote_script_body(build_rmdir_project_argv('t', '~/p', 'a')),
+        _remote_script_body(build_fetch_project_groups_argv('t')),
+        _remote_script_body(
+            build_push_project_groups_argv('t', '{"version":1,"groups":[]}')
+        ),
         build_remote_shell_command(
             '/tmp/x', ['echo', 'hi there'], env={'E': "val'ue"},
         ),

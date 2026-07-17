@@ -272,3 +272,180 @@ def test_save_hardens_permissions(tmp_path):
     path = str(tmp_path / 'settings.json')
     Settings(providers=_sample_providers()).save(path)
     assert (os.stat(path).st_mode & 0o777) == 0o600
+
+
+# ── VTE key captures (per-harness CSI-u feeds) ───────────────────────────────
+
+from settings import (
+    DEFAULT_VTE_KEY_CAPTURES,
+    match_vte_key_capture,
+    normalize_vte_key_captures,
+)
+
+
+def test_vte_key_captures_defaults_cover_all_harnesses():
+    s = Settings()
+    for hid in ('claude', 'opencode', 'grok', 'kimi'):
+        assert hid in s.vte_key_captures
+        assert isinstance(s.vte_key_captures[hid], list)
+        assert s.vte_key_captures[hid], f'{hid} should have at least Shift+Enter'
+
+
+def test_vte_key_captures_shift_enter_on_all_four():
+    s = Settings()
+    for hid in ('claude', 'opencode', 'grok', 'kimi'):
+        feed = match_vte_key_capture(
+            s.vte_captures_for(hid),
+            keyval=65293,  # Return
+            state=1,       # SHIFT
+        )
+        assert feed == b'\x1b[13;2u', hid
+
+
+def test_vte_key_captures_kp_enter_also_shift():
+    s = Settings()
+    feed = match_vte_key_capture(
+        s.vte_captures_for('claude'),
+        keyval=65421,  # KP_Enter
+        state=1,
+    )
+    assert feed == b'\x1b[13;2u'
+
+
+def test_vte_key_captures_grok_ctrl_semicolon_and_apostrophe():
+    s = Settings()
+    grok = s.vte_captures_for('grok')
+    assert match_vte_key_capture(grok, keyval=59, state=4) == b'\x1b[59;5u'
+    assert match_vte_key_capture(grok, keyval=39, state=4) == b'\x1b[39;5u'
+    # Claude / OpenCode must NOT swallow Ctrl+; (only Grok needs the queue chord)
+    assert match_vte_key_capture(s.vte_captures_for('claude'), 59, 4) is None
+    assert match_vte_key_capture(s.vte_captures_for('opencode'), 59, 4) is None
+
+
+def test_vte_key_captures_plain_keys_do_not_match():
+    s = Settings()
+    # Bare Return (no Shift) must fall through to VTE
+    assert match_vte_key_capture(s.vte_captures_for('claude'), 65293, 0) is None
+    # Bare semicolon (no Ctrl) must fall through
+    assert match_vte_key_capture(s.vte_captures_for('grok'), 59, 0) is None
+
+
+def test_vte_key_captures_roundtrip(tmp_path):
+    path = str(tmp_path / 'settings.json')
+    s = Settings()
+    s.save(path)
+    s2 = Settings.load(path)
+    assert s2.vte_key_captures['grok'] == s.vte_key_captures['grok']
+    assert match_vte_key_capture(s2.vte_captures_for('grok'), 59, 4) == b'\x1b[59;5u'
+
+
+def test_vte_key_captures_absent_from_file_gets_defaults(tmp_path):
+    """Existing settings.json without the key still gets built-in defaults."""
+    path = tmp_path / 'settings.json'
+    path.write_text(json.dumps({'font_size': 12}))
+    s = Settings.load(str(path))
+    assert s.font_size == 12
+    assert 'grok' in s.vte_key_captures
+    assert match_vte_key_capture(s.vte_captures_for('grok'), 59, 4) == b'\x1b[59;5u'
+
+
+def test_vte_key_captures_explicit_empty_disables(tmp_path):
+    """An explicit empty map means no captures (user turned them off)."""
+    path = tmp_path / 'settings.json'
+    path.write_text(json.dumps({'vte_key_captures': {}}))
+    s = Settings.load(str(path))
+    assert s.vte_key_captures == {}
+    assert s.vte_captures_for('grok') == []
+    assert match_vte_key_capture(s.vte_captures_for('grok'), 59, 4) is None
+
+
+def test_vte_key_captures_partial_map_fills_missing_kimi(tmp_path):
+    """Upgrade path: settings with only pre-kimi harness keys get kimi default.
+
+    Explicit empty list for a present harness is preserved; only *missing*
+    keys are filled from DEFAULT_VTE_KEY_CAPTURES.
+    """
+    path = tmp_path / 'settings.json'
+    path.write_text(json.dumps({
+        'vte_key_captures': {
+            'claude': [
+                {'key': 'Return', 'mods': ['shift'], 'feed': '\x1b[13;2u'},
+            ],
+            'opencode': [
+                {'key': 'Return', 'mods': ['shift'], 'feed': '\x1b[13;2u'},
+            ],
+            'grok': [
+                {'key': 'Return', 'mods': ['shift'], 'feed': '\x1b[13;2u'},
+            ],
+            # kimi intentionally absent — simulate pre-kimi settings.json
+        },
+    }))
+    s = Settings.load(str(path))
+    assert 'kimi' in s.vte_key_captures
+    assert s.vte_key_captures['kimi'] == DEFAULT_VTE_KEY_CAPTURES['kimi']
+    assert match_vte_key_capture(
+        s.vte_captures_for('kimi'), keyval=65293, state=1,
+    ) == b'\x1b[13;2u'
+    # Present keys untouched (including if they were customized).
+    assert len(s.vte_key_captures['grok']) == 1
+
+
+def test_vte_key_captures_explicit_empty_harness_not_overwritten(tmp_path):
+    """Explicit empty list for a harness means user disabled that harness."""
+    path = tmp_path / 'settings.json'
+    path.write_text(json.dumps({
+        'vte_key_captures': {
+            'claude': [],
+            'opencode': [
+                {'key': 'Return', 'mods': ['shift'], 'feed': '\x1b[13;2u'},
+            ],
+        },
+    }))
+    s = Settings.load(str(path))
+    assert s.vte_key_captures['claude'] == []
+    assert s.vte_captures_for('claude') == []
+    # Missing keys still filled.
+    assert 'kimi' in s.vte_key_captures
+    assert s.vte_key_captures['kimi']
+
+
+def test_vte_key_captures_custom_entry(tmp_path):
+    path = tmp_path / 'settings.json'
+    path.write_text(json.dumps({
+        'vte_key_captures': {
+            'grok': [
+                {'key': 'period', 'mods': ['control'], 'feed': '\x1b[46;5u'},
+            ],
+        },
+    }))
+    s = Settings.load(str(path))
+    assert match_vte_key_capture(s.vte_captures_for('grok'), 46, 4) == b'\x1b[46;5u'
+    # Custom list replaces defaults for that harness — Shift+Enter gone unless listed
+    assert match_vte_key_capture(s.vte_captures_for('grok'), 65293, 1) is None
+
+
+def test_normalize_vte_key_captures_drops_garbage():
+    raw = {
+        'grok': [
+            {'key': 'semicolon', 'mods': ['control'], 'feed': '\x1b[59;5u'},
+            {'key': '', 'mods': ['control'], 'feed': 'x'},       # empty key
+            {'key': 'Return', 'mods': 'shift', 'feed': 'x'},     # mods not list
+            'not-a-dict',
+            {'key': 'Return', 'mods': ['shift']},                # missing feed
+        ],
+        12: [{'key': 'Return', 'mods': ['shift'], 'feed': 'x'}],  # non-str harness
+        'claude': 'not-a-list',
+    }
+    out = normalize_vte_key_captures(raw)
+    assert list(out.keys()) == ['grok']
+    assert len(out['grok']) == 1
+    assert out['grok'][0]['key'] == 'semicolon'
+
+
+def test_default_vte_key_captures_constant_matches_report():
+    """Pin the report's CSI-u sequences so a typo can't silently ship."""
+    grok = { (e['key'], tuple(e['mods'])): e['feed']
+             for e in DEFAULT_VTE_KEY_CAPTURES['grok'] }
+    assert grok[('Return', ('shift',))] == '\x1b[13;2u'
+    assert grok[('semicolon', ('control',))] == '\x1b[59;5u'
+    assert grok[('apostrophe', ('control',))] == '\x1b[39;5u'

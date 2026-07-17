@@ -382,6 +382,19 @@ def test_g3c_create_failure_skips_activation_and_toast():
     assert not any(c[0] == 'refresh' for c in calls)
 
 
+def test_g3d_duplicate_name_toasts_error_not_success():
+    """Duplicate create must toast the error — never the "New project" success."""
+    fake, calls = _create_fake(create_raises=FileExistsError('/tmp/projects/dup'))
+    AppWindow._on_project_create(fake, fake._sidebar, 'localhost', 'dup')
+    assert ('create', 'dup') in calls
+    assert not any(c[0] == 'activate' for c in calls)
+    assert not any(c[0] == 'refresh' for c in calls)
+    toasts = [c for c in calls if c[0] == 'toast']
+    assert len(toasts) == 1
+    assert 'already exists' in toasts[0][1]
+    assert not toasts[0][1].startswith('toast::')
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # P3.5d Item 3 (P0-era dead-knob): --debug only OVERRIDES when PRESENT. The old
 # unconditional `settings.debug_logging = self._debug_flag` forced False on every

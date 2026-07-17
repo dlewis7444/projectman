@@ -230,10 +230,28 @@ def hosts_to_settings_dict(hosts: dict[str, HostProfile]) -> dict:
     return {hid: p.to_dict() for hid, p in hosts.items() if hid != LOCALHOST_ID}
 
 
-_SAFE_NAME_RE = re.compile(r'^[^/\0]+$')
+# Single path segment only; block shell/path metacharacters that have caused
+# release gate findings when names are later interpolated (e.g. ``$(whoami)``).
+_SAFE_NAME_RE = re.compile(r'^[^/\0\\`$;&|<>"\'\n\r\t]+$')
 
 
 def is_safe_project_name(name: str) -> bool:
-    """True if name is usable as a single path segment (no slash/null)."""
+    """True if name is usable as a single path segment (no slash/null/shell meta)."""
     return bool(name and isinstance(name, str) and _SAFE_NAME_RE.match(name)
                 and name not in ('.', '..') and not name.startswith('.'))
+
+
+def project_name_reject_reason(name: str) -> str | None:
+    """User-facing reason a project name is rejected, or None if OK."""
+    if not isinstance(name, str) or not name.strip():
+        return 'Name required'
+    name = name.strip()
+    if name.startswith('.') or name in ('.', '..'):
+        return 'Name cannot start with .'
+    if '/' in name or '\\' in name:
+        return 'Name cannot contain /'
+    if any(c in name for c in '`$;&|<>"\'\n\r\t\0'):
+        return 'Name has invalid characters'
+    if not is_safe_project_name(name):
+        return 'Invalid name'
+    return None

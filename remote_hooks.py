@@ -3,9 +3,12 @@
 Idempotent and no-mess-up oriented:
   * Writes only PM-owned files under ``~/.claude/projectman/``,
     ``~/.ProjectMan/status/``, ``~/.config/opencode/plugins/``,
-    ``~/.grok/hooks/``.
+    ``~/.grok/hooks/``, ``~/.kimi-code/hooks/``.
   * Registers Claude hooks only when the command is not already present
     (same fingerprint as install.sh: ``projectman/hook.js``).
+  * Registers Kimi ``[[hooks]]`` via the same pure merge as local
+    (``bridges/kimi/register_hooks.merge_kimi_hooks``), shipped and
+    invoked on the remote — not reimplemented in shell.
   * Does not rewrite unrelated settings keys.
 
 Pure network I/O via ``ssh_transport.run_ssh``; no GTK.
@@ -30,6 +33,12 @@ _CLAUDE_HOOK_EVENTS = (
 )
 
 _HOOK_CMD = 'node ~/.claude/projectman/hook.js'
+
+# Manifest key for the Kimi register_hooks helper (not a permanent install
+# target the harness reads — remote python loads it via importlib then the
+# helper stays under hooks/ next to the status script for re-runs).
+_KIMI_REGISTER_REL = '.kimi-code/hooks/register_hooks.py'
+_KIMI_STATUS_REL = '.kimi-code/hooks/projectman-status.py'
 
 
 def _app_dir() -> str:
@@ -75,14 +84,26 @@ def _collect_bridge_files(app_dir: str | None = None) -> dict[str, tuple[bytes, 
         # Leave ~ form; remote python rewrites using actual HOME.
         files['.grok/hooks/projectman.json'] = (gj, False)
 
+    kstat = _read_bytes(os.path.join(root, 'bridges', 'kimi', 'projectman-status.py'))
+    if kstat is not None:
+        files[_KIMI_STATUS_REL] = (kstat, True)
+
+    # Ship the pure merge helper so remote install reuses the same logic as
+    # local (ensure_kimi_hooks_registered / merge_kimi_hooks) — no shell TOML.
+    kreg = _read_bytes(os.path.join(root, 'bridges', 'kimi', 'register_hooks.py'))
+    if kreg is not None:
+        files[_KIMI_REGISTER_REL] = (kreg, False)
+
     return files
 
 
 def _remote_install_python(payload_b64: str) -> str:
-    """Python script run on the remote to write files + register Claude hooks."""
+    """Python script run on the remote to write files + register hooks."""
     # payload: base64(json({relpath: {b64, exec: bool}}))
+    # argv[1] = payload. Kimi config.toml merge is done by loading the shipped
+    # register_hooks.py via importlib (same pure merge as local install).
     return r'''
-import base64, json, os, stat, sys
+import base64, importlib.util, json, os, stat, sys
 from pathlib import Path
 
 raw = base64.b64decode(sys.argv[1])
@@ -210,6 +231,27 @@ if toml_changed:
     cfg.write_text("\n".join(out) + ("\n" if out else ""))
     written.append(".grok/config.toml")
 
+# Kimi: merge [[hooks]] into ~/.kimi-code/config.toml via the shipped pure
+# register_hooks module (same ensure_kimi_hooks_registered as local install).
+kimi_reg = home / ".kimi-code" / "hooks" / "register_hooks.py"
+kimi_status = home / ".kimi-code" / "hooks" / "projectman-status.py"
+if kimi_reg.is_file() and kimi_status.is_file():
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "kimi_register_hooks_remote", str(kimi_reg)
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        kresult = mod.ensure_kimi_hooks_registered(home=str(home))
+        if kresult == "installed":
+            written.append(".kimi-code/config.toml")
+        elif kresult == "error":
+            print("ERR kimi hooks: error")
+            sys.exit(1)
+    except Exception as e:
+        print("ERR kimi hooks: " + str(e))
+        sys.exit(1)
+
 print("OK " + (",".join(written) if written else "already"))
 '''
 
@@ -220,7 +262,7 @@ def install_remote_status_bridges(
     app_dir: str | None = None,
     timeout: float = 45,
 ) -> tuple[bool, str]:
-    """Install Claude/OpenCode/Grok status bridges on *profile* via SSH.
+    """Install Claude/OpenCode/Grok/Kimi status bridges on *profile* via SSH.
 
     Returns ``(ok, message)``.
     """

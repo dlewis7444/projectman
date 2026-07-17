@@ -101,6 +101,19 @@ label.project-row-pending-deactivate { font-style: italic; }
 /* ── Session expand arrow button — compact, label-based ──────────── */
 .expand-arrow { padding: 0 1px; min-width: 0; }
 
+/* ── Virtual project groups (sidebar nesting) ────────────────────── */
+.pm-group-row .pm-group-name {
+    font-weight: 600;
+    opacity: 0.88;
+}
+.pm-group-row .pm-group-count {
+    margin-left: 4px;
+    opacity: 0.5;
+}
+.pm-sidebar list.pm-group-children row {
+    margin-left: 10px;
+}
+
 /* ── Terminal right-click context menu ───────────────────────────── */
 .term-context-menu { padding: 4px; }
 .term-context-menu button.flat { padding: 4px 10px; min-height: 0; }

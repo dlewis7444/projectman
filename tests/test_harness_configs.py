@@ -20,6 +20,7 @@ from settings import Settings
 FIXDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')
 GROK_FIX = os.path.join(FIXDIR, 'grok', 'config.toml')
 OPENCODE_FIX = os.path.join(FIXDIR, 'opencode', 'opencode.json')
+KIMI_FIX = os.path.join(FIXDIR, 'kimi', 'config.toml')
 
 
 # ── grok parser ───────────────────────────────────────────────────────────────
@@ -127,6 +128,71 @@ def test_load_harness_config_dispatch():
     assert ac.load_harness_config('unknown-xyz') is None
     g = ac.load_harness_config('grok', home='/definitely/nowhere')
     assert g is not None and g.harness_id == 'grok'
+    k = ac.load_harness_config('kimi', home='/definitely/nowhere')
+    assert k is not None and k.harness_id == 'kimi'
+
+
+# ── kimi parser ───────────────────────────────────────────────────────────────
+
+def test_parse_kimi_config_default_and_models():
+    with open(KIMI_FIX) as f:
+        cfg = ac.parse_kimi_config(f.read(), source_path=KIMI_FIX)
+    assert cfg.harness_id == 'kimi'
+    assert cfg.exists is True
+    assert cfg.default_key == 'kimi-code/kimi-for-coding'
+    keys = {m.key for m in cfg.models}
+    assert {
+        'kimi-code/kimi-for-coding',
+        'kimi-code/kimi-for-coding-highspeed',
+        'kimi-code/k3',
+    } == keys
+    entry = cfg.default_entry()
+    assert entry is not None
+    assert entry.name == 'K2.7 Coding'
+    assert entry.model == 'kimi-for-coding'
+    assert entry.base_url == 'https://api.kimi.com/coding/v1'
+
+
+def test_parse_kimi_config_garbage_does_not_raise():
+    cfg = ac.parse_kimi_config('not = valid ][ toml', source_path='/x')
+    assert cfg.exists is True
+    assert cfg.models == []
+
+
+def test_parse_kimi_config_empty_is_absent():
+    cfg = ac.parse_kimi_config('', source_path='/x')
+    assert cfg.exists is False
+
+
+def test_load_kimi_config_from_home(tmp_path):
+    home = tmp_path
+    (home / '.kimi-code').mkdir()
+    with open(KIMI_FIX) as f:
+        (home / '.kimi-code' / 'config.toml').write_text(f.read())
+    cfg = ac.load_kimi_config(home=str(home))
+    assert cfg.exists is True
+    assert cfg.default_key == 'kimi-code/kimi-for-coding'
+
+
+def test_native_model_options_kimi_lists_aliases(tmp_path):
+    home = str(tmp_path)
+    (tmp_path / '.kimi-code').mkdir()
+    with open(KIMI_FIX) as f:
+        (tmp_path / '.kimi-code' / 'config.toml').write_text(f.read())
+    ids, labels = ac.native_model_options('kimi', home=home)
+    assert 'kimi-code/kimi-for-coding' in ids
+    assert any('default' in lab for lab in labels)
+
+
+def test_kimi_account_signed_in_when_credentials_present(tmp_path):
+    cred = tmp_path / '.kimi-code' / 'credentials'
+    cred.mkdir(parents=True)
+    (cred / 'kimi-code.json').write_text('{"access_token":"x"}')
+    assert ac.kimi_account_line(home=str(tmp_path)) == 'Signed in (credentials present)'
+
+
+def test_kimi_account_not_signed_in(tmp_path):
+    assert ac.kimi_account_line(home=str(tmp_path)).startswith('Not signed in')
 
 
 # ── M-UX.1: truthful default-model label ──────────────────────────────────────
@@ -368,6 +434,7 @@ def test_account_status_dispatch(tmp_path):
     assert ac.account_status_line('claude', home=str(tmp_path)).startswith('Not signed in')
     assert ac.account_status_line('grok', home=str(tmp_path)).startswith('Not signed in')
     assert ac.account_status_line('opencode', home=str(tmp_path)) == 'No providers found'
+    assert ac.account_status_line('kimi', home=str(tmp_path)).startswith('Not signed in')
     assert ac.account_status_line('unknown-xyz', home=str(tmp_path)) is None
 
 
