@@ -184,6 +184,22 @@ def test_provider_menu_current_grok_is_native_sentinel():
     assert provider_menu_current(s, '/p', 'grok') == NATIVE_GROK
 
 
+def test_build_provider_menu_entries_kimi_only_native():
+    from models import build_provider_menu_entries, NATIVE_KIMI
+    from settings import Settings
+    s = Settings(providers={'ollama': {'name': 'Ollama', 'base_url': 'x', 'models': []}})
+    entries = build_provider_menu_entries(s, 'kimi')
+    assert len(entries) == 1
+    assert entries[0][0] == NATIVE_KIMI
+
+
+def test_provider_menu_current_kimi_is_native_sentinel():
+    from models import provider_menu_current, NATIVE_KIMI
+    from settings import Settings
+    s = Settings(harness_default='kimi', model_default='ollama')
+    assert provider_menu_current(s, '/p', 'kimi') == NATIVE_KIMI
+
+
 def test_default_model_label_claude_uses_settings_provider():
     import harness_configs as ac
     from settings import Settings

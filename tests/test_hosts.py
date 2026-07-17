@@ -161,10 +161,19 @@ def test_new_host_id_unique():
 
 
 def test_is_safe_project_name():
+    from hosts import project_name_reject_reason
     assert is_safe_project_name('foo')
+    assert is_safe_project_name('my-project')
     assert not is_safe_project_name('a/b')
     assert not is_safe_project_name('.hidden')
     assert not is_safe_project_name('')
+    assert not is_safe_project_name('$(whoami)')
+    assert not is_safe_project_name('x;y')
+    assert not is_safe_project_name('a`b')
+    assert project_name_reject_reason('') == 'Name required'
+    assert project_name_reject_reason('a/b') == 'Name cannot contain /'
+    assert 'invalid' in (project_name_reject_reason('$(x)') or '').lower()
+    assert project_name_reject_reason('good-name') is None
 
 
 # ── Settings migration ────────────────────────────────────────────────────────

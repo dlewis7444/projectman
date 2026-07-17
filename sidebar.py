@@ -3,11 +3,83 @@ from datetime import datetime
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Gio, GLib, GObject, Gdk, Pango
+from gi.repository import Gtk, Gio, GLib, GObject, Gdk, Pango, Adw
 
 import harnesses
 from model import ResourceReader
 from models import FOLLOW_DEFAULT, NATIVE_LABEL
+
+
+# Shared tooltips / accessible labels for create chrome (personas: empty Gio.Menu
+# a11y names + unexplained Project vs Group). Prefer labeled Gtk.Buttons in a
+# Popover over Gio.Menu so AT-SPI exposes real names.
+_TIP_NEW_PROJECT = (
+    'Create a project folder and open a coding session with your default '
+    'harness (a coding-agent CLI such as Claude Code, OpenCode, Grok, or '
+    'Kimi Code — set under Settings → Harnesses).'
+)
+_TIP_NEW_GROUP = (
+    'Create a named group to organize projects in the sidebar. '
+    'Does not start a session.'
+)
+_TIP_NEW_SUBGROUP = (
+    'Create a nested subgroup under this group to further organize projects.'
+)
+_TIP_ADD_HOST = (
+    'New Project or Group — Project: folder + coding session with your '
+    'default harness (coding agent). Group: organizational folder only '
+    '(no session).'
+)
+_TIP_CLOSE_SESSION = (
+    'Close session — stops the running agent terminal for this project. '
+    'Open it again to continue the session.'
+)
+_TIP_UNDO_CLOSE_SESSION = (
+    'Keep session open — cancel the pending close (session stays running).'
+)
+
+
+def _build_labeled_action_popover(items):
+    """Popover with labeled buttons (accessible names) instead of Gio.Menu.
+
+    Gio.Menu items via MenuButton often expose empty AT-SPI labels on GTK4;
+    release gate personas and screen readers then cannot tell items apart.
+
+    *items*: sequence of ``(label, tooltip, callback)``.
+    """
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+    box.set_margin_top(4)
+    box.set_margin_bottom(4)
+    box.set_margin_start(4)
+    box.set_margin_end(4)
+    popover = Gtk.Popover()
+    popover.set_child(box)
+    for label, tooltip, callback in items:
+        btn = Gtk.Button(label=label)
+        btn.set_halign(Gtk.Align.FILL)
+        btn.add_css_class('flat')
+        btn.add_css_class('pm-add-menu-item')
+        if tooltip:
+            btn.set_tooltip_text(tooltip)
+        def _clicked(_b, cb=callback, pop=popover):
+            pop.popdown()
+            cb()
+        btn.connect('clicked', _clicked)
+        box.append(btn)
+    return popover
+
+
+def _entry_flash_invalid(entry, message='Name required'):
+    """Inline feedback when commit is refused (empty/invalid name)."""
+    entry.add_css_class('error')
+    entry.set_placeholder_text(message)
+    entry.grab_focus()
+
+    def _clear():
+        entry.remove_css_class('error')
+        return False
+
+    GLib.timeout_add(2500, _clear)
 
 
 class Sidebar(Gtk.Box):
@@ -24,12 +96,24 @@ class Sidebar(Gtk.Box):
         'show-settings':        (GObject.SignalFlags.RUN_FIRST, None, ()),
         # host_id, project name
         'project-create':       (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
+        # host_id, group_id, project name (create then set membership)
+        'project-create-in-group': (GObject.SignalFlags.RUN_FIRST, None, (str, str, str)),
         'show-paa-window':      (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-ai-scan':      (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         'project-harness-change': (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         # host_id, expanded
         'host-section-toggled': (GObject.SignalFlags.RUN_FIRST, None, (str, bool)),
+        # host_id, group_id, expanded
+        'group-expanded':       (GObject.SignalFlags.RUN_FIRST, None, (str, str, bool)),
+        # host_id, parent_group_id ('' = root), name
+        'group-create':         (GObject.SignalFlags.RUN_FIRST, None, (str, str, str)),
+        # host_id, group_id, new_name
+        'group-rename':         (GObject.SignalFlags.RUN_FIRST, None, (str, str, str)),
+        # host_id, group_id
+        'group-delete':         (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
+        # host_id, project_path, group_id ('' = ungroup)
+        'project-move-to-group': (GObject.SignalFlags.RUN_FIRST, None, (str, str, str)),
     }
 
     def __init__(self, store, history, watcher, version='', settings=None):
@@ -47,8 +131,14 @@ class Sidebar(Gtk.Box):
         self._sections = {}         # host_id → HostSection
         self._section_headers = {}  # host_id → HostSectionHeader (in-flow)
         self._row_host = {}         # path → host_id
+        # Virtual project groups (Slice C): host_id → GroupForest (by reference).
+        # Mutations such as expand update the same object the window holds.
+        self._forests = {}
+        self._group_rows = {}       # (host_id, group_id) → GroupRow
         self._new_project_row = None
         self._new_project_host_id = 'localhost'
+        self._new_project_group_id = ''  # '' = host root (ungrouped)
+        self._new_group_entry_row = None  # inline NameEntryRow for subgroup
         self._filter_text = ''
         self._sticky_host_id = None
         # Per-project model menu state, pushed in via set_model_options().
@@ -68,6 +158,23 @@ class Sidebar(Gtk.Box):
         self._pending_deactivates = set()
         self._pending_deactivate_timers = {}  # path → GLib timeout id
         self.PENDING_DEACTIVATE_MS = 5000
+
+        # Local groups: one load here so the first _populate() already has the
+        # forest. Window adopts status via localhost_groups_load_status() —
+        # do not load_forest + refresh again (that double-built 50+ rows).
+        from hosts import LOCALHOST_ID
+        from project_groups import load_forest
+        _lg = load_forest()
+        self._forests[LOCALHOST_ID] = _lg.forest
+        self._localhost_groups_status = _lg.status  # ok|missing|invalid|error
+        self._localhost_groups_error = _lg.error
+
+        # CAPTURE Escape so cancel works even when the filter entry (or another
+        # sidebar control) has focus — not only when the create row is focused.
+        _esc = Gtk.EventControllerKey.new()
+        _esc.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        _esc.connect('key-pressed', self._on_sidebar_capture_key)
+        self.add_controller(_esc)
 
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         btn_row.set_halign(Gtk.Align.END)
@@ -119,6 +226,7 @@ class Sidebar(Gtk.Box):
             show_health=False,
             on_toggle=self._on_section_toggle,
             on_add_project=self._on_section_add_project,
+            on_new_group=self._on_section_new_group,
         )
         self._sticky_header.add_css_class('pm-sticky-host')
         self._sticky_header.set_halign(Gtk.Align.FILL)
@@ -164,20 +272,37 @@ class Sidebar(Gtk.Box):
         self._populate()
 
     def _filter_func_for(self, host_id):
-        """Per-host ListBox filter: section mode + name filter."""
+        """Per-host ListBox filter: section mode + name filter.
+
+        Applied to host listboxes and nested group child listboxes.
+        GroupRows stay visible when any descendant project would match
+        (or when mode is ``all`` with no name filter, including empty groups).
+        """
         def _filter_row(row):
-            if isinstance(row, NewProjectEntryRow):
-                return self._section_mode(host_id) != 'hidden'
+            mode = self._section_mode(host_id)
+            if isinstance(row, (NewProjectEntryRow, NameEntryRow)):
+                return mode != 'hidden'
             if isinstance(row, ProjectRow):
-                mode = self._section_mode(host_id)
+                return self._project_row_matches(row, mode, self._filter_text)
+            if isinstance(row, GroupRow):
                 if mode == 'hidden':
                     return False
-                if mode == 'active' and row._process_state not in ('attached', 'detached'):
-                    return False
-                if self._filter_text and self._filter_text not in row._project.name.lower():
-                    return False
+                # Show empty groups when not filtering by active/name.
+                if mode == 'all' and not self._filter_text:
+                    return True
+                return row.has_matching_descendant(mode, self._filter_text)
             return True
         return _filter_row
+
+    @staticmethod
+    def _project_row_matches(row, mode, filter_text):
+        if mode == 'hidden':
+            return False
+        if mode == 'active' and row._process_state not in ('attached', 'detached'):
+            return False
+        if filter_text and filter_text not in row._project.name.lower():
+            return False
+        return True
 
     def _section_mode(self, host_id):
         if self._settings is not None:
@@ -190,7 +315,115 @@ class Sidebar(Gtk.Box):
     def _invalidate_filters(self):
         for section in self._sections.values():
             section.listbox.invalidate_filter()
+        for grow in self._group_rows.values():
+            grow.child_listbox.invalidate_filter()
+        # Ephemeral auto-expand: name filter or active-only mode should
+        # reveal matching descendants without persisting forest.expanded
+        # (avoids spam-saving on every filter keystroke).
+        for grow in self._group_rows.values():
+            mode = self._section_mode(grow.host_id)
+            if self._filter_text or mode == 'active':
+                if grow.has_matching_descendant(mode, self._filter_text):
+                    grow.set_revealed(True, persist=False)
+            else:
+                # mode is all/hidden with no name filter — restore durable state
+                grow.set_revealed(bool(grow._group.expanded), persist=False)
         GLib.idle_add(self._update_sticky_header_idle)
+
+    def set_group_forest(self, host_id, forest):
+        """Store *forest* for *host_id* by reference (mutations update caller's object).
+
+        Does not rebuild the sidebar — call ``refresh()`` when the UI must update.
+        Pass ``None`` to clear to an empty forest.
+        """
+        from project_groups import empty_forest
+        self._forests[host_id] = forest if forest is not None else empty_forest()
+
+    def get_group_forest(self, host_id):
+        """Return the GroupForest for *host_id*, or None if never set."""
+        return self._forests.get(host_id)
+
+    def localhost_groups_load_status(self):
+        """Return ``(status, error)`` from the single startup load of local groups.
+
+        Status is ``ok`` / ``missing`` / ``invalid`` / ``error``. *error* may be
+        None. Used by AppWindow so it need not re-load or re-populate.
+        """
+        return (
+            getattr(self, '_localhost_groups_status', 'missing'),
+            getattr(self, '_localhost_groups_error', None),
+        )
+
+    def _on_group_expanded(self, host_id, group_id, expanded):
+        self.emit('group-expanded', host_id, group_id, expanded)
+
+    def _descendant_project_count(self, forest, group_id, known_refs):
+        from project_groups import child_groups, projects_in
+        n = sum(1 for r in projects_in(forest, group_id) if r in known_refs)
+        for g in child_groups(forest, group_id):
+            n += self._descendant_project_count(forest, g.id, known_refs)
+        return n
+
+    def _fill_group_listbox(
+        self, listbox, parent_id, forest, host_id,
+        projects_by_ref, all_projects, running_state, running_agent,
+    ):
+        """File-manager order: child groups, then projects (ungrouped at root)."""
+        from project_groups import child_groups, projects_in, ungrouped_refs
+
+        known_refs = set(projects_by_ref.keys())
+        filter_func = self._filter_func_for(host_id)
+
+        for g in child_groups(forest, parent_id):
+            count = self._descendant_project_count(forest, g.id, known_refs)
+            grow = GroupRow(
+                group=g,
+                forest=forest,
+                host_id=host_id,
+                project_count=count,
+                on_expanded=self._on_group_expanded,
+                filter_func=filter_func,
+                on_row_activated=self._on_row_activated,
+            )
+            grow.connect(
+                'request-new-project',
+                lambda r, h=host_id, gid=g.id: self._begin_new_project_in_group(h, gid),
+            )
+            grow.connect(
+                'request-new-subgroup',
+                lambda r, h=host_id, gid=g.id: self._begin_new_subgroup(h, gid),
+            )
+            grow.connect(
+                'group-rename',
+                lambda r, new_name, h=host_id, gid=g.id: self.emit(
+                    'group-rename', h, gid, new_name),
+            )
+            grow.connect(
+                'group-delete',
+                lambda r, h=host_id, gid=g.id: self.emit('group-delete', h, gid),
+            )
+            listbox.append(grow)
+            self._group_rows[(host_id, g.id)] = grow
+            self._fill_group_listbox(
+                grow.child_listbox, g.id, forest, host_id,
+                projects_by_ref, all_projects, running_state, running_agent,
+            )
+
+        if parent_id is None:
+            all_refs = [p.project_ref for p in all_projects]
+            refs = ungrouped_refs(forest, all_refs)
+            order = {p.project_ref: i for i, p in enumerate(all_projects)}
+            refs.sort(key=lambda r: (order.get(r, 10**9), r))
+        else:
+            refs = [r for r in projects_in(forest, parent_id) if r in projects_by_ref]
+            refs.sort(key=lambda r: (
+                projects_by_ref[r].name.casefold(), r))
+
+        for ref in refs:
+            proj = projects_by_ref.get(ref)
+            if proj is not None:
+                self._append_project_row(
+                    proj, running_state, running_agent, listbox=listbox)
 
     def _update_sticky_header_idle(self):
         self._update_sticky_header()
@@ -216,7 +449,31 @@ class Sidebar(Gtk.Box):
             return list(self._store.load_projects())
         return list(self._remote_projects.get(host_id, []))
 
-    def _append_project_row(self, proj, running_state, running_agent):
+    def _group_move_options(self, host_id):
+        """Options for ProjectRow 'Move to group' submenu: [(id, label), ...]."""
+        from project_groups import group_path_names
+        opts = [('', 'Ungrouped')]
+        forest = self._forests.get(host_id)
+        if forest is None or not forest.groups:
+            return opts
+        for g in sorted(
+            forest.groups.values(),
+            key=lambda n: (
+                [s.casefold() for s in group_path_names(forest, n.id)],
+                n.id,
+            ),
+        ):
+            crumbs = group_path_names(forest, g.id)
+            label = ' / '.join(crumbs) if crumbs else g.name
+            opts.append((g.id, label))
+        return opts
+
+    def _append_project_row(self, proj, running_state, running_agent, listbox=None):
+        """Build a ProjectRow and append it to *listbox* (or the host section).
+
+        Always registers the row in ``self._rows`` so nested group children
+        remain addressable by path (select_project, process state, etc.).
+        """
         row = ProjectRow(proj, self._history, self._watcher,
                          settings=self._settings)
         # Prefer durable maps (survive spawn-before-row), then row snapshot.
@@ -257,15 +514,24 @@ class Sidebar(Gtk.Box):
                     lambda r, mid, p=proj.path: self.emit('project-model-change', p, mid))
         row.connect('project-harness-change',
                     lambda r, aid, p=proj.path: self.emit('project-harness-change', p, aid))
+        host_id = getattr(proj, 'host_id', 'localhost')
+        row.connect(
+            'project-move-to-group',
+            lambda r, gid, p=proj.path, h=host_id: self.emit(
+                'project-move-to-group', h, p, gid),
+        )
+        row.set_group_move_options(self._group_move_options(host_id))
         row.set_model_options(
             self._model_options,
             self._model_overrides.get(proj.path, FOLLOW_DEFAULT),
             self._global_model_label,
         )
-        host_id = getattr(proj, 'host_id', 'localhost')
-        section = self._sections.get(host_id)
-        if section is not None:
-            section.listbox.append(row)
+        if listbox is None:
+            section = self._sections.get(host_id)
+            if section is not None:
+                listbox = section.listbox
+        if listbox is not None:
+            listbox.append(row)
         self._rows[proj.path] = row
         self._row_host[proj.path] = host_id
 
@@ -282,20 +548,29 @@ class Sidebar(Gtk.Box):
 
     def _populate(self):
         from hosts import LOCALHOST_ID
+        from project_groups import empty_forest
         # Preserve the in-progress new-project entry across rebuilds
         pending_row = self._new_project_row
         pending_host = self._new_project_host_id
+        pending_group = self._new_project_group_id
         if pending_row is not None:
             parent = pending_row.get_parent()
             if parent is not None:
                 parent.remove(pending_row)
             self._new_project_row = None
+        # Drop in-progress group-name entry (rebuilt UI won't restore it).
+        if self._new_group_entry_row is not None:
+            parent = self._new_group_entry_row.get_parent()
+            if parent is not None:
+                parent.remove(self._new_group_entry_row)
+            self._new_group_entry_row = None
         # Snapshot row state (also mirrored into durable maps by setters).
         running_state = {path: row._process_state for path, row in self._rows.items()}
         running_agent = {path: row._running_harness for path, row in self._rows.items()}
 
         self._rows.clear()
         self._row_host.clear()
+        self._group_rows.clear()
         self._clear_sections()
 
         for host_id in self._host_order():
@@ -313,6 +588,7 @@ class Sidebar(Gtk.Box):
                 show_health=show_health,
                 on_toggle=self._on_section_toggle,
                 on_add_project=self._on_section_add_project,
+                on_new_group=self._on_section_new_group,
             )
             header.set_filter_mode(mode)
             health = self._host_health.get(host_id, 'grey')
@@ -332,13 +608,32 @@ class Sidebar(Gtk.Box):
             for proj in projects:
                 if not getattr(proj, 'host_id', None):
                     proj.host_id = host_id
-                self._append_project_row(proj, running_state, running_agent)
 
-            # Pending new-project row sits under its host section
+            forest = self._forests.get(host_id) or empty_forest()
+            # No groups → flat list identical to pre-groups behavior (store order).
+            if not forest.groups:
+                for proj in projects:
+                    self._append_project_row(
+                        proj, running_state, running_agent, listbox=listbox)
+            else:
+                projects_by_ref = {p.project_ref: p for p in projects}
+                self._fill_group_listbox(
+                    listbox, None, forest, host_id,
+                    projects_by_ref, projects, running_state, running_agent,
+                )
+
+            # Pending new-project row sits under its host section or group
             if pending_row is not None and pending_host == host_id:
                 self._new_project_row = pending_row
                 self._new_project_host_id = pending_host
-                listbox.append(pending_row)
+                self._new_project_group_id = pending_group
+                target = listbox
+                if pending_group:
+                    grow = self._group_rows.get((host_id, pending_group))
+                    if grow is not None:
+                        target = grow.child_listbox
+                        grow.set_revealed(True, persist=False)
+                target.prepend(pending_row)
                 GLib.idle_add(lambda: pending_row._entry.grab_focus() and False)
 
         self._refresh_section_counts()
@@ -380,15 +675,142 @@ class Sidebar(Gtk.Box):
             nxt = 'all'
         self.set_host_section_mode(host_id, nxt)
 
-    def _on_section_add_project(self, host_id):
-        # Creating requires the section not fully hidden.
-        if self._section_mode(host_id) == 'hidden':
+    def _ensure_section_shows_all(self, host_id):
+        """Force host section to 'all' so new groups/projects are visible."""
+        if self._section_mode(host_id) != 'all':
             self.set_host_section_mode(host_id, 'all')
+
+    def _on_section_add_project(self, host_id):
+        # Creating requires the section not fully hidden; show all so the
+        # new row is not filtered away under active-only.
+        self._ensure_section_shows_all(host_id)
         self._on_add_project(None, host_id=host_id)
+
+    def _on_section_new_group(self, host_id):
+        """Host + menu: New Group… at host root."""
+        self._ensure_section_shows_all(host_id)
+        self._prompt_new_group_name(host_id, parent_group_id='')
+
+    def _prompt_new_group_name(self, host_id, parent_group_id=''):
+        """Modal name prompt for a new root group (or parented group).
+
+        Create stays disabled until the name is non-empty so an empty Create
+        cannot dismiss the dialog with no feedback (release gate engineer finding).
+        """
+        self._ensure_section_shows_all(host_id)
+        dialog = Adw.AlertDialog.new(
+            'New Group',
+            'Enter a name for the new group. Groups organize projects in the '
+            'sidebar; they do not start a coding session.',
+        )
+        entry = Gtk.Entry()
+        entry.set_placeholder_text('Group name\u2026')
+        entry.set_hexpand(True)
+        entry.set_tooltip_text(
+            'Name for this group (shown in the sidebar). Leave empty to keep Create disabled.'
+        )
+        dialog.set_extra_child(entry)
+        dialog.add_response('cancel', 'Cancel')
+        dialog.add_response('create', 'Create')
+        dialog.set_response_appearance('create', Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response('create')
+        dialog.set_close_response('cancel')
+        dialog.set_response_enabled('create', False)
+
+        def _sync_create_enabled(*_a):
+            dialog.set_response_enabled('create', bool(entry.get_text().strip()))
+
+        entry.connect('changed', _sync_create_enabled)
+
+        def _commit_if_named():
+            name = entry.get_text().strip()
+            if not name:
+                return False
+            self.emit('group-create', host_id, parent_group_id or '', name)
+            return True
+
+        def on_response(d, response_id):
+            if response_id == 'create':
+                _commit_if_named()
+
+        def on_entry_activate(_e):
+            if _commit_if_named():
+                dialog.close()
+
+        entry.connect('activate', on_entry_activate)
+        dialog.connect('response', on_response)
+        root = self.get_root()
+        dialog.present(root if root is not None else self)
+        GLib.idle_add(lambda: entry.grab_focus() and False)
+
+    def _begin_new_project_in_group(self, host_id, group_id):
+        """Inline NewProjectEntryRow inside a group's nested listbox."""
+        self._ensure_section_shows_all(host_id)
+        grow = self._group_rows.get((host_id, group_id))
+        if grow is None:
+            return
+        if self._new_project_row is not None:
+            self._new_project_row._entry.grab_focus()
+            return
+        grow.set_expanded(True, notify=True)
+        row = NewProjectEntryRow(
+            on_commit=self._commit_new_project,
+            on_cancel=self._cancel_new_project,
+        )
+        self._new_project_row = row
+        self._new_project_host_id = host_id
+        self._new_project_group_id = group_id
+        grow.child_listbox.prepend(row)
+        grow.child_listbox.invalidate_filter()
+        GLib.idle_add(lambda: row._entry.grab_focus() and False)
+
+    def _begin_new_subgroup(self, host_id, parent_group_id):
+        """Inline name entry for a child group under *parent_group_id*."""
+        from project_groups import MAX_GROUP_DEPTH, depth_of
+        self._ensure_section_shows_all(host_id)
+        forest = self._forests.get(host_id)
+        if forest is None:
+            return
+        if depth_of(forest, parent_group_id) >= MAX_GROUP_DEPTH:
+            return
+        grow = self._group_rows.get((host_id, parent_group_id))
+        if grow is None:
+            return
+        if self._new_group_entry_row is not None:
+            self._new_group_entry_row._entry.grab_focus()
+            return
+        grow.set_expanded(True, notify=True)
+
+        def on_commit(name):
+            self._cancel_new_group_entry()
+            self._ensure_section_shows_all(host_id)
+            self.emit('group-create', host_id, parent_group_id, name)
+
+        row = NameEntryRow(
+            on_commit=on_commit,
+            on_cancel=self._cancel_new_group_entry,
+            placeholder='Group name\u2026',
+            icon_name='folder-new-symbolic',
+        )
+        self._new_group_entry_row = row
+        grow.child_listbox.prepend(row)
+        grow.child_listbox.invalidate_filter()
+        GLib.idle_add(lambda: row._entry.grab_focus() and False)
+
+    def _cancel_new_group_entry(self):
+        if self._new_group_entry_row is None:
+            return
+        parent = self._new_group_entry_row.get_parent()
+        if parent is not None:
+            parent.remove(self._new_group_entry_row)
+        self._new_group_entry_row = None
 
     def _on_row_activated(self, listbox, row):
         if isinstance(row, ProjectRow):
             self.emit('project-activated', row._project.path)
+        elif isinstance(row, GroupRow):
+            # Groups never emit project-activated; activate toggles expand.
+            row.toggle_expanded()
 
     def _refresh_section_counts(self):
         """Update each section header's active(total) counts."""
@@ -455,12 +877,29 @@ class Sidebar(Gtk.Box):
         row = self._rows.get(path)
         if row is None:
             return
-        host_id = self._row_host.get(path, 'localhost')
-        for hid, section in self._sections.items():
-            if hid == host_id:
-                section.listbox.select_row(row)
-            else:
-                section.listbox.unselect_all()
+        # Expand ancestor GroupRows so a nested project is visible.
+        # notify=False per row (avoids N remote pushes up the chain); one
+        # group-expanded emit per host if durable expanded state changed.
+        hosts_to_persist = set()
+        w = row.get_parent()
+        while w is not None:
+            if isinstance(w, GroupRow):
+                gnode = w._forest.groups.get(w._group.id)
+                durable_was = bool(gnode.expanded) if gnode is not None else False
+                w.set_expanded(True, notify=False)
+                if not durable_was:
+                    hosts_to_persist.add(w.host_id)
+            w = w.get_parent()
+        for hid in hosts_to_persist:
+            self.emit('group-expanded', hid, '', True)
+        # Nested listboxes: unselect everywhere, then select on the row's parent.
+        for section in self._sections.values():
+            section.listbox.unselect_all()
+        for grow in self._group_rows.values():
+            grow.child_listbox.unselect_all()
+        parent_lb = row.get_parent()
+        if parent_lb is not None:
+            parent_lb.select_row(row)
 
     def set_project_state(self, path, state: str, is_zellij: bool = None):
         """Record process liveness for *path* even if the row is not built yet.
@@ -520,6 +959,14 @@ class Sidebar(Gtk.Box):
         self._cancel_pending_deactivate_timer(path)
         self._pending_deactivate_timers[path] = GLib.timeout_add(
             self.PENDING_DEACTIVATE_MS, self._fire_pending_deactivate, path)
+        # Soft confirm: 5s UNDO is already on the row; toast so distracted
+        # users notice before the session actually dies.
+        root = self.get_root()
+        if root is not None and hasattr(root, '_show_toast'):
+            root._show_toast(
+                'Closing session — click UNDO on the project row to keep it open',
+                timeout=4,
+            )
 
     def _fire_pending_deactivate(self, path):
         self._pending_deactivate_timers.pop(path, None)
@@ -531,22 +978,31 @@ class Sidebar(Gtk.Box):
         self.emit('project-deactivate', path)
         return False
 
-    def set_remote_projects(self, host_id, projects):
+    def set_remote_projects(self, host_id, projects, *, rebuild=True):
         """Replace the cached project list for a remote host.
 
         Rebuilds the sidebar only when the name set changes — health polls
         must not thrash the whole list every 30s (UI freeze).
+
+        Pass ``rebuild=False`` when applying several hosts at once (startup
+        remote probe): only update the cache and return whether a rebuild is
+        needed. Caller must call ``refresh()`` once at the end. With 3 remotes
+        this avoids N full populates of 50–100+ rows (~2.5s freezes).
+
+        Returns True if the name set changed (UI rebuild needed).
         """
         new = list(projects or [])
         old = self._remote_projects.get(host_id, [])
         self._remote_projects[host_id] = new
         old_names = sorted(p.name for p in old)
         new_names = sorted(p.name for p in new)
-        if old_names != new_names:
+        changed = old_names != new_names
+        if changed and rebuild:
             self._populate()
-        else:
+        elif not changed:
             # Counts may still change via process state; refresh header totals.
             self._refresh_section_counts()
+        return changed
 
     def set_host_health(self, host_id, state: str):
         """Update micro health indicator on a remote section header."""
@@ -684,6 +1140,7 @@ class Sidebar(Gtk.Box):
         )
         self._new_project_row = row
         self._new_project_host_id = host_id
+        self._new_project_group_id = ''
         section = self._sections.get(host_id)
         if section is not None:
             section.listbox.prepend(row)
@@ -694,13 +1151,18 @@ class Sidebar(Gtk.Box):
     def _commit_new_project(self, name):
         row = self._new_project_row
         host_id = self._new_project_host_id
+        group_id = self._new_project_group_id or ''
         self._new_project_row = None
         self._new_project_host_id = 'localhost'
+        self._new_project_group_id = ''
         if row is not None:
             parent = row.get_parent()
             if parent is not None:
                 parent.remove(row)
-        self.emit('project-create', host_id, name)
+        if group_id:
+            self.emit('project-create-in-group', host_id, group_id, name)
+        else:
+            self.emit('project-create', host_id, name)
 
     def _cancel_new_project(self):
         if self._new_project_row is None:
@@ -710,6 +1172,19 @@ class Sidebar(Gtk.Box):
             parent.remove(self._new_project_row)
         self._new_project_row = None
         self._new_project_host_id = 'localhost'
+        self._new_project_group_id = ''
+
+    def _on_sidebar_capture_key(self, _ctrl, keyval, _keycode, _state):
+        """Escape cancels pending create/group rows regardless of focus target."""
+        if keyval != Gdk.KEY_Escape:
+            return False
+        if self._new_project_row is not None:
+            self._cancel_new_project()
+            return True
+        if self._new_group_entry_row is not None:
+            self._cancel_new_group_entry()
+            return True
+        return False
 
     def _on_scroll_changed(self, *_args):
         self._update_sticky_header()
@@ -833,7 +1308,10 @@ class HostSectionHeader(Gtk.Box):
         'hidden': '(projects hidden)',
     }
 
-    def __init__(self, host_id, title, expanded, show_health, on_toggle, on_add_project):
+    def __init__(
+        self, host_id, title, expanded, show_health, on_toggle, on_add_project,
+        on_new_group=None,
+    ):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.host_id = host_id
         self._expanded = expanded
@@ -842,6 +1320,7 @@ class HostSectionHeader(Gtk.Box):
         self._show_health = show_health
         self._on_toggle = on_toggle
         self._on_add_project = on_add_project
+        self._on_new_group = on_new_group
         self.add_css_class('pm-host-section')
         self.set_hexpand(True)
 
@@ -876,14 +1355,37 @@ class HostSectionHeader(Gtk.Box):
         self._count_label.set_valign(Gtk.Align.CENTER)
         self.append(self._count_label)
 
-        self._add_btn = Gtk.Button.new_from_icon_name('list-add-symbolic')
+        # + popover: labeled buttons (not Gio.Menu) so a11y names are real.
+        # Labels + tooltips explain Project vs Group for first-time users.
+        ag = Gio.SimpleActionGroup()
+        act_proj = Gio.SimpleAction.new('add-project', None)
+        act_proj.connect('activate', self._on_add_project_activate)
+        ag.add_action(act_proj)
+        act_grp = Gio.SimpleAction.new('add-group', None)
+        act_grp.connect('activate', self._on_add_group_activate)
+        ag.add_action(act_grp)
+        self.insert_action_group('host', ag)
+
+        self._add_btn = Gtk.MenuButton()
+        self._add_btn.set_icon_name('list-add-symbolic')
         self._add_btn.add_css_class('flat')
         self._add_btn.add_css_class('circular')
-        self._add_btn.set_tooltip_text('New Project')
         self._add_btn.set_has_frame(False)
         self._add_btn.set_valign(Gtk.Align.CENTER)
         self._add_btn.set_margin_end(4)
-        self._add_btn.connect('clicked', self._on_add_clicked)
+        self._add_btn.set_tooltip_text(_TIP_ADD_HOST)
+        self._add_btn.set_popover(_build_labeled_action_popover([
+            (
+                'New Project',
+                _TIP_NEW_PROJECT,
+                lambda: self._on_add_project_activate(None, None),
+            ),
+            (
+                'New Group',
+                _TIP_NEW_GROUP,
+                lambda: self._on_add_group_activate(None, None),
+            ),
+        ]))
         self.append(self._add_btn)
 
         click = Gtk.GestureClick.new()
@@ -896,13 +1398,18 @@ class HostSectionHeader(Gtk.Box):
         if show_health:
             self.set_health('grey')
 
-    def _on_add_clicked(self, button):
-        self._on_add_project(self.host_id)
+    def _on_add_project_activate(self, action, param):
+        if self._on_add_project is not None:
+            self._on_add_project(self.host_id)
+
+    def _on_add_group_activate(self, action, param):
+        if self._on_new_group is not None:
+            self._on_new_group(self.host_id)
 
     def _on_header_released(self, gesture, n_press, x, y):
         if n_press < 1:
             return
-        # Ignore clicks on the add button (it handles its own action).
+        # Ignore clicks on the + menu button (it handles its own action).
         if self._add_btn.contains(x, y) if hasattr(self._add_btn, 'contains') else False:
             return
         # Fallback: if event is over add_btn allocation.
@@ -975,8 +1482,363 @@ class HostSectionHeader(Gtk.Box):
                     other._health_dot.get_tooltip_text() or '')
 
 
+class GroupRow(Gtk.ListBoxRow):
+    """Virtual project group: expand arrow, folder icon, nested ListBox.
+
+    Never emits project-activated. Expand/collapse updates the shared forest
+    via ``set_group_expanded`` and notifies the sidebar through *on_expanded*.
+    Context menu: New Project, New Subgroup, Rename, Delete Group.
+    """
+
+    __gsignals__ = {
+        'request-new-project': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'request-new-subgroup': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'group-rename': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        'group-delete': (GObject.SignalFlags.RUN_FIRST, None, ()),
+    }
+
+    def __init__(
+        self,
+        group,
+        forest,
+        host_id,
+        project_count=0,
+        on_expanded=None,
+        filter_func=None,
+        on_row_activated=None,
+    ):
+        super().__init__()
+        self._group = group
+        self._forest = forest
+        self.host_id = host_id
+        self._on_expanded = on_expanded
+        self._expanded = bool(group.expanded)
+        self.add_css_class('pm-group-row')
+        self.set_activatable(True)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.set_child(outer)
+
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        top.set_margin_start(4)
+        top.set_margin_end(8)
+        top.set_margin_top(4)
+        top.set_margin_bottom(4)
+
+        self._arrow = Gtk.Button()
+        self._arrow.add_css_class('flat')
+        self._arrow.add_css_class('expand-arrow')
+        self._arrow.set_valign(Gtk.Align.CENTER)
+        self._arrow_label = Gtk.Label(
+            label='\u2304' if self._expanded else '\u203a')
+        self._arrow.set_child(self._arrow_label)
+        self._arrow.connect('clicked', self._on_expand_clicked)
+        top.append(self._arrow)
+
+        icon = Gtk.Image.new_from_icon_name('folder-symbolic')
+        icon.set_valign(Gtk.Align.CENTER)
+        icon.set_margin_start(2)
+        icon.set_margin_end(6)
+        icon.add_css_class('pm-group-icon')
+        top.append(icon)
+
+        self._name_label = Gtk.Label(label=group.name)
+        self._name_label.set_halign(Gtk.Align.START)
+        self._name_label.set_hexpand(True)
+        self._name_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self._name_label.add_css_class('pm-group-name')
+        top.append(self._name_label)
+
+        self._rename_entry = Gtk.Entry()
+        self._rename_entry.set_hexpand(True)
+        self._rename_entry.set_visible(False)
+        self._rename_entry.connect('activate', self._on_rename_activate)
+        rename_key = Gtk.EventControllerKey.new()
+        rename_key.connect('key-pressed', self._on_rename_key)
+        self._rename_entry.add_controller(rename_key)
+        self._rename_active = False
+        self._rename_ignore_leave = True
+        rename_focus = Gtk.EventControllerFocus.new()
+        rename_focus.connect('leave', self._on_rename_focus_leave)
+        self._rename_entry.add_controller(rename_focus)
+        top.append(self._rename_entry)
+
+        self._count_label = Gtk.Label()
+        self._count_label.add_css_class('dim-label')
+        self._count_label.add_css_class('caption')
+        self._count_label.add_css_class('pm-group-count')
+        if project_count > 0:
+            self._count_label.set_label(str(project_count))
+            self._count_label.set_visible(True)
+        else:
+            self._count_label.set_visible(False)
+        top.append(self._count_label)
+
+        # Actions shared by + dropdown and right-click menu.
+        from project_groups import MAX_GROUP_DEPTH, depth_of
+        ag = Gio.SimpleActionGroup()
+        for name, signal in (
+            ('new-project', 'request-new-project'),
+            ('new-subgroup', 'request-new-subgroup'),
+            ('delete', 'group-delete'),
+        ):
+            action = Gio.SimpleAction.new(name, None)
+            action.connect(
+                'activate',
+                lambda a, p, sn=signal: self.emit(sn),
+            )
+            ag.add_action(action)
+            if name == 'new-subgroup':
+                self._new_subgroup_action = action
+            elif name == 'new-project':
+                self._new_project_action = action
+
+        rename_action = Gio.SimpleAction.new('rename', None)
+        rename_action.connect('activate', lambda a, p: self._enter_rename_mode())
+        ag.add_action(rename_action)
+        self.insert_action_group('group', ag)
+
+        can_sub = depth_of(self._forest, self._group.id) < MAX_GROUP_DEPTH
+        self._new_subgroup_action.set_enabled(can_sub)
+
+        # + popover: labeled buttons (same a11y pattern as host header)
+        self._add_btn = Gtk.MenuButton()
+        self._add_btn.set_icon_name('list-add-symbolic')
+        self._add_btn.add_css_class('flat')
+        self._add_btn.add_css_class('circular')
+        self._add_btn.add_css_class('pm-group-add')
+        self._add_btn.set_has_frame(False)
+        self._add_btn.set_valign(Gtk.Align.CENTER)
+        self._rebuild_add_popover(can_sub)
+        top.append(self._add_btn)
+
+        outer.append(top)
+
+        self._revealer = Gtk.Revealer()
+        self._revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self._revealer.set_reveal_child(self._expanded)
+
+        self.child_listbox = Gtk.ListBox()
+        self.child_listbox.add_css_class('navigation-sidebar')
+        self.child_listbox.add_css_class('pm-group-children')
+        if filter_func is not None:
+            self.child_listbox.set_filter_func(filter_func)
+        if on_row_activated is not None:
+            self.child_listbox.connect('row-activated', on_row_activated)
+        self._revealer.set_child(self.child_listbox)
+        outer.append(self._revealer)
+
+        self._setup_context_menu()
+
+    @property
+    def group_id(self):
+        return self._group.id
+
+    def _rebuild_add_popover(self, can_sub):
+        """Labeled + popover; tooltips explain Project vs Subgroup."""
+        items = []
+        if can_sub:
+            items.append((
+                'New Subgroup',
+                _TIP_NEW_SUBGROUP,
+                lambda: self._new_subgroup_action.activate(None),
+            ))
+        items.append((
+            'New Project',
+            _TIP_NEW_PROJECT,
+            lambda: self._new_project_action.activate(None),
+        ))
+        tip = (
+            'New Subgroup or Project — Subgroup: nest under this group. '
+            'Project: create inside this group and open a session.'
+            if can_sub else
+            'New Project — create a project inside this group and open a session.'
+        )
+        self._add_btn.set_tooltip_text(tip)
+        self._add_btn.set_popover(_build_labeled_action_popover(items))
+
+    def _setup_context_menu(self):
+        # Right-click keeps full menu (New Project/Subgroup, Rename, Delete).
+        self._menu = Gio.Menu()
+        self._menu.append('New Project\u2026', 'group.new-project')
+        self._menu.append('New Subgroup\u2026', 'group.new-subgroup')
+        self._menu.append('Rename', 'group.rename')
+        self._menu.append('Delete Group', 'group.delete')
+
+        self._popover = Gtk.PopoverMenu.new_from_model(self._menu)
+        self._popover.set_parent(self)
+        self._popover.set_has_arrow(False)
+
+        click = Gtk.GestureClick.new()
+        click.set_button(3)
+        click.connect('pressed', self._on_right_click)
+        self.add_controller(click)
+
+    def _on_right_click(self, gesture, n_press, x, y):
+        if n_press != 1:
+            return
+        from project_groups import MAX_GROUP_DEPTH, depth_of
+        can_sub = depth_of(self._forest, self._group.id) < MAX_GROUP_DEPTH
+        self._new_subgroup_action.set_enabled(can_sub)
+        if hasattr(self, '_add_btn'):
+            self._rebuild_add_popover(can_sub)
+        rect = Gdk.Rectangle()
+        rect.x = int(x)
+        rect.y = int(y)
+        rect.width = 1
+        rect.height = 1
+        self._popover.set_pointing_to(rect)
+        self._popover.popup()
+
+    def _enter_rename_mode(self):
+        self._rename_active = True
+        self._rename_ignore_leave = True
+        self._name_label.set_visible(False)
+        self._rename_entry.set_text(self._group.name)
+        self._rename_entry.set_visible(True)
+        self._rename_entry.select_region(0, -1)
+
+        def _focus():
+            self._rename_entry.grab_focus()
+            return False
+
+        def _arm_leave():
+            self._rename_ignore_leave = False
+            return False
+
+        GLib.idle_add(_focus)
+        GLib.timeout_add(150, _arm_leave)
+
+    def _exit_rename_mode(self):
+        self._rename_active = False
+        self._rename_ignore_leave = True
+        self._rename_entry.set_visible(False)
+        self._name_label.set_visible(True)
+
+    def _on_rename_focus_leave(self, *_args):
+        if self._rename_active and not self._rename_ignore_leave:
+            self._exit_rename_mode()
+
+    def _on_rename_activate(self, entry):
+        name = entry.get_text().strip()
+        self._exit_rename_mode()
+        if name and name != self._group.name:
+            self.emit('group-rename', name)
+
+    def _on_rename_key(self, ctrl, keyval, keycode, state):
+        if keyval == Gdk.KEY_Escape:
+            self._exit_rename_mode()
+            return True
+        return False
+
+    def _on_expand_clicked(self, button):
+        self.toggle_expanded()
+
+    def toggle_expanded(self):
+        self.set_expanded(not self._expanded)
+
+    def set_revealed(self, expanded, *, persist=False):
+        """Show/hide children in the UI.
+
+        persist=False: only revealer + arrow (ephemeral filter auto-expand).
+        Does not touch forest.expanded or emit on_expanded.
+        persist=True: same as user toggle — update forest and notify.
+        """
+        if persist:
+            self.set_expanded(expanded, notify=True)
+            return
+        expanded = bool(expanded)
+        self._expanded = expanded
+        self._revealer.set_reveal_child(expanded)
+        self._arrow_label.set_label('\u2304' if expanded else '\u203a')
+
+    def set_expanded(self, expanded, *, notify=True):
+        """Reveal/collapse children; update forest.expanded; optionally notify."""
+        from project_groups import set_group_expanded
+        expanded = bool(expanded)
+        changed = expanded != self._expanded
+        self._expanded = expanded
+        self._revealer.set_reveal_child(expanded)
+        self._arrow_label.set_label('\u2304' if expanded else '\u203a')
+        set_group_expanded(self._forest, self._group.id, expanded)
+        if notify and changed and self._on_expanded is not None:
+            self._on_expanded(self.host_id, self._group.id, expanded)
+
+    def has_matching_descendant(self, mode, filter_text):
+        """True if any nested ProjectRow would pass the host filter criteria."""
+        i = 0
+        while True:
+            row = self.child_listbox.get_row_at_index(i)
+            if row is None:
+                break
+            if isinstance(row, ProjectRow):
+                if Sidebar._project_row_matches(row, mode, filter_text):
+                    return True
+            elif isinstance(row, GroupRow):
+                if row.has_matching_descendant(mode, filter_text):
+                    return True
+            i += 1
+        return False
+
+
+class NameEntryRow(Gtk.ListBoxRow):
+    """Inline name entry for groups (or other free-text names)."""
+
+    def __init__(
+        self,
+        on_commit,
+        on_cancel,
+        placeholder='Name\u2026',
+        icon_name='folder-new-symbolic',
+    ):
+        super().__init__()
+        self.set_selectable(False)
+        self.set_activatable(False)
+        self._on_commit = on_commit
+        self._on_cancel = on_cancel
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_margin_start(8)
+        box.set_margin_end(8)
+        box.set_margin_top(4)
+        box.set_margin_bottom(4)
+
+        icon = Gtk.Image.new_from_icon_name(icon_name)
+        box.append(icon)
+
+        self._entry = Gtk.Entry()
+        self._entry.set_placeholder_text(placeholder)
+        self._entry.set_hexpand(True)
+        self._entry.connect('activate', self._on_activate)
+
+        key_ctrl = Gtk.EventControllerKey.new()
+        key_ctrl.connect('key-pressed', self._on_key_pressed)
+        self._entry.add_controller(key_ctrl)
+
+        box.append(self._entry)
+        self.set_child(box)
+        GLib.idle_add(lambda: self._entry.grab_focus() and False)
+
+    def _on_activate(self, entry):
+        name = entry.get_text().strip()
+        if name:
+            self._on_commit(name)
+            return
+        _entry_flash_invalid(entry, 'Name required')
+
+    def _on_key_pressed(self, ctrl, keyval, keycode, state):
+        if keyval == Gdk.KEY_Escape:
+            self._on_cancel()
+            return True
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            return True
+        return False
+
+
 class NewProjectEntryRow(Gtk.ListBoxRow):
     """Inline entry row for creating a new project directory."""
+    _DEFAULT_PLACEHOLDER = 'Project name\u2026'
+
     def __init__(self, on_commit, on_cancel):
         super().__init__()
         self.set_selectable(False)
@@ -991,12 +1853,24 @@ class NewProjectEntryRow(Gtk.ListBoxRow):
         box.set_margin_bottom(4)
 
         icon = Gtk.Image.new_from_icon_name('folder-new-symbolic')
+        icon.set_tooltip_text(_TIP_NEW_PROJECT)
         box.append(icon)
 
         self._entry = Gtk.Entry()
-        self._entry.set_placeholder_text('Project name\u2026')
+        self._entry.set_placeholder_text(self._DEFAULT_PLACEHOLDER)
         self._entry.set_hexpand(True)
+        # Short placeholder (visible only when empty); long guidance lives in
+        # the tooltip so typing feedback is not confused with the field value.
+        self._entry.set_tooltip_text(
+            'Type a unique project name and press Enter to create it and open a session. '
+            'Escape cancels (works even if another sidebar control is focused).'
+        )
+        self._entry.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ['Project name'],
+        )
         self._entry.connect('activate', self._on_activate)
+        self._entry.connect('changed', self._on_changed)
 
         key_ctrl = Gtk.EventControllerKey.new()
         key_ctrl.connect('key-pressed', self._on_key_pressed)
@@ -1006,10 +1880,21 @@ class NewProjectEntryRow(Gtk.ListBoxRow):
         self.set_child(box)
         GLib.idle_add(lambda: self._entry.grab_focus() and False)
 
+    def _on_changed(self, entry):
+        # Clear validation flash as soon as the user types again.
+        if entry.get_text().strip():
+            entry.remove_css_class('error')
+            if entry.get_placeholder_text() != self._DEFAULT_PLACEHOLDER:
+                entry.set_placeholder_text(self._DEFAULT_PLACEHOLDER)
+
     def _on_activate(self, entry):
+        from hosts import project_name_reject_reason
         name = entry.get_text().strip()
-        if name and '/' not in name and not name.startswith('.'):
+        reason = project_name_reject_reason(name)
+        if reason is None:
             self._on_commit(name)
+            return
+        _entry_flash_invalid(entry, reason)
 
     def _on_key_pressed(self, ctrl, keyval, keycode, state):
         if keyval == Gdk.KEY_Escape:
@@ -1035,6 +1920,8 @@ class ProjectRow(Gtk.ListBoxRow):
         'project-rename':     (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-model-change': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'project-harness-change': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # group_id ('' = ungroup)
+        'project-move-to-group': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self, project, history, watcher, settings=None):
@@ -1122,7 +2009,13 @@ class ProjectRow(Gtk.ListBoxRow):
         self._deactivate_btn = Gtk.Button.new_from_icon_name('media-playback-stop-symbolic')
         self._deactivate_btn.add_css_class('flat')
         self._deactivate_btn.set_valign(Gtk.Align.CENTER)
-        self._deactivate_btn.set_tooltip_text('Deactivate session')
+        # Persona feedback: "Deactivate" sounded destructive and was unexplained.
+        # Accessible name + tooltip: close the agent session, keep the project.
+        self._deactivate_btn.set_tooltip_text(_TIP_CLOSE_SESSION)
+        self._deactivate_btn.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ['Close session'],
+        )
         self._deactivate_btn.set_sensitive(False)  # only enabled when process running
         self._deactivate_btn.connect('clicked',
                                      lambda b: self.emit('deactivate-requested'))
@@ -1131,7 +2024,11 @@ class ProjectRow(Gtk.ListBoxRow):
         self._undo_btn = Gtk.Button(label='UNDO')
         self._undo_btn.add_css_class('flat')
         self._undo_btn.set_valign(Gtk.Align.CENTER)
-        self._undo_btn.set_tooltip_text('Cancel deactivate')
+        self._undo_btn.set_tooltip_text(_TIP_UNDO_CLOSE_SESSION)
+        self._undo_btn.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ['Keep session open'],
+        )
         self._undo_btn.set_visible(False)
         self._undo_btn.connect('clicked', lambda b: self.emit('deactivate-undo'))
         actions_box.append(self._undo_btn)
@@ -1317,6 +2214,9 @@ class ProjectRow(Gtk.ListBoxRow):
         self._model_submenu = Gio.Menu()
         self._menu.append_submenu('Provider', self._model_submenu)
         self._menu.append('Rename',             'row.rename')
+        # Move-to-group submenu; populated by set_group_move_options().
+        self._move_group_submenu = Gio.Menu()
+        self._move_group_menu_index = None  # set when submenu is present
         from hosts import LOCALHOST_ID as _LH
         if getattr(self._project, 'host_id', _LH) == _LH:
             self._menu.append('Archive',            'row.archive')
@@ -1365,6 +2265,13 @@ class ProjectRow(Gtk.ListBoxRow):
         ag.add_action(self._harness_action)
         self._populate_harness_submenu()
 
+        # Move to group: parameter is group_id string ('' = ungroup).
+        move_action = Gio.SimpleAction.new(
+            'move-to-group', GLib.VariantType.new('s'),
+        )
+        move_action.connect('activate', self._on_move_to_group)
+        ag.add_action(move_action)
+
         self.insert_action_group('row', ag)
         self._rebuild_popover()
 
@@ -1372,6 +2279,62 @@ class ProjectRow(Gtk.ListBoxRow):
         click.set_button(3)
         click.connect('pressed', self._on_right_click)
         self.add_controller(click)
+
+    def _on_move_to_group(self, action, param):
+        group_id = param.get_string() if param is not None else ''
+        self.emit('project-move-to-group', group_id)
+
+    def set_group_move_options(self, options):
+        """Populate the 'Move to group' submenu.
+
+        *options*: list of ``(group_id, label)``; use ``('', 'Ungrouped')`` for
+        the ungroup action. When *options* is empty or only Ungrouped with no
+        real groups, the submenu is still shown (Ungrouped only) so the action
+        stays discoverable once groups exist after a refresh.
+
+        Call after construction (Sidebar does this in ``_append_project_row``).
+        """
+        # Remove previous submenu if present.
+        if self._move_group_menu_index is not None:
+            # Find by label in case index drifted.
+            idx = None
+            for i in range(self._menu.get_n_items()):
+                v = self._menu.get_item_attribute_value(
+                    i, 'label', GLib.VariantType('s'))
+                if v and v.get_string() == 'Move to group':
+                    idx = i
+                    break
+            if idx is not None:
+                self._menu.remove(idx)
+            self._move_group_menu_index = None
+
+        options = list(options or [])
+        # Hide submenu entirely when forest has no groups (only Ungrouped).
+        has_real = any(gid for gid, _label in options)
+        if not has_real:
+            self._rebuild_popover()
+            return
+
+        self._move_group_submenu = Gio.Menu()
+        for gid, label in options:
+            # Detailed action: row.move-to-group::'<gid>'
+            # Empty gid → ungroup; Gio.Menu detailed action needs quoting.
+            target = GLib.Variant('s', gid or '')
+            item = Gio.MenuItem.new(label, None)
+            item.set_action_and_target_value('row.move-to-group', target)
+            self._move_group_submenu.append_item(item)
+
+        # Insert after Rename if possible.
+        insert_at = self._menu.get_n_items()
+        for i in range(self._menu.get_n_items()):
+            v = self._menu.get_item_attribute_value(
+                i, 'label', GLib.VariantType('s'))
+            if v and v.get_string() == 'Rename':
+                insert_at = i + 1
+                break
+        self._menu.insert_submenu(insert_at, 'Move to group', self._move_group_submenu)
+        self._move_group_menu_index = insert_at
+        self._rebuild_popover()
 
     def _on_ntfy_activate(self, action, param):
         new_state = not action.get_state().get_boolean()
@@ -1486,22 +2449,6 @@ class ProjectRow(Gtk.ListBoxRow):
         rect.height = 1
         self._popover.set_pointing_to(rect)
         self._popover.popup()
-
-    def _show_confirm_popover(self, trigger_btn, action_fn):
-        popover = Gtk.Popover()
-        popover.set_parent(trigger_btn)
-        popover.set_position(Gtk.PositionType.BOTTOM)
-        popover.set_has_arrow(True)
-        popover.connect('closed', lambda p: p.unparent())
-        confirm_btn = Gtk.Button(label='Confirm')
-        confirm_btn.add_css_class('destructive-action')
-        confirm_btn.set_margin_top(4)
-        confirm_btn.set_margin_bottom(4)
-        confirm_btn.set_margin_start(4)
-        confirm_btn.set_margin_end(4)
-        confirm_btn.connect('clicked', lambda _b: (action_fn(), popover.popdown()))
-        popover.set_child(confirm_btn)
-        popover.popup()
 
     def _on_expand_clicked(self, button):
         self._expanded = not self._expanded
@@ -1645,13 +2592,13 @@ class ProjectRow(Gtk.ListBoxRow):
         self._exit_rename_mode()
 
     def _on_rename_activate(self, entry):
+        from hosts import project_name_reject_reason
         name = entry.get_text().strip()
-        valid = (name and '/' not in name
-                 and not name.startswith('.') and name != self._project.name)
+        reason = project_name_reject_reason(name)
         # Ignore leave while we tear down (activate moves focus).
         self._rename_ignore_leave = True
         self._exit_rename_mode()
-        if valid:
+        if reason is None and name != self._project.name:
             self.emit('project-rename', name)
 
     def _on_rename_key(self, ctrl, keyval, keycode, state):

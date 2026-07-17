@@ -10,6 +10,7 @@ from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk, Gio
 import harnesses
 import terminal_copy
 import zellij
+from settings import match_vte_key_capture
 
 
 _TERMINAL_PALETTES = {
@@ -172,8 +173,9 @@ class TerminalView(Gtk.Box):
         term_box.append(scrollbar)
         self.append(term_box)
 
-        # Intercept Shift+Enter at CAPTURE phase — GTK4/Wayland strips the Shift
-        # modifier before VTE sees it; feed kitty keyboard protocol sequence directly.
+        # CAPTURE-phase VTE key remaps (Shift+Enter, Grok Ctrl+; / Ctrl+', …).
+        # Table lives in settings.json → vte_key_captures[harness]; see
+        # settings.DEFAULT_VTE_KEY_CAPTURES and match_vte_key_capture().
         self._key_ctrl = Gtk.EventControllerKey.new()
         self._key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         self._key_ctrl.connect('key-pressed', self._on_key_pressed)
@@ -192,10 +194,14 @@ class TerminalView(Gtk.Box):
         self._terminal.add_controller(self._rclick_gesture)
 
     def _on_key_pressed(self, controller, keyval, keycode, state):
-        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-            if state & Gdk.ModifierType.SHIFT_MASK:
-                self._terminal.feed_child(b'\x1b[13;2u')
-                return True
+        # Per-harness CSI-u feeds for chords VTE cannot encode (settings-driven).
+        harness_id = getattr(self._adapter, 'id', None) or 'claude'
+        captures = self._settings.vte_captures_for(harness_id)
+        feed = match_vte_key_capture(captures, int(keyval), int(state))
+        if feed is not None:
+            self._terminal.feed_child(feed)
+            return True
+        # ProjectMan clipboard chords (not harness-specific).
         if keyval in (Gdk.KEY_c, Gdk.KEY_C):
             if (state & Gdk.ModifierType.CONTROL_MASK) and (state & Gdk.ModifierType.SHIFT_MASK):
                 self._smart_copy()
@@ -440,41 +446,17 @@ class TerminalView(Gtk.Box):
             self._fallback_reason = f'Unknown remote host {host_id!r}'
             return None, None
         # Rebuild argv with the host's binary (never a local absolute path).
+        # Preserve resume flags (-S/-s/-r/--resume), -m model pairs, and continue
+        # fallback policy — see harnesses.rebuild_remote_spawn_argv.
         remote_bin = prof.binary_spec(self._adapter.id).resolved(
             path_fallback=self._adapter.id,
         )
-        import harnesses as _h
-        fallback = self._adapter.caps.continue_falls_back_to_fresh
-        # Infer mode from plan.argv shape is fragile; re-derive from last plan
-        # by re-calling adapter helpers when available.
-        mode_argv = list(argv)
-        if hasattr(self._adapter, 'fresh_argv'):
-            # Replace binary tokens in common shapes: [bin], [bin, -c], bash wrapper.
-            # Prefer rebuild from mode stored on instance if we set it; else
-            # rewrite argv[0] when it is a direct binary spawn.
-            pass
-        # Rebuild from the same mode as spawn_harness by inspecting argv:
-        # bash -c continue wrapper → continue; else if --resume → resume; else fresh.
-        # Grok: pin --cwd to the project directory so hooks write status under
-        # the project path (not $HOME). We already cd there; '.' is that dir.
-        grok_cwd = (['--cwd', '.'] if self._adapter.id == 'grok' else [])
-        rebuilt = None
-        if mode_argv and mode_argv[0] == 'bash' and len(mode_argv) >= 3:
-            rebuilt = _h.build_continue_wrapper(
-                [remote_bin, *grok_cwd, '-c'],
-                [remote_bin, *grok_cwd],
-                fallback=fallback,
-            )
-        elif len(mode_argv) >= 3 and mode_argv[1] == '--resume':
-            rebuilt = [remote_bin, *grok_cwd, '--resume', mode_argv[2]]
-        elif len(mode_argv) >= 2 and mode_argv[1] == '-c':
-            rebuilt = _h.build_continue_wrapper(
-                [remote_bin, *grok_cwd, '-c'],
-                [remote_bin, *grok_cwd],
-                fallback=fallback,
-            )
-        else:
-            rebuilt = [remote_bin, *grok_cwd]
+        rebuilt = harnesses.rebuild_remote_spawn_argv(
+            argv,
+            remote_bin=remote_bin,
+            adapter_id=self._adapter.id,
+            continue_falls_back_to_fresh=self._adapter.caps.continue_falls_back_to_fresh,
+        )
         # Provider env on the *remote* process only — never the full laptop
         # environ (HOME/USER would rewrite remote paths to the workstation user).
         from ssh_transport import build_ssh_spawn_argv, filter_remote_export_env
@@ -616,6 +598,11 @@ class TerminalView(Gtk.Box):
         # no TERM of its own, so claude would render without color. setdefault
         # leaves a real inherited TERM alone.
         env_dict = dict(env) if env is not None else dict(os.environ)
+        # Installer bin dirs (kimi/opencode/grok/…) are often only on interactive
+        # .bashrc PATH. GUI-launched PM never sees them; a harness installed after
+        # PM started is also invisible. Prepend the same locations remote spawn
+        # already injects so bare ``kimi`` / ``grok`` / ``opencode`` resolve.
+        env_dict = harnesses.with_harness_path(env_dict)
         env_dict.setdefault('TERM', 'xterm-256color')
         env_dict.setdefault('COLORTERM', 'truecolor')
         # Freeze agent auto-updates for the session (Claude-focused; harmless

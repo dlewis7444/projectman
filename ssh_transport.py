@@ -5,12 +5,22 @@ Network I/O is confined to ``run_ssh`` (subprocess) so unit tests mock it.
 """
 from __future__ import annotations
 
+import base64
+import json
 import os
 import shlex
 import subprocess
 from typing import Mapping, Sequence
 
 from hosts import is_safe_project_name
+
+# Home-relative path for virtual project groups (not under remote_projects_dir).
+REMOTE_GROUPS_REL = '.ProjectMan/project_groups.json'
+# Parent dir of REMOTE_GROUPS_REL under $HOME (DRY for mkdir / mktemp).
+_REMOTE_GROUPS_PARENT = REMOTE_GROUPS_REL.rsplit('/', 1)[0]  # '.ProjectMan'
+# Soft cap both directions (push rejects before SSH; fetch bounds with head).
+REMOTE_GROUPS_MAX_BYTES = 1_000_000
+_REMOTE_GROUPS_MAX_BYTES = REMOTE_GROUPS_MAX_BYTES  # alias for internal use
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -96,8 +106,8 @@ def build_remote_shell_command(
     # interactive login shells often ``return`` before that. Cover the common
     # install locations without requiring a full interactive profile.
     parts.append(
-        'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:'
-        '$HOME/.npm-global/bin:$HOME/bin:$PATH"'
+        'export PATH="$HOME/.kimi-code/bin:$HOME/.opencode/bin:$HOME/.grok/bin:'
+        '$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/bin:$PATH"'
     )
     if env:
         for key, val in env.items():
@@ -337,7 +347,106 @@ def build_rmdir_project_argv(
     )
 
 
+def build_fetch_project_groups_argv(
+    ssh_target: str,
+    *,
+    batch: bool = True,
+    connect_timeout: int = 5,
+) -> list[str]:
+    """Fetch remote ``~/.ProjectMan/project_groups.json`` (if present).
+
+    Missing file → exit 0 with empty stdout (not an error). Present file is
+    emitted via ``head -c (max+1)`` so oversize is detectable after transfer
+    without reading unbounded remote content. cat/head failure → non-zero rc
+    (no trailing unconditional ``exit 0``). Remote path is home-relative
+    (``REMOTE_GROUPS_REL``), not under ``remote_projects_dir``.
+    """
+    # Expand $HOME on the remote; never rely on local tilde.
+    # head -c max+1: if result is max+1 bytes, parse_fetch rejects as too large.
+    max_plus = _REMOTE_GROUPS_MAX_BYTES + 1
+    script = (
+        f'f="$HOME/{REMOTE_GROUPS_REL}"; '
+        'if [ ! -f "$f" ]; then exit 0; fi; '
+        f'head -c {max_plus} -- "$f"'
+    )
+    return _bash_lc_argv(
+        ssh_target, script, batch=batch, connect_timeout=connect_timeout,
+    )
+
+
+def build_push_project_groups_argv(
+    ssh_target: str,
+    json_text: str,
+    *,
+    batch: bool = True,
+    connect_timeout: int = 5,
+) -> list[str]:
+    """Atomically write *json_text* to remote ``project_groups.json``.
+
+    Payload is base64-encoded in the local builder and decoded on the remote
+    so raw JSON never enters the remote shell unquoted. Write order:
+    ``mkdir -p`` → ``mktemp`` under parent of ``REMOTE_GROUPS_REL`` →
+    decode → ``mv -f`` into place.
+
+    Raises:
+        ValueError: if UTF-8 byte length of *json_text* exceeds
+            ``REMOTE_GROUPS_MAX_BYTES`` (caller should not open SSH).
+    """
+    if not isinstance(json_text, str):
+        json_text = str(json_text)
+    raw = json_text.encode('utf-8')
+    if len(raw) > _REMOTE_GROUPS_MAX_BYTES:
+        raise ValueError('too large')
+    b64 = base64.b64encode(raw).decode('ascii')
+    # base64 alphabet is shell-safe; still quote for hygiene.
+    b64_q = shlex.quote(b64)
+    parent = _REMOTE_GROUPS_PARENT
+    # mktemp XXXXXX template; cleanup temp on decode failure; mv is atomic.
+    script = (
+        f'mkdir -p -- "$HOME/{parent}"; '
+        f'tmp=$(mktemp "$HOME/{parent}/project_groups.json.tmp.XXXXXX") || exit 1; '
+        f'echo {b64_q} | base64 -d > "$tmp" || {{ rm -f "$tmp"; exit 1; }}; '
+        f'mv -f -- "$tmp" "$HOME/{REMOTE_GROUPS_REL}"'
+    )
+    return _bash_lc_argv(
+        ssh_target, script, batch=batch, connect_timeout=connect_timeout,
+    )
+
+
 # ── Parse helpers ─────────────────────────────────────────────────────────────
+
+def parse_fetch_groups_stdout(
+    stdout: str,
+    *,
+    max_bytes: int = _REMOTE_GROUPS_MAX_BYTES,
+) -> tuple[dict | None, str | None]:
+    """Parse fetch stdout into ``(data_dict_or_None, error_or_None)``.
+
+    - empty / whitespace → ``(None, None)`` (missing file → empty forest)
+    - body larger than *max_bytes* → ``(None, 'too large')``
+    - invalid JSON → ``(None, 'invalid json: …')``
+    - valid JSON non-object → ``(None, 'invalid top-level type')``
+    - valid JSON object → ``(dict, None)``
+    """
+    if stdout is None:
+        stdout = ''
+    # Size cap on the raw body (UTF-8 byte length).
+    try:
+        nbytes = len(stdout.encode('utf-8'))
+    except Exception:
+        nbytes = len(stdout)
+    if nbytes > max_bytes:
+        return None, 'too large'
+    if not stdout.strip():
+        return None, None
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as e:
+        return None, f'invalid json: {e}'
+    if not isinstance(data, dict):
+        return None, 'invalid top-level type'
+    return data, None
+
 
 def parse_ls_project_names(stdout: str) -> list[str]:
     """Parse ``ls -1A`` stdout into project names.

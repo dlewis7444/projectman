@@ -350,8 +350,8 @@ def test_harness_submenu_lists_registered_adapters():
     assert any('OpenCode' in l for l in labels)
 
 
-def test_harness_submenu_lists_three_agents_including_grok(monkeypatch):
-    """T-B4: the third harness (Grok Build) appears in the Harness submenu."""
+def test_harness_submenu_lists_four_agents_including_kimi(monkeypatch):
+    """Harness submenu lists all four first-class backends (incl. Kimi Code)."""
     from settings import Settings
     from gi.repository import GLib
     row = _make_row_with_settings(Settings(harness_default='claude'))
@@ -360,10 +360,11 @@ def test_harness_submenu_lists_three_agents_including_grok(monkeypatch):
         v = row._harness_submenu.get_item_attribute_value(i, 'label', GLib.VariantType('s'))
         if v:
             labels.append(v.get_string())
-    assert len(labels) == 3
+    assert len(labels) == 4
     assert any('Claude Code' in l for l in labels)
     assert any('OpenCode' in l for l in labels)
     assert any('Grok Build' in l for l in labels)
+    assert any('Kimi Code' in l for l in labels)
 
 
 def test_grok_override_selects_grok_adapter(monkeypatch):
@@ -686,27 +687,27 @@ def _make_sidebar():
 
 
 def test_header_icon_buttons_have_tooltips():
-    """S12 audit: the adjacent header icon buttons (New Project + the PAA
-    sparkle) are labeled for keyboard/screen-reader users."""
+    """S12 audit: header icon controls (host + menu + PAA sparkle) have tooltips."""
+    from sidebar import _TIP_ADD_HOST
     sb = _make_sidebar()
     assert sb._paa_btn.get_tooltip_text() == 'Projects Admin Agent'
-    # the "New Project" (+) button is the first child of the header row; assert a
-    # button with that tooltip exists in the sidebar.
-    found = _find_button_with_tooltip(sb, 'New Project')
-    assert found, 'the New Project (+) header button has no tooltip'
+    # Host-line + MenuButton: explanatory Project vs Group tooltip
+    found = _find_control_with_tooltip(sb, _TIP_ADD_HOST)
+    assert found, 'the host + MenuButton has no tooltip'
 
 
 def test_settings_gear_has_tooltip():
     sb = _make_sidebar()
-    assert _find_button_with_tooltip(sb, 'Settings'), 'Settings gear has no tooltip'
+    assert _find_control_with_tooltip(sb, 'Settings'), 'Settings gear has no tooltip'
 
 
-def _find_button_with_tooltip(widget, tooltip):
-    if isinstance(widget, Gtk.Button) and widget.get_tooltip_text() == tooltip:
-        return True
+def _find_control_with_tooltip(widget, tooltip):
+    if isinstance(widget, (Gtk.Button, Gtk.MenuButton)):
+        if widget.get_tooltip_text() == tooltip:
+            return True
     child = widget.get_first_child() if hasattr(widget, 'get_first_child') else None
     while child is not None:
-        if _find_button_with_tooltip(child, tooltip):
+        if _find_control_with_tooltip(child, tooltip):
             return True
         child = child.get_next_sibling()
     return False
@@ -1174,3 +1175,772 @@ def test_migrate_pending_deactivate_rewrites_path(monkeypatch):
     assert '/tmp/old' not in sb._pending_deactivates
     assert '/tmp/new' in sb._pending_deactivates
     assert added == ['/tmp/new']
+
+
+# ===========================================================================
+# Slice C — virtual project groups in the sidebar
+# ===========================================================================
+
+def test_empty_forest_is_flat_project_list():
+    """No groups → project rows only, same count as store projects."""
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar, GroupRow, ProjectRow
+
+    class FakeStore:
+        def load_projects(self):
+            return [
+                Project(name='alpha', path='/tmp/pm-alpha', host_id='localhost'),
+                Project(name='beta', path='/tmp/pm-beta', host_id='localhost'),
+            ]
+
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    assert len(sb._rows) == 2
+    assert sb._group_rows == {}
+    section = sb._sections['localhost']
+    # Host listbox children are ProjectRows only (no GroupRows).
+    for i in range(2):
+        row = section.listbox.get_row_at_index(i)
+        assert isinstance(row, ProjectRow)
+        assert not isinstance(row, GroupRow)
+
+
+def test_group_forest_nests_project_under_group():
+    """One group + membership → GroupRow present; project in nested listbox."""
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar, GroupRow, ProjectRow
+    from project_groups import empty_forest, add_group, set_membership
+
+    alpha = Project(name='alpha', path='/tmp/pm-alpha', host_id='localhost')
+    beta = Project(name='beta', path='/tmp/pm-beta', host_id='localhost')
+
+    class FakeStore:
+        def load_projects(self):
+            return [alpha, beta]
+
+    forest = empty_forest()
+    g = add_group(forest, 'Work')
+    assert set_membership(forest, alpha.project_ref, g.id)
+
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb.set_group_forest('localhost', forest)
+    sb.refresh()
+
+    assert ('localhost', g.id) in sb._group_rows
+    grow = sb._group_rows[('localhost', g.id)]
+    assert isinstance(grow, GroupRow)
+    assert grow._name_label.get_label() == 'Work'
+    assert '/tmp/pm-alpha' in sb._rows
+    assert '/tmp/pm-beta' in sb._rows
+    # Grouped project lives under the group's nested listbox.
+    assert sb._rows['/tmp/pm-alpha'].get_parent() is grow.child_listbox
+    assert isinstance(sb._rows['/tmp/pm-alpha'], ProjectRow)
+    # Ungrouped stays on the host listbox.
+    assert sb._rows['/tmp/pm-beta'].get_parent() is sb._sections['localhost'].listbox
+    # Nested selection still works via _rows.
+    sb.select_project('/tmp/pm-alpha')
+    assert grow.child_listbox.get_selected_row() is sb._rows['/tmp/pm-alpha']
+
+
+def test_group_expand_toggles_forest_and_emits_signal():
+    """Toggle updates forest.groups[id].expanded and emits group-expanded."""
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from project_groups import empty_forest, add_group, set_membership
+
+    proj = Project(name='alpha', path='/tmp/pm-alpha', host_id='localhost')
+
+    class FakeStore:
+        def load_projects(self):
+            return [proj]
+
+    forest = empty_forest()
+    g = add_group(forest, 'Work')
+    set_membership(forest, proj.project_ref, g.id)
+
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb.set_group_forest('localhost', forest)
+    sb.refresh()
+
+    got = []
+    sb.connect('group-expanded',
+               lambda s, hid, gid, exp: got.append((hid, gid, exp)))
+
+    grow = sb._group_rows[('localhost', g.id)]
+    assert forest.groups[g.id].expanded is True
+    assert grow._expanded is True
+
+    grow.toggle_expanded()
+    assert forest.groups[g.id].expanded is False
+    assert grow._expanded is False
+    assert grow._revealer.get_reveal_child() is False
+    assert got == [('localhost', g.id, False)]
+
+    grow.toggle_expanded()
+    assert forest.groups[g.id].expanded is True
+    assert got[-1] == ('localhost', g.id, True)
+
+
+def test_group_row_activate_does_not_emit_project_activated():
+    """Activating a GroupRow toggles expand only — never project-activated."""
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from project_groups import empty_forest, add_group
+
+    class FakeStore:
+        def load_projects(self):
+            return [Project(name='alpha', path='/tmp/pm-alpha', host_id='localhost')]
+
+    forest = empty_forest()
+    g = add_group(forest, 'Empty-ish')
+
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb.set_group_forest('localhost', forest)
+    sb.refresh()
+
+    activated = []
+    sb.connect('project-activated', lambda s, p: activated.append(p))
+    grow = sb._group_rows[('localhost', g.id)]
+    was = grow._expanded
+    sb._on_row_activated(sb._sections['localhost'].listbox, grow)
+    assert grow._expanded is not was
+    assert activated == []
+
+
+def test_set_remote_projects_rebuild_false_batches():
+    """rebuild=False only caches; does not populate until caller refreshes."""
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from hosts import encode_project_ref, HostProfile
+
+    class FakeStore:
+        def load_projects(self):
+            return []
+
+    settings = Settings()
+    settings.hosts = {
+        'bench': {'id': 'bench', 'ssh_target': 'b', 'display_name': 'bench'},
+        'lab': {'id': 'lab', 'ssh_target': 'l', 'display_name': 'lab'},
+    }
+
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=settings)
+    h1 = [
+        Project(name='a', path=encode_project_ref('bench', 'a'),
+                host_id='bench', remote_cwd='~/a'),
+    ]
+    h2 = [
+        Project(name='b', path=encode_project_ref('lab', 'b'),
+                host_id='lab', remote_cwd='~/b'),
+    ]
+    assert sb.set_remote_projects('bench', h1, rebuild=False) is True
+    assert sb.set_remote_projects('lab', h2, rebuild=False) is True
+    # Not rebuilt yet — remote rows not in _rows until refresh
+    assert encode_project_ref('bench', 'a') not in sb._rows
+    assert encode_project_ref('lab', 'b') not in sb._rows
+    sb.refresh()
+    assert encode_project_ref('bench', 'a') in sb._rows
+    assert encode_project_ref('lab', 'b') in sb._rows
+    # Unchanged names → False, no need to rebuild
+    assert sb.set_remote_projects('bench', h1, rebuild=False) is False
+
+
+def test_localhost_groups_load_status_exposed():
+    """Sidebar startup load exposes status so window need not re-load/refresh."""
+    from model import HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+
+    class FakeStore:
+        def load_projects(self):
+            return []
+
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    status, err = sb.localhost_groups_load_status()
+    assert status in ('ok', 'missing', 'invalid', 'error')
+    # conftest isolates DEFAULT_GROUPS_PATH to empty temp → missing
+    assert status == 'missing'
+    assert err is None
+    assert sb.get_group_forest('localhost') is not None
+
+
+def test_set_get_group_forest_by_reference():
+    """set_group_forest stores by reference; expand mutates caller's forest."""
+    from model import HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from project_groups import empty_forest, add_group
+
+    class FakeStore:
+        def load_projects(self):
+            return []
+
+    forest = empty_forest()
+    g = add_group(forest, 'G')
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb.set_group_forest('localhost', forest)
+    assert sb.get_group_forest('localhost') is forest
+    sb.set_group_forest('bench', None)
+    assert sb.get_group_forest('bench') is not None
+    assert sb.get_group_forest('bench').groups == {}
+
+
+def test_group_rows_keyed_by_host_and_group_id():
+    """Same group_id on two hosts → two GroupRows; no overwrite."""
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from project_groups import empty_forest, add_group, set_membership
+    from hosts import encode_project_ref
+
+    local_proj = Project(name='alpha', path='/tmp/pm-alpha', host_id='localhost')
+    remote_ref = encode_project_ref('bench', 'remote-alpha')
+    remote_proj = Project(
+        name='remote-alpha', path=remote_ref, host_id='bench',
+        remote_cwd='/home/user/projects/remote-alpha',
+    )
+
+    class FakeStore:
+        def load_projects(self):
+            return [local_proj]
+
+    shared_gid = 'same-group-id-across-hosts'
+    local_forest = empty_forest()
+    g_local = add_group(local_forest, 'Local Work', group_id=shared_gid)
+    set_membership(local_forest, local_proj.project_ref, g_local.id)
+
+    remote_forest = empty_forest()
+    g_remote = add_group(remote_forest, 'Remote Work', group_id=shared_gid)
+    set_membership(remote_forest, remote_proj.project_ref, g_remote.id)
+
+    settings = Settings(hosts={
+        'bench': {
+            'id': 'bench',
+            'ssh_target': 'user@bench',
+            'display_name': 'Bench',
+        },
+    })
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=settings)
+    sb.set_group_forest('localhost', local_forest)
+    sb.set_group_forest('bench', remote_forest)
+    sb.set_remote_projects('bench', [remote_proj])
+    sb.refresh()
+
+    assert ('localhost', shared_gid) in sb._group_rows
+    assert ('bench', shared_gid) in sb._group_rows
+    grow_local = sb._group_rows[('localhost', shared_gid)]
+    grow_remote = sb._group_rows[('bench', shared_gid)]
+    assert grow_local is not grow_remote
+    assert grow_local.host_id == 'localhost'
+    assert grow_remote.host_id == 'bench'
+    assert grow_local._name_label.get_label() == 'Local Work'
+    assert grow_remote._name_label.get_label() == 'Remote Work'
+    assert grow_local.group_id == grow_remote.group_id == shared_gid
+
+
+def test_select_project_expands_collapsed_ancestor_groups():
+    """select_project on a nested project expands collapsed GroupRow ancestors.
+
+    Durable expand is updated, but group-expanded fires **once per host**
+    (not once per ancestor) so remote persist is a single push.
+    """
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from project_groups import (
+        empty_forest, add_group, set_membership, set_group_expanded,
+    )
+
+    proj = Project(name='nested', path='/tmp/pm-nested', host_id='localhost')
+
+    class FakeStore:
+        def load_projects(self):
+            return [proj]
+
+    forest = empty_forest()
+    parent = add_group(forest, 'Parent')
+    child = add_group(forest, 'Child', parent_id=parent.id)
+    set_membership(forest, proj.project_ref, child.id)
+    set_group_expanded(forest, parent.id, False)
+    set_group_expanded(forest, child.id, False)
+
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb.set_group_forest('localhost', forest)
+    sb.refresh()
+
+    grow_parent = sb._group_rows[('localhost', parent.id)]
+    grow_child = sb._group_rows[('localhost', child.id)]
+    assert grow_parent._revealer.get_reveal_child() is False
+    assert grow_child._revealer.get_reveal_child() is False
+    assert forest.groups[parent.id].expanded is False
+    assert forest.groups[child.id].expanded is False
+
+    got = []
+    sb.connect('group-expanded',
+               lambda s, hid, gid, exp: got.append((hid, gid, exp)))
+
+    sb.select_project('/tmp/pm-nested')
+
+    assert grow_parent._revealer.get_reveal_child() is True
+    assert grow_child._revealer.get_reveal_child() is True
+    # select_project persists expand so the path stays visible after filters clear
+    assert forest.groups[parent.id].expanded is True
+    assert forest.groups[child.id].expanded is True
+    assert grow_child.child_listbox.get_selected_row() is sb._rows['/tmp/pm-nested']
+    # One batched emit per host — not one per ancestor (would be 2 here).
+    assert got == [('localhost', '', True)]
+
+
+def test_name_filter_auto_expands_group_without_persisting():
+    """Name filter shows group and ephemerally reveals matching descendants."""
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from project_groups import (
+        empty_forest, add_group, set_membership, set_group_expanded,
+    )
+
+    alpha = Project(name='alpha', path='/tmp/pm-alpha', host_id='localhost')
+    beta = Project(name='beta', path='/tmp/pm-beta', host_id='localhost')
+
+    class FakeStore:
+        def load_projects(self):
+            return [alpha, beta]
+
+    forest = empty_forest()
+    g = add_group(forest, 'Work')
+    set_membership(forest, alpha.project_ref, g.id)
+    set_group_expanded(forest, g.id, False)
+
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb.set_group_forest('localhost', forest)
+    sb.refresh()
+
+    grow = sb._group_rows[('localhost', g.id)]
+    assert grow._revealer.get_reveal_child() is False
+    assert forest.groups[g.id].expanded is False
+
+    got = []
+    sb.connect('group-expanded',
+               lambda s, hid, gid, exp: got.append((hid, gid, exp)))
+
+    sb.set_filter_text('alp')
+
+    # Group stays addressable and is shown by the host filter.
+    filt = sb._filter_func_for('localhost')
+    assert filt(grow) is True
+    assert filt(sb._rows['/tmp/pm-alpha']) is True
+    assert filt(sb._rows['/tmp/pm-beta']) is False
+    # Ephemeral reveal so the matching project is visible under the group.
+    assert grow._revealer.get_reveal_child() is True
+    assert grow._expanded is True
+    # Durable forest state and signal must not change on filter keystrokes.
+    assert forest.groups[g.id].expanded is False
+    assert got == []
+
+    # Clearing the filter restores the durable collapsed state.
+    sb.set_filter_text('')
+    assert grow._revealer.get_reveal_child() is False
+    assert forest.groups[g.id].expanded is False
+    assert got == []
+
+
+# ===========================================================================
+# Slice D — group menus, move options, create-in-group signals
+# ===========================================================================
+
+def test_group_row_context_menu_has_actions():
+    """GroupRow menu exposes New Project / Subgroup / Rename / Delete."""
+    from model import HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar, GroupRow
+    from project_groups import empty_forest, add_group, MAX_GROUP_DEPTH
+
+    class FakeStore:
+        def load_projects(self):
+            return []
+
+    forest = empty_forest()
+    g = add_group(forest, 'Work')
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb.set_group_forest('localhost', forest)
+    sb.refresh()
+    from gi.repository import GLib
+    grow = sb._group_rows[('localhost', g.id)]
+    assert isinstance(grow, GroupRow)
+    assert hasattr(grow, '_menu')
+    labels = []
+    for i in range(grow._menu.get_n_items()):
+        v = grow._menu.get_item_attribute_value(
+            i, 'label', GLib.VariantType('s'))
+        if v is not None:
+            labels.append(v.get_string())
+    assert 'New Project\u2026' in labels
+    assert 'New Subgroup\u2026' in labels
+    assert 'Rename' in labels
+    assert 'Delete Group' in labels
+    # Depth 1 of 5 → subgroup allowed
+    assert grow._new_subgroup_action.get_enabled() is True
+
+
+def test_group_row_new_subgroup_disabled_at_max_depth():
+    """New Subgroup action disabled when group is already at MAX_GROUP_DEPTH."""
+    from model import HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from project_groups import empty_forest, add_group, MAX_GROUP_DEPTH
+
+    class FakeStore:
+        def load_projects(self):
+            return []
+
+    forest = empty_forest()
+    parent = None
+    for i in range(MAX_GROUP_DEPTH):
+        node = add_group(forest, f'L{i+1}', parent_id=parent)
+        parent = node.id
+    deep_id = parent
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb.set_group_forest('localhost', forest)
+    sb.refresh()
+    grow = sb._group_rows[('localhost', deep_id)]
+    assert grow._new_subgroup_action.get_enabled() is False
+
+
+def test_project_row_move_to_group_options():
+    """set_group_move_options builds breadcrumb submenu; emits project-move-to-group."""
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from project_groups import empty_forest, add_group, set_membership
+
+    alpha = Project(name='alpha', path='/tmp/pm-alpha', host_id='localhost')
+
+    class FakeStore:
+        def load_projects(self):
+            return [alpha]
+
+    forest = empty_forest()
+    parent = add_group(forest, 'Parent')
+    child = add_group(forest, 'Child', parent_id=parent.id)
+
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb.set_group_forest('localhost', forest)
+    sb.refresh()
+
+    opts = sb._group_move_options('localhost')
+    ids = [o[0] for o in opts]
+    assert '' in ids  # Ungrouped
+    assert parent.id in ids
+    assert child.id in ids
+    labels = {o[0]: o[1] for o in opts}
+    assert labels[child.id] == 'Parent / Child'
+
+    from gi.repository import GLib
+    row = sb._rows['/tmp/pm-alpha']
+    # Submenu present after options applied
+    found_move = False
+    for i in range(row._menu.get_n_items()):
+        v = row._menu.get_item_attribute_value(
+            i, 'label', GLib.VariantType('s'))
+        if v and v.get_string() == 'Move to group':
+            found_move = True
+            break
+    assert found_move
+
+    got = []
+    sb.connect('project-move-to-group',
+               lambda s, hid, path, gid: got.append((hid, path, gid)))
+    row.emit('project-move-to-group', child.id)
+    assert got == [('localhost', '/tmp/pm-alpha', child.id)]
+
+
+def test_project_row_no_move_submenu_without_groups():
+    """Empty forest → no Move to group submenu on ProjectRow."""
+    from model import Project, HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from project_groups import empty_forest
+
+    class FakeStore:
+        def load_projects(self):
+            return [Project(name='alpha', path='/tmp/pm-alpha', host_id='localhost')]
+
+    from gi.repository import GLib
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb.set_group_forest('localhost', empty_forest())
+    sb.refresh()
+    row = sb._rows['/tmp/pm-alpha']
+    for i in range(row._menu.get_n_items()):
+        v = row._menu.get_item_attribute_value(
+            i, 'label', GLib.VariantType('s'))
+        if v:
+            assert v.get_string() != 'Move to group'
+
+
+def test_group_create_signal_from_begin_new_subgroup():
+    """Committing NameEntryRow under a group emits group-create with parent id."""
+    from model import HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from project_groups import empty_forest, add_group
+
+    class FakeStore:
+        def load_projects(self):
+            return []
+
+    forest = empty_forest()
+    g = add_group(forest, 'Work')
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb.set_group_forest('localhost', forest)
+    sb.refresh()
+
+    got = []
+    sb.connect('group-create',
+               lambda s, hid, parent, name: got.append((hid, parent, name)))
+    sb._begin_new_subgroup('localhost', g.id)
+    assert sb._new_group_entry_row is not None
+    # Simulate user typing a name and activating.
+    sb._new_group_entry_row._entry.set_text('Sub')
+    sb._new_group_entry_row._on_activate(sb._new_group_entry_row._entry)
+    assert got == [('localhost', g.id, 'Sub')]
+    assert sb._new_group_entry_row is None
+
+
+def test_project_create_in_group_signal():
+    """New project entry inside a group emits project-create-in-group."""
+    from model import HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from project_groups import empty_forest, add_group
+
+    class FakeStore:
+        def load_projects(self):
+            return []
+
+    forest = empty_forest()
+    g = add_group(forest, 'Work')
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb.set_group_forest('localhost', forest)
+    sb.refresh()
+
+    got = []
+    sb.connect('project-create-in-group',
+               lambda s, hid, gid, name: got.append((hid, gid, name)))
+    sb.connect('project-create',
+               lambda s, hid, name: got.append(('ungrouped', hid, name)))
+    sb._begin_new_project_in_group('localhost', g.id)
+    assert sb._new_project_row is not None
+    assert sb._new_project_group_id == g.id
+    sb._new_project_row._entry.set_text('newproj')
+    sb._new_project_row._on_activate(sb._new_project_row._entry)
+    assert got == [('localhost', g.id, 'newproj')]
+
+
+def test_host_header_add_menu_has_project_and_group():
+    """Host + is a MenuButton with labeled New Project / New Group popover."""
+    from model import HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar, _TIP_ADD_HOST
+    from gi.repository import Gtk
+
+    class FakeStore:
+        def load_projects(self):
+            return []
+
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    header = sb._section_headers['localhost']
+    assert isinstance(header._add_btn, Gtk.MenuButton)
+    tip = header._add_btn.get_tooltip_text() or ''
+    assert tip == _TIP_ADD_HOST
+    assert 'Project' in tip and 'Group' in tip
+    assert header._on_new_group is not None
+    assert header._on_add_project is not None
+    # Labeled Popover (not Gio.Menu) so AT-SPI exposes real button names.
+    pop = header._add_btn.get_popover()
+    assert pop is not None
+    box = pop.get_child()
+    labels = []
+    child = box.get_first_child()
+    while child is not None:
+        if isinstance(child, Gtk.Button):
+            labels.append(child.get_label())
+            assert child.get_tooltip_text()  # explanatory tooltips
+        child = child.get_next_sibling()
+    assert labels == ['New Project', 'New Group']
+
+
+def test_group_row_add_menu_has_subgroup_and_project():
+    """Group + MenuButton offers labeled New Subgroup and New Project buttons."""
+    from model import Project, HistoryReader, StatusWatcher
+    from project_groups import empty_forest, add_group
+    from settings import Settings
+    from sidebar import Sidebar
+    from gi.repository import Gtk
+
+    class FakeStore:
+        def load_projects(self):
+            return [Project(name='alpha', path='/tmp/pm-alpha', host_id='localhost')]
+
+    forest = empty_forest()
+    g = add_group(forest, 'Work')
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb.set_group_forest('localhost', forest)
+    sb.refresh()
+    grow = sb._group_rows[('localhost', g.id)]
+    assert isinstance(grow._add_btn, Gtk.MenuButton)
+    tip = grow._add_btn.get_tooltip_text() or ''
+    assert 'Subgroup' in tip or 'Project' in tip
+    pop = grow._add_btn.get_popover()
+    assert pop is not None
+    box = pop.get_child()
+    labels = []
+    child = box.get_first_child()
+    while child is not None:
+        if isinstance(child, Gtk.Button):
+            labels.append(child.get_label())
+            assert child.get_tooltip_text()
+        child = child.get_next_sibling()
+    assert 'New Project' in labels
+    assert 'New Subgroup' in labels
+
+
+
+def test_new_project_empty_name_flashes_required():
+    """Empty Enter keeps the row and shows Name required (no silent no-op)."""
+    from sidebar import NewProjectEntryRow
+    committed = []
+    row = NewProjectEntryRow(on_commit=lambda n: committed.append(n), on_cancel=lambda: None)
+    row._entry.set_text('   ')
+    row._on_activate(row._entry)
+    assert committed == []
+    assert row._entry.has_css_class('error')
+    assert row._entry.get_placeholder_text() == 'Name required'
+
+
+def test_close_session_button_tooltip_and_a11y_label():
+    """Deactivate control is labeled Close session with explanatory tooltip."""
+    from sidebar import _TIP_CLOSE_SESSION, ProjectRow
+    from model import Project
+    from gi.repository import Gtk
+    proj = Project(name='x', path='/tmp/pm-x', host_id='localhost')
+    row = ProjectRow(proj, None, None, settings=None)
+    tip = row._deactivate_btn.get_tooltip_text() or ''
+    assert tip == _TIP_CLOSE_SESSION
+    assert 'Close session' in tip
+    assert 'Open it again to continue the session' in tip
+    assert 'sidebar' not in tip.lower()
+    # Accessible name is Close session (not Deactivate)
+    assert 'Deactivate' not in tip
+
+
+def test_new_group_dialog_disables_create_until_named():
+    """Create stays disabled for empty group name (no silent dismiss)."""
+    from model import HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from gi.repository import Adw
+
+    class FakeStore:
+        def load_projects(self):
+            return []
+
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    # Present dialog without a real root — exercise construction path.
+    # We inspect by monkeypatching present and capturing the dialog.
+    captured = []
+    real_present = Adw.AlertDialog.present
+
+    def capture(self, parent=None):
+        captured.append(self)
+        # do not present to display
+
+    Adw.AlertDialog.present = capture
+    try:
+        sb._prompt_new_group_name('localhost', '')
+    finally:
+        Adw.AlertDialog.present = real_present
+    assert captured, 'dialog was not built'
+    d = captured[0]
+    assert d.get_response_enabled('create') is False
+    entry = d.get_extra_child()
+    entry.set_text('MyGroup')
+    # changed signal should enable Create
+    assert d.get_response_enabled('create') is True
+    entry.set_text('  ')
+    assert d.get_response_enabled('create') is False
+
+
+def test_new_group_switches_section_filter_to_all():
+    """Creating a group forces host section mode to 'all' so it is visible."""
+    from model import HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+
+    class FakeStore:
+        def load_projects(self):
+            return []
+
+    settings = Settings()
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=settings)
+    sb.set_host_section_mode('localhost', 'active')
+    assert sb._section_mode('localhost') == 'active'
+    sb._on_section_new_group('localhost')
+    assert sb._section_mode('localhost') == 'all'
+
+
+def test_create_in_group_membership_logic():
+    """Pure path: create membership after project create uses project_ref."""
+    from hosts import LOCALHOST_ID, encode_project_ref
+    from project_groups import empty_forest, add_group, set_membership
+
+    forest = empty_forest()
+    g = add_group(forest, 'Work')
+    path = '/tmp/pm-created'
+    ref = encode_project_ref(LOCALHOST_ID, path)
+    assert set_membership(forest, ref, g.id)
+    assert forest.membership[ref] == g.id
+
+
+def test_escape_cancels_new_project_even_when_not_focused():
+    """Sidebar CAPTURE Escape dismisses create row (filter-focused case)."""
+    from model import HistoryReader, StatusWatcher
+    from settings import Settings
+    from sidebar import Sidebar
+    from gi.repository import Gdk
+
+    class FakeStore:
+        def load_projects(self):
+            return []
+
+    sb = Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=Settings())
+    sb._on_add_project(None, host_id='localhost')
+    assert sb._new_project_row is not None
+    # Simulate Escape without focusing the create entry (filter has focus).
+    handled = sb._on_sidebar_capture_key(None, Gdk.KEY_Escape, 0, 0)
+    assert handled is True
+    assert sb._new_project_row is None
+
+
+def test_new_project_rejects_slash_and_shell_meta_with_feedback():
+    from sidebar import NewProjectEntryRow
+    committed = []
+    row = NewProjectEntryRow(on_commit=lambda n: committed.append(n), on_cancel=lambda: None)
+    row._entry.set_text('a/b')
+    row._on_activate(row._entry)
+    assert committed == []
+    assert row._entry.has_css_class('error')
+    assert '/' in (row._entry.get_placeholder_text() or '') or 'cannot' in (row._entry.get_placeholder_text() or '').lower()
+    row._entry.set_text('$(whoami)')
+    row._on_activate(row._entry)
+    assert committed == []
+    assert row._entry.has_css_class('error')
+    row._entry.set_text('ok-name')
+    row._on_changed(row._entry)
+    assert not row._entry.has_css_class('error')
+    row._on_activate(row._entry)
+    assert committed == ['ok-name']
+

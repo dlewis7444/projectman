@@ -8,6 +8,7 @@ gi.require_version('Adw', '1')
 gi.require_version('Vte', '3.91')
 from gi.repository import Gtk, Adw, Vte, GLib, Gdk, Pango
 
+from settings import match_vte_key_capture
 from terminal import _TERMINAL_PALETTES
 
 
@@ -174,8 +175,8 @@ class PAAWindow(Adw.Window):
 
         self._terminal.connect('child-exited', self._on_child_exited)
 
-        # Intercept Shift+Enter at CAPTURE phase on the VTE widget — GTK4/Wayland
-        # strips the Shift modifier before VTE sees it; feed kitty protocol directly.
+        # CAPTURE-phase VTE key remaps (settings.vte_key_captures['claude'] —
+        # PAA always spawns Claude). Shift+Enter lives there, not hard-coded.
         term_key_ctrl = Gtk.EventControllerKey.new()
         term_key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         term_key_ctrl.connect('key-pressed', self._on_terminal_key_pressed)
@@ -270,10 +271,11 @@ class PAAWindow(Adw.Window):
         self._child_pid = None
 
     def _on_terminal_key_pressed(self, controller, keyval, keycode, state):
-        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-            if state & Gdk.ModifierType.SHIFT_MASK:
-                self._terminal.feed_child(b'\x1b[13;2u')
-                return True
+        captures = self._settings.vte_captures_for('claude')
+        feed = match_vte_key_capture(captures, int(keyval), int(state))
+        if feed is not None:
+            self._terminal.feed_child(feed)
+            return True
         if keyval in (Gdk.KEY_c, Gdk.KEY_C):
             if (state & Gdk.ModifierType.CONTROL_MASK) and (state & Gdk.ModifierType.SHIFT_MASK):
                 self._terminal.copy_clipboard_format(Vte.Format.TEXT)

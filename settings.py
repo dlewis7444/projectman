@@ -1,3 +1,4 @@
+import copy
 import os
 import re
 import json
@@ -16,6 +17,163 @@ _LEGACY_1M_MODEL_RE = re.compile(r'glm|deepseek', re.IGNORECASE)
 # defined on the active provider (free-text ids), or leave a tier on '' to use
 # the provider's first/default model. See models.build_spawn_env.
 TIERS = ('opus', 'sonnet', 'haiku', 'subagent', 'fable')
+
+# VTE does not pass many modified chords through correctly:
+#   * GTK4/Wayland strips Shift on Enter before VTE sees it
+#   * VTE encodes Ctrl+punctuation (e.g. Ctrl+; / Ctrl+') as bare punctuation
+# ProjectMan intercepts these at CAPTURE and feeds Kitty CSI-u sequences so the
+# harness receives the intended binding. Per-harness lists live in settings.json
+# under ``vte_key_captures`` — not hard-coded in terminal.py.
+#
+# Entry shape: {"key": <Gdk key name>, "mods": ["shift"|"control"|…], "feed": "<csi-u>"}
+# ``Return`` also matches KP_Enter. Feed is the exact byte sequence for feed_child.
+DEFAULT_VTE_KEY_CAPTURES = {
+    'claude': [
+        {'key': 'Return', 'mods': ['shift'], 'feed': '\x1b[13;2u'},
+    ],
+    'opencode': [
+        {'key': 'Return', 'mods': ['shift'], 'feed': '\x1b[13;2u'},
+    ],
+    'grok': [
+        {'key': 'Return', 'mods': ['shift'], 'feed': '\x1b[13;2u'},
+        # Grok prompt-queue toggle (Linux primary + Windows-console alt).
+        # See docs/grok-ctrl-semicolon-queue-shortcut.md.
+        {'key': 'semicolon', 'mods': ['control'], 'feed': '\x1b[59;5u'},
+        {'key': 'apostrophe', 'mods': ['control'], 'feed': '\x1b[39;5u'},
+    ],
+    'kimi': [
+        {'key': 'Return', 'mods': ['shift'], 'feed': '\x1b[13;2u'},
+    ],
+}
+
+# Gdk key name → keyvals (stable numeric values; Return pairs with KP_Enter).
+_VTE_KEY_NAME_TO_KEYVALS = {
+    'return': (65293, 65421),       # Gdk.KEY_Return, Gdk.KEY_KP_Enter
+    'enter': (65293, 65421),
+    'semicolon': (59,),             # Gdk.KEY_semicolon
+    'apostrophe': (39,),            # Gdk.KEY_apostrophe
+    'period': (46,),                # Gdk.KEY_period
+}
+
+# Modifier name → Gdk.ModifierType mask bits (int) — headless-testable.
+_VTE_MOD_NAME_TO_MASK = {
+    'shift': 1,                     # SHIFT_MASK
+    'control': 4,                   # CONTROL_MASK
+    'ctrl': 4,
+    'alt': 8,                       # ALT_MASK / MOD1
+    'mod1': 8,
+    'super': 67108864,              # SUPER_MASK
+}
+
+
+def default_vte_key_captures() -> dict:
+    """Deep copy of DEFAULT_VTE_KEY_CAPTURES (safe default_factory)."""
+    return copy.deepcopy(DEFAULT_VTE_KEY_CAPTURES)
+
+
+def normalize_vte_key_captures(raw) -> dict:
+    """Return a sanitized ``{harness_id: [entry, ...]}`` map.
+
+    Drops non-dict harness buckets and malformed entries. Does not invent
+    missing harness keys — an explicit empty map means "no captures".
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for harness_id, entries in raw.items():
+        if not isinstance(harness_id, str) or not harness_id:
+            continue
+        if not isinstance(entries, list):
+            continue
+        clean = []
+        for ent in entries:
+            if not isinstance(ent, dict):
+                continue
+            key = ent.get('key')
+            feed = ent.get('feed')
+            mods = ent.get('mods', [])
+            if not isinstance(key, str) or not key.strip():
+                continue
+            if not isinstance(feed, str) or not feed:
+                continue
+            if not isinstance(mods, list):
+                continue
+            mod_names = []
+            for m in mods:
+                if isinstance(m, str) and m.strip():
+                    mod_names.append(m.strip().lower())
+            clean.append({
+                'key': key.strip(),
+                'mods': mod_names,
+                'feed': feed,
+            })
+        out[harness_id] = clean
+    return out
+
+
+def fill_missing_vte_key_captures(captures: dict) -> dict:
+    """Fill harness keys present in defaults but absent from a partial map.
+
+    Upgrade path for existing ``settings.json`` written before a new harness
+    was added (e.g. kimi): missing keys get ``DEFAULT_VTE_KEY_CAPTURES`` entries.
+
+    * Fully empty map ``{}`` is intentional (user disabled all) — left alone.
+    * Explicit empty list for a harness is intentional — that key is present,
+      so it is **not** overwritten.
+    * Only **missing** keys are filled; present keys (empty or not) stay.
+    """
+    if not isinstance(captures, dict) or not captures:
+        return captures if isinstance(captures, dict) else {}
+    out = dict(captures)
+    for hid, entries in DEFAULT_VTE_KEY_CAPTURES.items():
+        if hid not in out:
+            out[hid] = copy.deepcopy(entries)
+    return out
+
+
+def match_vte_key_capture(captures, keyval: int, state: int) -> bytes | None:
+    """If ``(keyval, state)`` matches a capture entry, return feed bytes.
+
+    Required mods must all be present; extra mods (CapsLock, etc.) are allowed.
+    Unknown key names never match. Pure / headless (no Gdk import).
+    """
+    if not captures:
+        return None
+    state_bits = int(state)
+    for ent in captures:
+        if not isinstance(ent, dict):
+            continue
+        key_name = (ent.get('key') or '').strip().lower()
+        keyvals = _VTE_KEY_NAME_TO_KEYVALS.get(key_name)
+        if not keyvals:
+            # Allow a bare decimal keyval string as escape hatch.
+            try:
+                keyvals = (int(key_name),)
+            except (TypeError, ValueError):
+                continue
+        if keyval not in keyvals:
+            continue
+        mods = ent.get('mods') or []
+        needed = 0
+        ok = True
+        for m in mods:
+            if not isinstance(m, str):
+                ok = False
+                break
+            mask = _VTE_MOD_NAME_TO_MASK.get(m.strip().lower())
+            if mask is None:
+                ok = False
+                break
+            needed |= mask
+        if not ok:
+            continue
+        if (state_bits & needed) != needed:
+            continue
+        feed = ent.get('feed')
+        if not isinstance(feed, str) or not feed:
+            continue
+        return feed.encode('latin-1', errors='replace')
+    return None
 
 
 @dataclass
@@ -102,10 +260,26 @@ class Settings:
     host_section_mode: dict = field(default_factory=dict)
     # remote_health_interval_sec: poll interval for remote health; 0 = off.
     remote_health_interval_sec: int = 30
+    # --- VTE key captures (per harness) ---
+    # {harness_id: [{"key": str, "mods": [str, ...], "feed": str}, ...]}
+    # CAPTURE-phase remaps for chords VTE cannot encode (Shift+Enter, Grok
+    # Ctrl+; / Ctrl+', …). Defaults cover all built-in harnesses.
+    vte_key_captures: dict = field(default_factory=default_vte_key_captures)
 
     @property
     def resolved_projects_dir(self) -> str:
         return os.path.expanduser(self.projects_dir)
+
+    def vte_captures_for(self, harness_id: str) -> list:
+        """Normalized capture list for ``harness_id`` (possibly empty)."""
+        if not isinstance(self.vte_key_captures, dict):
+            return []
+        entries = self.vte_key_captures.get(harness_id or '')
+        if not isinstance(entries, list):
+            return []
+        # Re-normalize a single bucket so callers never see garbage shapes.
+        cleaned = normalize_vte_key_captures({harness_id: entries})
+        return cleaned.get(harness_id, [])
 
     @property
     def resolved_claude_binary(self) -> str:
@@ -229,6 +403,11 @@ class Settings:
             inst._migrate_claude_binary()
             inst._migrate_old_model_shape()
             inst._migrate_host_axis()
+            # Sanitize VTE capture map (drop garbage entries; keep explicit empty).
+            # Then fill harness keys missing from a partial map so upgrades pick
+            # up new defaults (e.g. kimi) without clobbering user empties.
+            inst.vte_key_captures = fill_missing_vte_key_captures(
+                normalize_vte_key_captures(inst.vte_key_captures))
             return inst
         except FileNotFoundError:
             # FB-7 (power #2): on a genuine first run (no settings.json yet),

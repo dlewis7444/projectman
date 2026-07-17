@@ -140,11 +140,38 @@ class ProjectStore:
         shutil.move(src, dest)
 
     def create_project(self, name):
+        """Create a new project directory.
+
+        Raises ValueError if the name is invalid (slash, shell metacharacters,
+        empty, leading dot). Raises FileExistsError if a path with that name
+        already exists — callers must not treat a pre-existing directory as a
+        successful create (that produced a false "New project" toast).
+        """
+        from hosts import project_name_reject_reason
+        reason = project_name_reject_reason(name)
+        if reason:
+            raise ValueError(reason)
+        name = name.strip()
         path = os.path.join(self._projects_dir(), name)
-        os.makedirs(path, exist_ok=True)
+        if os.path.exists(path):
+            raise FileExistsError(path)
+        os.makedirs(path)
 
     def rename_project(self, project, new_name):
+        """Rename a local project directory.
+
+        Uses the same name policy as :meth:`create_project` (no slash, no
+        shell metacharacters, no leading dot). Raises ``ValueError`` on
+        invalid names and ``FileExistsError`` if the destination exists.
+        """
+        from hosts import project_name_reject_reason
+        reason = project_name_reject_reason(new_name)
+        if reason:
+            raise ValueError(reason)
+        new_name = new_name.strip()
         new_path = os.path.join(self._projects_dir(), new_name)
+        if os.path.exists(new_path):
+            raise FileExistsError(new_path)
         os.rename(project.path, new_path)
 
 
