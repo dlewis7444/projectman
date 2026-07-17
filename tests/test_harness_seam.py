@@ -832,6 +832,9 @@ class TestContinueFallbackPolicyIsAdapterOwned:
         assert harnesses.HarnessCaps().continue_falls_back_to_fresh is True
         assert harnesses.get_adapter('claude').caps.continue_falls_back_to_fresh is True
         assert harnesses.get_adapter('opencode').caps.continue_falls_back_to_fresh is True
+        # Kimi is the exception: kimi -c itself starts a fresh session when
+        # nothing is continuable (probed), so PM must NOT wrap with || kimi.
+        assert harnesses.get_adapter('kimi').caps.continue_falls_back_to_fresh is False
 
 
 # --- A3 / M-P3.5: duplicate/builtin adapter id collision guard ---------------
@@ -917,9 +920,11 @@ class TestRegisterAdapterCollisionGuard:
         ADAPTERS at import, so BUILTIN_HARNESS_IDS = frozenset(ADAPTERS) picks it
         up automatically."""
         import harnesses
-        assert harnesses.BUILTIN_HARNESS_IDS == frozenset({'claude', 'opencode', 'grok'})
-        # Grok is genuinely a builtin → it can't be replaced by a custom adapter.
+        assert harnesses.BUILTIN_HARNESS_IDS == frozenset(
+            {'claude', 'opencode', 'grok', 'kimi'})
+        # Grok/Kimi are genuinely builtins → can't be replaced by a custom adapter.
         assert 'grok' in harnesses.BUILTIN_HARNESS_IDS
+        assert 'kimi' in harnesses.BUILTIN_HARNESS_IDS
 
 
 # --- A4 / M-P3.1 verify-only: rich_status gates the sidebar dot remap --------

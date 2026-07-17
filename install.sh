@@ -14,6 +14,8 @@ GROK_HOOKS_DIR="$HOME/.grok/hooks"
 # install.sh no longer duplicates them here; the unused GROK_*_DEST vars were
 # removed, SC2034.)
 GROK_CONFIG_TOML="$HOME/.grok/config.toml"
+KIMI_HOOKS_DIR="$HOME/.kimi-code/hooks"
+KIMI_CONFIG_TOML="$HOME/.kimi-code/config.toml"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── colours ────────────────────────────────────────────────────────────────────
@@ -36,6 +38,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     echo "  The hook script at $HOOK_DEST was left in place."
     echo "  The opencode status bridge at $OPENCODE_PLUGIN_DEST was left in place."
     echo "  The grok status bridge in $GROK_HOOKS_DIR was left in place."
+    echo "  The kimi status bridge in $KIMI_HOOKS_DIR was left in place."
     echo "  The data directory ~/.ProjectMan/ was left in place."
     exit 0
 fi
@@ -126,9 +129,9 @@ if [[ "$_has_session_bus" != true ]]; then
 fi
 unset _has_session_bus
 
-# claude is OPTIONAL (ProjectMan drives claude/opencode/grok — install whichever
-# you use). Just record its presence so the hook summary below tells a coherent
-# story instead of a warn-now / "registered!"-later contradiction (S1).
+# claude is OPTIONAL (ProjectMan drives claude/opencode/grok/kimi — install
+# whichever you use). Just record its presence so the hook summary below tells a
+# coherent story instead of a warn-now / "registered!"-later contradiction (S1).
 CLAUDE_PRESENT=true
 command -v claude &>/dev/null || CLAUDE_PRESENT=false
 
@@ -277,7 +280,7 @@ register_claude_hooks
 # the executable python3 status script; for opencode the single plugin file.
 # Idempotent; the harness need not be installed for this to be harmless.
 install_bridge_via_manifest() {
-    # $1 = harness id (claude|opencode|grok). Echoes installed|already|<other>
+    # $1 = harness id (opencode|grok|kimi). Echoes installed|already|<other>
     # on stdout for the caller; failures surface on stderr (not swallowed).
     local harness_id="$1"
     local errf
@@ -361,6 +364,27 @@ install_grok_bridge() {
 info "Installing grok status bridge ..."
 install_grok_bridge
 
+# ── kimi status bridge ──────────────────────────────────────────────────────────
+# Status script via shared manifest; [[hooks]] merge into config.toml is the
+# post-step inside harnesses.install_harness_bridge for kimi (no separate hooks
+# JSON — Kimi registers hooks as TOML array tables).
+KIMI_BRIDGE_STATUS="skipped"   # one of: installed, already, skipped, error
+install_kimi_bridge() {
+    local result
+    if ! result=$(install_bridge_via_manifest kimi); then
+        KIMI_BRIDGE_STATUS="error"
+        return
+    fi
+    case "$result" in
+        installed) KIMI_BRIDGE_STATUS="installed" ;;
+        already)   KIMI_BRIDGE_STATUS="already" ;;
+        *)         KIMI_BRIDGE_STATUS="skipped" ;;
+    esac
+}
+
+info "Installing kimi status bridge ..."
+install_kimi_bridge
+
 # ── done ───────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}ProjectMan installed.${NC}"
@@ -381,7 +405,7 @@ if [[ "$CLAUDE_PRESENT" == "false" ]]; then
         registered|already)
             echo "  • Claude Code not found — its status hooks are staged in"
             echo "    $CLAUDE_SETTINGS and will activate if you install claude."
-            echo "    (ProjectMan also drives OpenCode and Grok; Claude is optional.)"
+            echo "    (ProjectMan also drives OpenCode, Grok, and Kimi; Claude is optional.)"
             ;;
         skipped|manual|*)
             echo "  • Claude Code not found, and its hooks weren't staged. If you"
@@ -435,6 +459,16 @@ case "$GROK_COMPAT_STATUS" in
         echo "  • Grok's Claude-hook overlap is already disabled in"
         echo "    $GROK_CONFIG_TOML ([compat.claude] hooks = false),"
         echo "    so its status dot fires once."
+        ;;
+esac
+case "$KIMI_BRIDGE_STATUS" in
+    installed)
+        echo "  • Kimi Code status bridge installed to $KIMI_HOOKS_DIR/"
+        echo "    (hooks registered in $KIMI_CONFIG_TOML)."
+        echo "    Restart any running Kimi sessions for it to take effect."
+        ;;
+    already)
+        echo "  • Kimi Code status bridge already up to date in $KIMI_HOOKS_DIR/."
         ;;
 esac
 echo ""

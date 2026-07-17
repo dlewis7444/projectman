@@ -563,3 +563,26 @@ def test_on_project_create_oserror_emits_no_toast(tmp_path):
     )
     AppWindow._on_project_create(fake, object(), 'localhost', 'nope')
     assert toasts == []
+
+
+def test_on_project_create_duplicate_toasts_already_exists(tmp_path):
+    """FileExistsError → error toast, not the success "New project …" toast."""
+    from window import AppWindow
+    toasts = []
+    projects = tmp_path / 'projects'
+    projects.mkdir()
+    (projects / 'taken').mkdir()
+    from model import ProjectStore
+    s = Settings()
+    s.projects_dir = str(projects)
+    store = ProjectStore(s)
+    fake = types.SimpleNamespace(
+        _settings=s,
+        _store=store,
+        _sidebar=types.SimpleNamespace(refresh=lambda: toasts.append('REFRESH')),
+        _show_toast=lambda text, timeout=5: toasts.append(text),
+        _on_project_activated=lambda sb, path: toasts.append(('ACT', path)),
+        _project_created_toast_text=lambda name: f"New project '{name}' — harness: X",
+    )
+    AppWindow._on_project_create(fake, object(), 'localhost', 'taken')
+    assert toasts == ["A project named 'taken' already exists"]

@@ -6,7 +6,8 @@ A GTK4/Adwaita desktop cockpit for AI coding harnesses.
 
 Sidebar of projects on the left, embedded VTE terminal on the right. Each project
 runs the harness you choose — [Claude Code](https://claude.ai/code),
-[OpenCode](https://opencode.ai), or [Grok Build](https://x.ai/cli) — with session
+[OpenCode](https://opencode.ai), [Grok Build](https://x.ai/cli), or
+[Kimi Code](https://moonshotai.github.io/kimi-code/en/) — with session
 restore, live status dots, and optional Zellij multiplexing. Projects live under
 `~/.ProjectMan/projects/` by default (configurable in Settings).
 
@@ -20,6 +21,7 @@ restore, live status dots, and optional Zellij multiplexing. Projects live under
   - [Claude Code](#claude-code)
   - [OpenCode](#opencode)
   - [Grok Build](#grok-build)
+  - [Kimi Code](#kimi-code)
 - [First-run setup](#first-run-setup)
 - [Projects Admin Agent (PAA)](#projects-admin-agent-paa)
 - [Configuration](#configuration)
@@ -73,7 +75,7 @@ python -m pytest
 ## Features
 
 - Per-project harness sessions with automatic session restore
-- Pluggable harnesses — Claude Code, OpenCode, and Grok Build side by side
+- Pluggable harnesses — Claude Code, OpenCode, Grok Build, and Kimi Code side by side
 - Live status indicators: working / waiting / done / idle
 - Session history with expand/collapse per project
 - Optional [Zellij](https://zellij.dev) multiplexer integration
@@ -111,7 +113,7 @@ ProjectMan crashes on first launch.
 |-----------|--------|
 | Python 3.10+ | Application runtime |
 | Node.js | Claude Code status-indicator hook only |
-| At least one harness binary | `claude`, `opencode`, and/or `grok` on `PATH` |
+| At least one harness binary | `claude`, `opencode`, `grok`, and/or `kimi` on `PATH` |
 
 **Optional:** `zellij` for multiplexed terminal sessions.
 
@@ -126,6 +128,7 @@ sidebar **Harness** submenu only when its binary is on your `PATH`.
 | **Claude Code** | `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | **OpenCode** | `opencode` | `curl -fsSL https://opencode.ai/install \| bash` |
 | **Grok Build** | `grok` | `curl -fsSL https://x.ai/cli/install.sh \| bash` |
+| **Kimi Code** | `kimi` | `curl -fsSL https://code.kimi.com/kimi-code/install.sh \| bash` |
 
 Deep spawn/continue/resume behavior and model flags live under
 [Harnesses](#harnesses). Bridge/hook registration is under
@@ -144,7 +147,7 @@ cd projectman
 This installs ProjectMan to `~/.local/share/projectman/`, creates a `projectman`
 launcher in `~/.local/bin/`, and registers a desktop entry so it appears in your
 app launcher (GNOME, KDE, etc.). The installer also places harness status bridges
-where it can (Claude hook script, OpenCode plugin, Grok hooks) — see
+where it can (Claude hook script, OpenCode plugin, Grok hooks, Kimi hooks) — see
 [First-run setup](#first-run-setup) for any manual registration still required.
 
 ### Migrate existing projects
@@ -209,6 +212,7 @@ fresh.
 | **Claude Code** | `claude` | `claude -c` (falls back to fresh `claude` if nothing to continue) | `claude --resume <session_id>` |
 | **OpenCode** | `opencode` | `opencode -c` | `opencode -s <id>` |
 | **Grok Build** | `grok` | `grok -c` (falls back to fresh `grok` if nothing to continue) | `grok -r <id>` |
+| **Kimi Code** | `kimi` | `kimi -c` (kimi itself starts fresh when nothing to continue; PM does **not** wrap with `\|\| kimi`) | `kimi -S <id>` |
 
 ### Claude Code
 
@@ -268,6 +272,33 @@ Grok auto-updates by default; ProjectMan does not suppress it. To pin a version:
 [cli]
 auto_update = false
 ```
+
+### Kimi Code
+
+- **Install** lands the binary at `~/.kimi-code/bin/kimi` (ensure that dir is on
+  `PATH`, or rely on remote-spawn PATH prepending which includes it).
+- There is **no** `kimi sessions list` CLI. ProjectMan lists sessions by scanning
+  `~/.kimi-code/session_index.jsonl` + each session’s `state.json`, filtered by
+  exact `workDir` match to the project path (newest 7).
+- **Continue:** `kimi -c`. When nothing is continuable, kimi itself starts a
+  fresh session in-process and exits 0 — so ProjectMan’s continue wrapper does
+  **not** fall back with `|| kimi` (unlike Claude/OpenCode/Grok).
+- **Resume:** `kimi -S <sessionId>` (official `--session`; prefer `-S` over the
+  hidden `-r` alias).
+- **Per-project model** is passed as `-m <alias>` — a model key from
+  `~/.kimi-code/config.toml` (e.g. `kimi-code/kimi-for-coding`). Kimi reaches
+  providers via its own config; no env/ccr injection.
+- **Status dots** need the Kimi bridge: status script under
+  `~/.kimi-code/hooks/` plus `[[hooks]]` entries merged into
+  `~/.kimi-code/config.toml`. Installed by `install.sh` or **Settings →
+  Harnesses → Install bridge**. Details:
+  [`bridges/kimi/README.md`](bridges/kimi/README.md).
+- **Waiting** maps directly from Kimi’s `PermissionRequest` hook (fires just
+  before the approval prompt) — no silence-age inference needed.
+
+Auth: `kimi login` (device-code OAuth). Presence of
+`~/.kimi-code/credentials/kimi-code.json` or `~/.kimi-code/oauth/kimi-code` is
+shown on the Harnesses page (contents never read).
 
 #### Grok + local endpoints
 
@@ -331,6 +362,13 @@ does not ship an in-app JSON editor for it.
 script under `~/.grok/hooks/` (paths rewritten to absolute at install time), or
 use **Settings → Harnesses → Install bridge**. See
 [`bridges/grok/README.md`](bridges/grok/README.md).
+
+### Kimi Code bridge
+
+`install.sh` installs the status script under `~/.kimi-code/hooks/` and merges
+idempotent `[[hooks]]` entries into `~/.kimi-code/config.toml` (Kimi has no
+separate hooks JSON), or use **Settings → Harnesses → Install bridge**. See
+[`bridges/kimi/README.md`](bridges/kimi/README.md).
 
 ## Projects Admin Agent (PAA)
 

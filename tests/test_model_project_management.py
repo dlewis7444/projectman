@@ -11,11 +11,13 @@ def test_create_project(tmp_path):
     assert (tmp_path / 'my-project').is_dir()
 
 
-def test_create_project_exist_ok(tmp_path):
+def test_create_project_raises_if_exists(tmp_path):
+    """Duplicate names must not silently succeed (false "New project" toast)."""
     settings = Settings(projects_dir=str(tmp_path))
     store = ProjectStore(settings)
     (tmp_path / 'existing').mkdir()
-    store.create_project('existing')  # must not raise
+    with pytest.raises(FileExistsError):
+        store.create_project('existing')
     assert (tmp_path / 'existing').is_dir()
 
 
@@ -46,3 +48,41 @@ def test_rename_project_appears_in_load(tmp_path):
     new_projects = store.load_projects()
     assert any(p.name == 'renamed' for p in new_projects)
     assert not any(p.name == 'myproject' for p in new_projects)
+
+
+def test_create_project_rejects_unsafe_name(tmp_path):
+    settings = Settings(projects_dir=str(tmp_path))
+    store = ProjectStore(settings)
+    with pytest.raises(ValueError, match='invalid|cannot|/|Name'):
+        store.create_project('$(whoami)')
+    with pytest.raises(ValueError, match='cannot contain'):
+        store.create_project('a/b')
+    assert not (tmp_path / '$(whoami)').exists()
+
+
+def test_rename_project_rejects_unsafe_name(tmp_path):
+    """Rename must use the same shell-meta policy as create."""
+    settings = Settings(projects_dir=str(tmp_path))
+    store = ProjectStore(settings)
+    (tmp_path / 'safe').mkdir()
+    projects = store.load_projects()
+    with pytest.raises(ValueError, match='invalid|cannot|/|Name'):
+        store.rename_project(projects[0], '$(whoami)')
+    with pytest.raises(ValueError, match='cannot contain'):
+        store.rename_project(projects[0], 'a/b')
+    with pytest.raises(ValueError, match='start with'):
+        store.rename_project(projects[0], '.hidden')
+    assert (tmp_path / 'safe').is_dir()
+    assert not (tmp_path / '$(whoami)').exists()
+
+
+def test_rename_project_rejects_existing_destination(tmp_path):
+    settings = Settings(projects_dir=str(tmp_path))
+    store = ProjectStore(settings)
+    (tmp_path / 'alpha').mkdir()
+    (tmp_path / 'beta').mkdir()
+    projects = {p.name: p for p in store.load_projects()}
+    with pytest.raises(FileExistsError):
+        store.rename_project(projects['alpha'], 'beta')
+    assert (tmp_path / 'alpha').is_dir()
+

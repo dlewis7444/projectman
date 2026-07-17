@@ -113,6 +113,20 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar = Sidebar(store, history, watcher, version=self._version,
                                 settings=settings)
         self._sidebar.set_ntfy_enabled(settings.ntfy_enabled)
+        # Virtual project groups load status per host:
+        # 'ok' | 'missing' | 'invalid' | 'error' | 'pending' (remote never fetched).
+        # Only ok/missing are writable (v1: refuse + toast for the rest).
+        self._groups_load_status = {}
+        self._groups_error_toasted = set()  # host_ids already toasted for load fail
+        # Remotes with failed push or unpushed newer gen — skip fetch clobber.
+        self._groups_dirty = set()
+        self._groups_dirty_toasted = set()
+        # Per-host mutation generation (bumped before each remote persist).
+        # Health-fetch snapshots this at start; apply skips if local gen is newer.
+        self._groups_write_gen = {}
+        self._groups_push_inflight = set()  # host_ids with a push worker running
+        self._groups_push_pending = set()   # coalesce: push again after inflight
+        self._init_localhost_groups()
         self._sidebar.connect('project-activated',   self._on_project_activated)
         self._sidebar.connect('session-activated',   self._on_session_activated)
         self._sidebar.connect('project-archive',     self._on_project_archive)
@@ -126,18 +140,42 @@ class AppWindow(Adw.ApplicationWindow):
         self._sidebar.connect('show-archive-window', self._on_show_archive_window)
         self._sidebar.connect('show-settings',       self._on_open_settings)
         self._sidebar.connect('project-create', self._on_project_create)
+        self._sidebar.connect('project-create-in-group', self._on_project_create_in_group)
         self._sidebar.connect('project-rename', self._on_project_rename)
         self._sidebar.connect('show-paa-window', self._on_show_paa_window)
         self._sidebar.connect('host-section-toggled', self._on_host_section_toggled)
+        self._sidebar.connect('group-expanded', self._on_group_expanded)
+        self._sidebar.connect('group-create', self._on_group_create)
+        self._sidebar.connect('group-rename', self._on_group_rename)
+        self._sidebar.connect('group-delete', self._on_group_delete)
+        self._sidebar.connect('project-move-to-group', self._on_project_move_to_group)
         self._paned.set_start_child(self._sidebar)
 
         self._stack = Gtk.Stack()
         placeholder = Adw.StatusPage()
-        placeholder.set_title('Select a Project')
+        placeholder.set_title('No project selected')
         placeholder.set_description(
-            'Select a project in the sidebar to start a session'
+            'Create a project to open a coding session with your harness '
+            '(coding agent), or pick one from the sidebar.'
         )
         placeholder.set_icon_name('folder-symbolic')
+        # Empty-state CTA: zero projects (or none selected) used to only say
+        # "Select a project" with no create affordance in the main pane.
+        empty_cta = Gtk.Button(label='New Project')
+        empty_cta.add_css_class('suggested-action')
+        empty_cta.add_css_class('pill')
+        empty_cta.set_halign(Gtk.Align.CENTER)
+        empty_cta.set_tooltip_text(
+            'Create a project folder and open a coding session with your '
+            'default harness — a coding-agent CLI such as Claude Code '
+            '(Settings → Harnesses). Same as New Project in the sidebar.'
+        )
+        empty_cta.connect(
+            'clicked',
+            lambda _b: self._sidebar._on_section_add_project('localhost'),
+        )
+        placeholder.set_child(empty_cta)
+        self._empty_cta = empty_cta
         self._stack.add_named(placeholder, '__placeholder__')
         self._paned.set_end_child(self._stack)
 
@@ -170,8 +208,8 @@ class AppWindow(Adw.ApplicationWindow):
         self._refresh_sidebar_models()
         self._arm_remote_health_timer()
         self._arm_remote_status_timer()
-        # Initial remote project list / health (async).
-        GLib.idle_add(self._refresh_remote_hosts)
+        # Initial remote list is kicked from main.py after present() at
+        # DEFAULT_IDLE so the first frames stay interactive.
 
     def _arm_remote_health_timer(self):
         if self._health_timer_id is not None:
@@ -273,9 +311,16 @@ class AppWindow(Adw.ApplicationWindow):
             for hid, projs in getattr(self._sidebar, '_remote_projects', {}).items()
         }
         self._remote_refresh_busy = True
+        # Snapshot write gens on the main thread so apply can detect mutations
+        # that happened while the worker was fetching (stale-apply race).
+        write_gen_at_start = {
+            hid: int(self._groups_write_gen.get(hid, 0) or 0)
+            for hid, _prof in profiles
+        }
 
         def work():
             import remote_store
+            import remote_groups
             from ssh_transport import HealthState
             results = []
             for hid, prof in profiles:
@@ -283,51 +328,153 @@ class AppWindow(Adw.ApplicationWindow):
                     state, projects, detail = remote_store.probe_host_health(
                         prof, checks_enabled=checks_enabled,
                     )
-                    if state == HealthState.GREY:
+                    # Trust project list only when list succeeded this cycle —
+                    # never treat fallback cache / empty-after-error as truth
+                    # for membership prune (B2).
+                    projects_trusted = False
+                    if state == HealthState.GREEN:
+                        projects_trusted = True
+                    elif state == HealthState.GREY:
                         projects, err = remote_store.list_remote_projects(prof)
                         if err:
                             projects = cached.get(hid, [])
-                    elif state != HealthState.GREEN:
+                            projects_trusted = False
+                        else:
+                            projects_trusted = True
+                    else:
+                        # red/yellow: list failed; may fall back to cache.
                         projects = projects or cached.get(hid, [])
+                        projects_trusted = False
                     snaps = []
                     if getattr(prof, 'rich_status_opt_in', False) and projects:
                         snaps, _ = remote_store.fetch_remote_status_snapshots(prof)
                         snaps = snaps or []
+                    groups_forest, groups_err, groups_status = None, None, None
+                    # Only fetch groups when host is usable (same spirit as list).
+                    if state in (HealthState.GREEN, HealthState.GREY) or projects:
+                        groups_forest, groups_err, groups_status = (
+                            remote_groups.fetch_project_groups(prof))
                     results.append({
                         'hid': hid,
                         'state': state,
                         'projects': projects or [],
+                        'projects_trusted': projects_trusted,
                         'snaps': snaps,
                         'rich': bool(getattr(prof, 'rich_status_opt_in', False)),
+                        'groups_forest': groups_forest,
+                        'groups_err': groups_err,
+                        'groups_status': groups_status,
+                        'write_gen': write_gen_at_start.get(hid, 0),
                     })
                 except Exception as e:
                     results.append({
                         'hid': hid,
                         'state': 'red',
                         'projects': cached.get(hid, []),
+                        'projects_trusted': False,
                         'snaps': [],
                         'rich': False,
                         'error': str(e),
+                        'groups_forest': None,
+                        'groups_err': str(e),
+                        'groups_status': 'error',
+                        'write_gen': write_gen_at_start.get(hid, 0),
                     })
-            GLib.idle_add(self._apply_remote_refresh, results)
+            # DEFAULT_IDLE so map/drag/input run before a multi-host rebuild.
+            GLib.idle_add(
+                self._apply_remote_refresh, results,
+                priority=GLib.PRIORITY_DEFAULT_IDLE,
+            )
 
         import threading
         threading.Thread(target=work, daemon=True, name='pm-remote-refresh').start()
         return False
 
     def _apply_remote_refresh(self, results):
-        """Main-thread apply of async remote probe results."""
+        """Main-thread apply of async remote probe results.
+
+        Caches all host lists first, then rebuilds the sidebar **once** if
+        anything changed. Per-host rebuilds used to stack full populates
+        (50–100+ rows each) and freeze the UI for multiple seconds after the
+        window appeared.
+        """
+        from project_groups import (
+            forest_to_dict,
+            prune_unknown_projects,
+            should_apply_remote_groups_fetch,
+            should_prune_membership,
+        )
         try:
+            need_rebuild = False
             for item in results:
                 hid = item['hid']
                 self._sidebar.set_host_health(hid, item['state'])
                 projects = item.get('projects') or []
-                self._sidebar.set_remote_projects(hid, projects)
+                projects_trusted = bool(item.get('projects_trusted'))
+                # Batch: cache only; one refresh after the loop.
+                if self._sidebar.set_remote_projects(
+                        hid, projects, rebuild=False):
+                    need_rebuild = True
                 if item.get('rich'):
                     self._apply_remote_status_snaps(projects, item.get('snaps') or [])
+                # Apply remote groups forest (Slice D).
+                groups_err = item.get('groups_err')
+                groups_forest = item.get('groups_forest')
+                groups_status = item.get('groups_status')
+                dirty = hid in self._groups_dirty
+                inflight = hid in self._groups_push_inflight
+                local_gen = int(self._groups_write_gen.get(hid, 0) or 0)
+                fetch_gen = int(item.get('write_gen', 0) or 0)
+                # Dirty / in-flight / stale-fetch: keep in-memory forest.
+                if not should_apply_remote_groups_fetch(
+                    dirty=dirty,
+                    push_inflight=inflight,
+                    local_write_gen=local_gen,
+                    fetch_write_gen=fetch_gen,
+                ):
+                    if (
+                        dirty
+                        and not inflight
+                        and (groups_err or groups_forest is not None)
+                        and hid not in self._groups_dirty_toasted
+                    ):
+                        self._groups_dirty_toasted.add(hid)
+                        self._show_toast(
+                            f'Keeping unsaved groups for {hid} '
+                            f'(last push failed)')
+                    continue
+                if groups_err:
+                    # Prefer explicit status from fetch ('error'/'invalid').
+                    self._groups_load_status[hid] = groups_status or 'error'
+                    if hid not in self._groups_error_toasted:
+                        self._groups_error_toasted.add(hid)
+                        self._show_toast(
+                            f'Failed to load groups for {hid}: {groups_err}')
+                    # Keep previous forest if any; do not wipe.
+                elif groups_forest is not None:
+                    prev = self._sidebar.get_group_forest(hid)
+                    prev_dict = forest_to_dict(prev) if prev is not None else None
+                    # B2: only prune against a trusted project list. Never
+                    # auto-push prune results from health refresh — next user
+                    # mutation pushes the full forest.
+                    if should_prune_membership(projects_trusted):
+                        known = {p.project_ref for p in projects}
+                        prune_unknown_projects(groups_forest, known)
+                    new_dict = forest_to_dict(groups_forest)
+                    changed = prev_dict != new_dict
+                    self._sidebar.set_group_forest(hid, groups_forest)
+                    # Soft missing → 'missing'; ok parse → 'ok' (both writable).
+                    self._groups_load_status[hid] = groups_status or 'ok'
+                    self._groups_error_toasted.discard(hid)
+                    if changed:
+                        need_rebuild = True
             # Re-apply process liveness from live terminals AFTER rows exist.
             # Remote restore often starts SSH before the project list is cached;
             # without this, rows stay inactive and rich-status looks grey.
+            if need_rebuild:
+                self._sidebar.refresh()
+            else:
+                self._sidebar._refresh_section_counts()
             self._sync_running_state()
             self._sidebar.refresh_status()
         finally:
@@ -1173,13 +1320,22 @@ class AppWindow(Adw.ApplicationWindow):
     def _on_project_deactivate(self, sidebar, path):
         # Timer-fired deactivate only; immediate-kill paths bypass the grace period.
         self._sidebar.cancel_pending_deactivate(path)
+        find = getattr(self, '_find_project', None)
+        project = find(path) if callable(find) else None
+        proj_name = project.name if project else os.path.basename(path)
         tv = self._terminals.get(path)
         if tv is None:
             self._sidebar.set_project_state(path, 'inactive')
+            show = getattr(self, '_show_toast', None)
+            if callable(show):
+                show(
+                    f"Session closed for '{proj_name}'. "
+                    f"If it disappeared, switch the host filter to Show all."
+                )
             return
         if tv._is_zellij:
             import zellij as z
-            project = self._find_project(path)
+            project = find(path) if callable(find) else project
             if project:
                 sname = z.session_name(project.name)
                 # Clear zellij flags BEFORE killing the session so that
@@ -1198,10 +1354,21 @@ class AppWindow(Adw.ApplicationWindow):
         else:
             tv.deactivate()
             # process-exited signal fires → set_project_state(path, 'inactive')
+        # Soft feedback: one-click close is intentional for power users, but the
+        # active-only filter can hide the row and look like "delete". Point at
+        # Show all rather than "stays in the sidebar".
+        show = getattr(self, '_show_toast', None)
+        if callable(show):
+            show(
+                f"Session closed for '{proj_name}'. "
+                f"If it disappeared, switch the host filter to Show all."
+            )
 
     # --- archive (move to .archive, remove terminal) ---
 
     def _on_project_archive(self, sidebar, path):
+        from hosts import LOCALHOST_ID
+        from project_groups import on_project_removed
         self._sidebar.cancel_pending_deactivate(path)
         if path in self._terminals:
             tv = self._terminals.pop(path)
@@ -1212,6 +1379,11 @@ class AppWindow(Adw.ApplicationWindow):
             if self._settings.multiplexer == 'zellij':
                 import zellij as z
                 z.kill_session(z.session_name(project.name))  # FB-4 shared helper
+            # Drop group membership before disk move so prune stays consistent.
+            forest = self._sidebar.get_group_forest(LOCALHOST_ID)
+            if forest is not None:
+                on_project_removed(forest, project.project_ref)
+                self._persist_groups(LOCALHOST_ID)
             self._store.archive(project)
         self._sidebar.refresh()
         self._sync_running_state()
@@ -1386,15 +1558,15 @@ class AppWindow(Adw.ApplicationWindow):
 
     def _on_project_model_change(self, sidebar, path, value):
         """A per-project provider was picked from the sidebar Provider menu."""
-        from models import FOLLOW_DEFAULT, NATIVE_GROK, NATIVE_OPENCODE
+        from models import FOLLOW_DEFAULT, NATIVE_GROK, NATIVE_OPENCODE, NATIVE_KIMI
         harness = self._settings.effective_harness(path)
         overrides = dict(self._settings.provider_overrides) \
             if isinstance(self._settings.provider_overrides, dict) else {}
-        if value in (NATIVE_GROK, NATIVE_OPENCODE):
+        if value in (NATIVE_GROK, NATIVE_OPENCODE, NATIVE_KIMI):
             # Harness-native: no Settings provider pin.
             overrides.pop(path, None)
         elif harness != 'claude':
-            # Unselectable customs for OC/GB today — ignore (model pins later).
+            # Unselectable customs for OC/GB/Kimi today — ignore (model pins later).
             return
         elif value == FOLLOW_DEFAULT or value == (self._settings.model_default or ''):
             # Picking the global Settings default → track it (clear pin).
@@ -1587,6 +1759,230 @@ class AppWindow(Adw.ApplicationWindow):
         except OSError:
             pass
 
+    # --- virtual project groups (Slice D) -----------------------------------
+
+    def _init_localhost_groups(self):
+        """Adopt localhost groups load status from the sidebar's one-time load.
+
+        Sidebar already loaded ``project_groups.json`` before its first
+        ``_populate()``. Re-loading and ``refresh()`` here used to rebuild every
+        project row a second time (~0.5s with ~50 projects). Only copy status
+        for the persist gate; do not rebuild the UI.
+        """
+        from hosts import LOCALHOST_ID
+        status, err = self._sidebar.localhost_groups_load_status()
+        self._groups_load_status[LOCALHOST_ID] = status
+        if status in ('error', 'invalid'):
+            self._groups_error_toasted.add(LOCALHOST_ID)
+            detail = err or status
+            # Toast overlay may not exist yet during __init__ — defer.
+            msg = f'Failed to load local groups: {detail}'
+            GLib.idle_add(lambda m=msg: (self._show_toast(m), False)[1])
+
+    def _ensure_group_forest(self, host_id):
+        """Return the forest for *host_id*, creating an empty one if missing.
+
+        Remote first-touch without a prior fetch keeps status ``pending``
+        (never ``missing``) so ``_persist_groups`` refuses until fetch
+        confirms ok/missing. Localhost defaults to ``missing`` (writable).
+        """
+        from hosts import LOCALHOST_ID
+        from project_groups import empty_forest
+        forest = self._sidebar.get_group_forest(host_id)
+        if forest is None:
+            forest = empty_forest()
+            self._sidebar.set_group_forest(host_id, forest)
+            if host_id == LOCALHOST_ID:
+                self._groups_load_status.setdefault(host_id, 'missing')
+            elif host_id not in self._groups_load_status:
+                # Never-fetched remote: not writable until fetch completes.
+                self._groups_load_status[host_id] = 'pending'
+        return forest
+
+    def _groups_can_mutate(self, host_id):
+        """True if mutations/saves are allowed; toast + False otherwise (B1)."""
+        from hosts import LOCALHOST_ID
+        from project_groups import groups_status_allows_save
+        is_remote = host_id != LOCALHOST_ID
+        status = self._groups_load_status.get(host_id)
+        if groups_status_allows_save(status, is_remote=is_remote):
+            return True
+        if is_remote and status in (None, 'pending'):
+            self._show_toast('Groups not loaded yet for this host')
+        else:
+            self._show_toast('Not saving groups: last load failed')
+        return False
+
+    def _bump_groups_write_gen(self, host_id):
+        """Increment mutation generation so stale health-fetch apply is skipped."""
+        self._groups_write_gen[host_id] = (
+            int(self._groups_write_gen.get(host_id, 0) or 0) + 1
+        )
+        return self._groups_write_gen[host_id]
+
+    def _persist_groups(self, host_id):
+        """Save/push the host's group forest. Refuse wipe on bad/pending load.
+
+        Localhost: atomic save on the main thread.
+        Remote: async SSH push (never blocks GTK); coalesces rapid expands.
+        """
+        from hosts import LOCALHOST_ID
+        from project_groups import groups_status_allows_save, save_forest
+        forest = self._sidebar.get_group_forest(host_id)
+        if forest is None:
+            return
+        is_remote = host_id != LOCALHOST_ID
+        # No default 'ok' — missing key on remote is fail-closed (B1).
+        status = self._groups_load_status.get(host_id)
+        if not groups_status_allows_save(status, is_remote=is_remote):
+            if is_remote and status in (None, 'pending'):
+                self._show_toast('Groups not loaded yet for this host')
+            else:
+                self._show_toast('Not saving groups: last load failed')
+            return
+        if host_id == LOCALHOST_ID:
+            try:
+                save_forest(forest)
+                self._groups_load_status[host_id] = 'ok'
+            except OSError as e:
+                self._show_toast(f'Failed to save groups: {e}')
+            return
+        prof = self._settings.host_profiles().get(host_id)
+        if prof is None:
+            self._show_toast(f'Unknown host {host_id}')
+            return
+        # Bump gen before scheduling so in-flight health fetches cannot
+        # clobber this mutation when they apply (even mid-push).
+        self._bump_groups_write_gen(host_id)
+        self._groups_dirty.add(host_id)
+        from project_groups import groups_push_schedule
+        action = groups_push_schedule(
+            self._groups_push_inflight,
+            self._groups_push_pending,
+            host_id,
+        )
+        if action == 'queue':
+            return
+        self._start_groups_push(host_id, prof)
+
+    def _start_groups_push(self, host_id, prof=None):
+        """Kick a background SSH push for *host_id* (main thread only)."""
+        import threading
+        import remote_groups
+        from project_groups import forest_to_dict, parse_forest
+        if prof is None:
+            prof = self._settings.host_profiles().get(host_id)
+        if prof is None:
+            self._groups_push_inflight.discard(host_id)
+            self._show_toast(f'Unknown host {host_id}')
+            return
+        forest = self._sidebar.get_group_forest(host_id)
+        if forest is None:
+            self._groups_push_inflight.discard(host_id)
+            return
+        # Snapshot on main thread so the worker does not race mutations.
+        snapshot = parse_forest(forest_to_dict(forest))
+        started_gen = int(self._groups_write_gen.get(host_id, 0) or 0)
+        self._groups_push_inflight.add(host_id)
+
+        def work():
+            ok, err = remote_groups.push_project_groups(prof, snapshot)
+            GLib.idle_add(
+                self._on_groups_push_done, host_id, ok, err, started_gen,
+            )
+
+        threading.Thread(
+            target=work, daemon=True, name=f'pm-groups-push-{host_id}',
+        ).start()
+
+    def _on_groups_push_done(self, host_id, ok, err, started_gen):
+        """Main-thread completion for async remote groups push."""
+        from project_groups import groups_push_complete
+        current_gen = int(self._groups_write_gen.get(host_id, 0) or 0)
+        action = groups_push_complete(
+            self._groups_push_inflight,
+            self._groups_push_pending,
+            self._groups_dirty,
+            host_id=host_id,
+            ok=bool(ok),
+            started_gen=started_gen,
+            current_gen=current_gen,
+        )
+        if not ok:
+            self._show_toast(err or 'Failed to push remote groups')
+        elif action == 'idle':
+            self._groups_load_status[host_id] = 'ok'
+            self._groups_dirty_toasted.discard(host_id)
+        if action == 'retry':
+            # Coalesced / newer mutation — push the latest forest.
+            from project_groups import groups_push_schedule
+            groups_push_schedule(
+                self._groups_push_inflight,
+                self._groups_push_pending,
+                host_id,
+            )
+            self._start_groups_push(host_id)
+        return False
+
+    def _on_group_expanded(self, sidebar, host_id, group_id, expanded):
+        # Sidebar already mutated forest.expanded; persist only.
+        self._persist_groups(host_id)
+
+    def _on_group_create(self, sidebar, host_id, parent_group_id, name):
+        from project_groups import add_group
+        # B1: Host New Group on remote before load → toast, no push.
+        if not self._groups_can_mutate(host_id):
+            return
+        forest = self._ensure_group_forest(host_id)
+        parent = parent_group_id or None
+        try:
+            add_group(forest, name, parent_id=parent)
+        except ValueError as e:
+            self._show_toast(str(e))
+            return
+        self._persist_groups(host_id)
+        self._sidebar.refresh()
+
+    def _on_group_rename(self, sidebar, host_id, group_id, new_name):
+        from project_groups import rename_group
+        if not self._groups_can_mutate(host_id):
+            return
+        forest = self._ensure_group_forest(host_id)
+        if not rename_group(forest, group_id, new_name):
+            self._show_toast('Could not rename group')
+            return
+        self._persist_groups(host_id)
+        self._sidebar.refresh()
+
+    def _on_group_delete(self, sidebar, host_id, group_id):
+        from project_groups import delete_group
+        if not self._groups_can_mutate(host_id):
+            return
+        forest = self._ensure_group_forest(host_id)
+        if not delete_group(forest, group_id):
+            self._show_toast('Group not found')
+            return
+        self._persist_groups(host_id)
+        self._sidebar.refresh()
+
+    def _on_project_move_to_group(self, sidebar, host_id, project_path, group_id):
+        from project_groups import set_membership, clear_membership
+        if not self._groups_can_mutate(host_id):
+            return
+        project = self._find_project(project_path)
+        if project is None:
+            return
+        forest = self._ensure_group_forest(host_id)
+        ref = project.project_ref
+        if not group_id:
+            clear_membership(forest, ref)
+        else:
+            if not set_membership(forest, ref, group_id):
+                self._show_toast('Could not move project into group')
+                return
+        self._persist_groups(host_id)
+        self._sidebar.refresh()
+
     def _on_project_create(self, sidebar, host_id, name):
         from hosts import LOCALHOST_ID
         if host_id and host_id != LOCALHOST_ID:
@@ -1594,6 +1990,14 @@ class AppWindow(Adw.ApplicationWindow):
             return
         try:
             self._store.create_project(name)
+        except ValueError as e:
+            self._show_toast(str(e))
+            return
+        except FileExistsError:
+            # exist_ok=True used to mkdir silently and still fire the success
+            # toast — a lie. Tell the user the name is taken.
+            self._show_toast(f"A project named '{name}' already exists")
+            return
         except OSError:
             return
         self._sidebar.refresh()
@@ -1604,14 +2008,67 @@ class AppWindow(Adw.ApplicationWindow):
         # (_on_project_activated, e.g. window.py restore at ~344/390). The B4
         # creation toast STAYS: it names the resolved agent, the spawn makes it
         # concrete.
-        path = os.path.join(self._store._projects_dir(), name)
+        path = os.path.join(self._store._projects_dir(), name.strip())
         self._on_project_activated(self._sidebar, path)
         # B4 (M-UX.15, C7-adjacent / S7): a fresh project silently inherited the
         # default harness — a "noob" who named it "claude-thing" got grok with no
         # word. Fire the M-UX.11 toast pattern naming the resolved agent (incl.
         # the missing-binary fallback) so the harness the project got is never a
         # surprise.
-        self._show_toast(self._project_created_toast_text(name))
+        self._show_toast(self._project_created_toast_text(name.strip()))
+
+    def _on_project_create_in_group(self, sidebar, host_id, group_id, name):
+        """Create a project then assign it to *group_id*."""
+        from hosts import LOCALHOST_ID, encode_project_ref
+        from project_groups import set_membership
+        import remote_store
+
+        if host_id and host_id != LOCALHOST_ID:
+            prof = self._settings.host_profiles().get(host_id)
+            if prof is None:
+                self._show_toast(f'Unknown host {host_id}')
+                return
+            proj, err = remote_store.create_remote_project(prof, name)
+            if err or proj is None:
+                self._show_toast(err or 'Remote create failed')
+                return
+            projects, lerr = remote_store.list_remote_projects(prof)
+            if not lerr:
+                self._sidebar.set_remote_projects(host_id, projects)
+            else:
+                self._sidebar.set_remote_projects(host_id, [proj])
+            # Membership only when groups are loaded/writable (B1).
+            if self._groups_can_mutate(host_id):
+                forest = self._ensure_group_forest(host_id)
+                set_membership(forest, proj.project_ref, group_id)
+                self._persist_groups(host_id)
+            self._sidebar.refresh()
+            self._on_project_activated(self._sidebar, proj.path)
+            self._show_toast(self._project_created_toast_text(name))
+            return
+
+        try:
+            self._store.create_project(name)
+        except ValueError as e:
+            self._show_toast(str(e))
+            return
+        except FileExistsError:
+            self._show_toast(f"A project named '{name}' already exists")
+            return
+        except OSError:
+            return
+        path = os.path.join(self._store._projects_dir(), name.strip())
+        # Local membership key is encode_project_ref(LOCALHOST_ID, abs path).
+        ref = encode_project_ref(LOCALHOST_ID, path)
+        forest = self._ensure_group_forest(LOCALHOST_ID)
+        if not set_membership(forest, ref, group_id):
+            # Group vanished between menu and commit — project still created.
+            self._show_toast('Project created but group no longer exists')
+        else:
+            self._persist_groups(LOCALHOST_ID)
+        self._sidebar.refresh()
+        self._on_project_activated(self._sidebar, path)
+        self._show_toast(self._project_created_toast_text(name.strip()))
 
     def _create_remote_project(self, host_id, name):
         import remote_store
@@ -1645,16 +2102,24 @@ class AppWindow(Adw.ApplicationWindow):
         effective_id = self._settings.effective_harness(path)
         adapter, _missing = harnesses.resolve_adapter(effective_id, self._settings)
         display = adapter.display_name if adapter is not None else effective_id
+        # "harness" = coding-agent CLI; Settings → Harnesses defines the term.
         return f"New project '{name}' — harness: {display}"
 
     def _on_project_rename(self, sidebar, old_path, new_name):
-        from hosts import LOCALHOST_ID, encode_project_ref
+        from hosts import LOCALHOST_ID, encode_project_ref, project_name_reject_reason
+        from project_groups import on_project_renamed
         import remote_store
 
         project = self._find_project(old_path)
         if not project:
             return
+        reason = project_name_reject_reason(new_name)
+        if reason:
+            self._show_toast(reason)
+            return
+        new_name = new_name.strip()
         host_id = getattr(project, 'host_id', LOCALHOST_ID) or LOCALHOST_ID
+        old_ref = project.project_ref
 
         if host_id != LOCALHOST_ID:
             prof = self._settings.host_profiles().get(host_id)
@@ -1692,6 +2157,12 @@ class AppWindow(Adw.ApplicationWindow):
         else:
             try:
                 self._store.rename_project(project, new_name)
+            except ValueError as e:
+                self._show_toast(str(e))
+                return
+            except FileExistsError:
+                self._show_toast(f'A project named {new_name!r} already exists')
+                return
             except OSError as e:
                 self._show_toast(f'Rename failed: {e}')
                 return
@@ -1727,6 +2198,21 @@ class AppWindow(Adw.ApplicationWindow):
                 bag[new_path] = bag.pop(old_path)
         self._sidebar.migrate_pending_deactivate(old_path, new_path)
 
+        # Remap group membership key (local path or ssh:host:name).
         if host_id == LOCALHOST_ID:
+            new_ref = encode_project_ref(LOCALHOST_ID, new_path)
+        else:
+            new_ref = encode_project_ref(host_id, new_name)
+        get_forest = getattr(self._sidebar, 'get_group_forest', None)
+        forest = get_forest(host_id) if callable(get_forest) else None
+        membership_changed = False
+        if forest is not None:
+            on_project_renamed(forest, old_ref, new_ref)
+            self._persist_groups(host_id)
+            membership_changed = True
+
+        # Local always rebuilds; remote rebuilds when membership keys moved so
+        # the project stays under its group after rename.
+        if host_id == LOCALHOST_ID or membership_changed:
             self._sidebar.refresh()
         self._sync_running_state()

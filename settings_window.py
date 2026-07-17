@@ -13,6 +13,41 @@ from models import (build_provider_options, build_tier_options,
                     is_1m_model_id, with_1m_suffix, without_1m_suffix)
 
 
+def _safe_group_add(group, child):
+    """Add ``child`` to an ``Adw.PreferencesGroup`` only when it has no parent.
+
+    PreferencesGroup stores rows in an internal ``Gtk.ListBox``, so
+    ``child.get_parent() is group`` is almost always False even when the
+    child is already in the group. Callers that re-add a retained row
+    (notably the sticky "Add Provider" ActionRow) must drop it from the
+    group first; otherwise libadwaita logs::
+
+        Adwaita-CRITICAL **: adw_preferences_group_add: assertion
+        'gtk_widget_get_parent (child) == NULL' failed
+
+    Prefer ``group.remove(child)`` (it finds the row via the group API)
+    over ``parent.remove`` when the child is a preferences-group row.
+    """
+    if child is None:
+        return
+    if child.get_parent() is not None:
+        group.remove(child)
+    group.add(child)
+
+
+def _provider_is_blank(prov):
+    """True when a provider has no meaningful identity: empty name, empty
+    base_url, and no models. API key / max_context alone do not count —
+    an Add-Provider-then-dismiss must not leave an empty husk on disk."""
+    if not isinstance(prov, dict):
+        return True
+    name = (prov.get('name') or '').strip()
+    url = (prov.get('base_url') or '').strip()
+    models = prov.get('models') if isinstance(prov.get('models'), list) else []
+    models = [m for m in models if isinstance(m, str) and m.strip()]
+    return not name and not url and not models
+
+
 class ProviderEditorWindow(Adw.Dialog):
     """A resizeable sub-window for editing one provider: name, base URL, API
     key, tier assignments, and model list — with save-on-close (one disk write
@@ -243,7 +278,7 @@ class ProviderEditorWindow(Adw.Dialog):
                 self._suppress = False
             combo.connect('notify::selected',
                           lambda r, _p, t=tier: self._on_tier_changed(t, r))
-            self._tier_group.add(combo)
+            _safe_group_add(self._tier_group, combo)
             self._tier_combos[tier] = combo
 
     def _rebuild_classifier_group(self):
@@ -267,7 +302,7 @@ class ProviderEditorWindow(Adw.Dialog):
         temp_row.set_tooltip_text('Passed to CLAUDE_CODE_AUTO_MODE_TEMPERATURE')
         temp_row.connect('apply', lambda _r: self._commit_classifier_temperature())
         self._wire_focus_commit(temp_row, self._commit_classifier_temperature)
-        self._classifier_group.add(temp_row)
+        _safe_group_add(self._classifier_group, temp_row)
         self._classifier_temp_row = temp_row
 
     def _rebuild_models_group(self):
@@ -286,7 +321,7 @@ class ProviderEditorWindow(Adw.Dialog):
             if isinstance(self._prov.get('models'), list) else []
         for mid in models:
             if isinstance(mid, str):
-                self._models_group.add(self._build_model_row(mid))
+                _safe_group_add(self._models_group, self._build_model_row(mid))
 
         add_row = Adw.EntryRow(title='Add model')
         add_row.set_show_apply_button(True)
@@ -294,7 +329,7 @@ class ProviderEditorWindow(Adw.Dialog):
         add_row.set_tooltip_text(
             'Free-text model id (use the 1M toggle on the row for long context)')
         add_row.connect('apply', self._on_add_model)
-        self._models_group.add(add_row)
+        _safe_group_add(self._models_group, add_row)
         self._add_model_row = add_row
 
     def _build_model_row(self, mid):
@@ -683,18 +718,48 @@ class ProviderEditorWindow(Adw.Dialog):
 
     # --- lifecycle ----------------------------------------------------
 
+    def _discard_blank_provider(self):
+        """Remove this provider and its tier/classifier side-state when it is
+        still blank after commits. Used so Add Provider → dismiss without
+        filling does not leave an empty husk in settings.json."""
+        if isinstance(self._settings.providers, dict):
+            self._settings.providers.pop(self._pid, None)
+        if self._settings.model_default == self._pid:
+            self._settings.model_default = ''
+        if isinstance(self._settings.provider_overrides, dict):
+            self._settings.provider_overrides = {
+                p: v for p, v in self._settings.provider_overrides.items()
+                if v != self._pid
+            }
+        if isinstance(self._settings.tier_models, dict):
+            self._settings.tier_models.pop(self._pid, None)
+        if isinstance(self._settings.classifier_temperature, dict):
+            self._settings.classifier_temperature.pop(self._pid, None)
+        self._dirty = True
+
     def _teardown(self):
         """Commit any pending field edits to the in-memory Settings, then
         persist once on close. The editor mutates the shared live Settings
         object on each edit but defers the settings.json disk write to here —
         one write per editing session (was: one per keystroke in the API-key
         field). Finally refresh the owning SettingsWindow's slim provider-row
-        list once."""
+        list once.
+
+        If the provider is still blank (no name, no base_url, no models) —
+        the Add-Provider-then-dismiss path — drop it entirely so an empty
+        husk is never left on disk."""
         self._closed = True
         self._commit_name()
         self._commit_url()
         self._commit_max_context_tokens()
         self._commit_classifier_temperature()
+        # Explicit Remove already pops the pid; skip blank-check then.
+        still_present = (
+            isinstance(self._settings.providers, dict)
+            and self._pid in self._settings.providers
+        )
+        if still_present and _provider_is_blank(self._prov):
+            self._discard_blank_provider()
         if self._dirty:
             self._save_and_notify()
         if self._on_close is not None:
@@ -720,6 +785,8 @@ class SettingsWindow(Adw.PreferencesDialog):
         # Guards so programmatic set_selected() during a refresh doesn't
         # re-enter the change handlers and recurse.
         self._suppress_combos = False
+        self._saved_toast_timer = None
+        self._suppress_paa_ai = False
         self._build_general_page()
         self._build_hosts_page()
         self._build_terminal_page()
@@ -787,16 +854,29 @@ class SettingsWindow(Adw.PreferencesDialog):
 
         self._ntfy_row = Adw.SwitchRow(
             title='Enable ntfy.sh notifications',
-            subtitle='May need to authorize in your ntfy.sh account',
+            subtitle='Push a phone/desktop alert when a coding session finishes '
+                     '(via ntfy.sh, a free push service). You may need to open '
+                     'or authorize the topic in the ntfy app.',
         )
+        self._ntfy_row.set_tooltip_text(
+            'ntfy.sh is an independent push-notification service (not part of '
+            'ProjectMan). When a harness session finishes and this is on, '
+            'ProjectMan posts to your topic so your phone or desktop can alert '
+            'you. Requires a topic name below and usually the free ntfy app '
+            'or an ntfy account for private topics.')
         self._ntfy_row.set_active(self._settings.ntfy_enabled)
         self._ntfy_row.connect('notify::active', self._on_ntfy_toggled)
         notif_group.add(self._ntfy_row)
 
         self._ntfy_topic_row = Adw.EntryRow(title='Topic')
         self._ntfy_topic_row.set_text(self._settings.ntfy_topic)
-        self._ntfy_topic_row.set_show_apply_button(True)
+        # Apply only when ntfy is on — avoids a sensitive no-op Apply button.
+        self._ntfy_topic_row.set_show_apply_button(self._settings.ntfy_enabled)
         self._ntfy_topic_row.set_sensitive(self._settings.ntfy_enabled)
+        self._ntfy_topic_row.set_tooltip_text(
+            'Channel name for ntfy.sh (notifications go to '
+            'https://ntfy.sh/<topic>). Press the Apply checkmark after editing — '
+            'this field does not auto-save. Ignored while notifications are off.')
         self._ntfy_topic_row.connect('apply', self._on_ntfy_topic_apply)
         notif_group.add(self._ntfy_topic_row)
 
@@ -1332,13 +1412,20 @@ class SettingsWindow(Adw.PreferencesDialog):
         page = Adw.PreferencesPage(
             title='PAA', icon_name='applications-system-symbolic'
         )
+        # Prefer tooltip for the short tab name — Adw.PreferencesPage has no
+        # tab-subtitle surface, so first-time users need this on hover.
+        page.set_tooltip_text(
+            'Projects Admin Agent (PAA) — ProjectMan’s optional background '
+            'monitor for project health and optional AI analysis.')
         self.add(page)
 
         # -- Enable group --
         enable_group = Adw.PreferencesGroup(
-            title='Projects Admin Agent',
+            title='Projects Admin Agent (PAA)',
             description=(
-                'Proactive background monitor for project health. '
+                'PAA is ProjectMan’s optional background monitor: it checks '
+                'local projects for staleness and other health issues, and can '
+                'run AI analysis when you enable that below. '
                 'Localhost projects only — remote hosts are not scanned.'
             ),
         )
@@ -1350,10 +1437,14 @@ class SettingsWindow(Adw.PreferencesDialog):
             # AI scans use Claude Code with the configured provider. Split the
             # copy: the master toggle enables the monitor (whose FILESYSTEM
             # checks are free); the API cost belongs to "Enable AI Scans" below.
-            subtitle='Background project health monitor. Filesystem checks are '
-                     'free; AI scans (below) use Claude Code with your '
-                     'configured provider.',
+            subtitle='Turn on the Projects Admin Agent background monitor. '
+                     'Filesystem checks are free; AI scans (below) use Claude '
+                     'Code with your configured provider.',
         )
+        self._paa_enabled_row.set_tooltip_text(
+            'When on, ProjectMan periodically scans local projects (interval '
+            'below) and can surface findings in the PAA window (sidebar sparkle). '
+            'Turn off to stop background work entirely.')
         self._paa_enabled_row.set_active(self._settings.paa_enabled)
         self._paa_enabled_row.connect('notify::active', self._on_paa_enabled_toggled)
         enable_group.add(self._paa_enabled_row)
@@ -1418,11 +1509,17 @@ class SettingsWindow(Adw.PreferencesDialog):
             title='Enable AI Scans',
             # AI scans use Claude Code with the Models-page provider + scan tier
             # (model-axis routing — not always Anthropic native).
-            subtitle='Runs project analysis via Claude Code using your '
-                     'Models-page provider and scan tier.',
+            subtitle='Optional AI-powered analysis of projects (uses Claude Code '
+                     'and your Models-page provider — may cost API tokens).',
         )
+        self._paa_ai_scans_row.set_tooltip_text(
+            'Requires Enable PAA above. When on, PAA can run deeper AI analysis '
+            'on a schedule/budget below. Filesystem-only health checks still '
+            'work with AI scans off.')
         self._paa_ai_scans_row.set_active(self._settings.paa_allow_haiku)
         self._paa_ai_scans_row.set_sensitive(self._settings.paa_enabled)
+        self._paa_ai_scans_row.set_can_target(self._settings.paa_enabled)
+        self._suppress_paa_ai = False
         self._paa_ai_scans_row.connect('notify::active', self._on_paa_ai_scans_toggled)
         ai_group.add(self._paa_ai_scans_row)
 
@@ -1568,6 +1665,21 @@ class SettingsWindow(Adw.PreferencesDialog):
     def _save_and_notify(self):
         self._settings.save()
         self._app.emit('settings-changed')
+        # Light feedback: Escape does not undo — changes stick immediately.
+        # Throttle so slider drags do not spam toasts.
+        self._queue_saved_toast()
+
+    def _queue_saved_toast(self):
+        if getattr(self, '_saved_toast_timer', None):
+            return
+        self._saved_toast_timer = GLib.timeout_add(500, self._show_saved_toast)
+
+    def _show_saved_toast(self):
+        self._saved_toast_timer = None
+        toast = Adw.Toast.new('Saved — changes apply immediately')
+        toast.set_timeout(2)
+        self.add_toast(toast)
+        return False
 
     def _on_choose_folder(self, button):
         dialog = Gtk.FileDialog()
@@ -1613,28 +1725,39 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._save_and_notify()
 
     def _on_ntfy_toggled(self, row, _param):
-        self._settings.ntfy_enabled = row.get_active()
-        self._ntfy_topic_row.set_sensitive(self._settings.ntfy_enabled)
+        enabled = row.get_active()
+        self._settings.ntfy_enabled = enabled
+        self._ntfy_topic_row.set_sensitive(enabled)
+        # Hide Apply when parent is off — EntryRow can leave the apply button
+        # sensitive after set_sensitive(False) on the row alone (release gate).
+        self._ntfy_topic_row.set_show_apply_button(enabled)
         self._save_and_notify()
 
     def _on_ntfy_topic_apply(self, row):
+        if not self._settings.ntfy_enabled:
+            return
         self._settings.ntfy_topic = row.get_text().strip()
         self._save_and_notify()
 
-    def _on_paa_enabled_toggled(self, row, _param):
-        enabled = row.get_active()
-        self._settings.paa_enabled = enabled
+    def _set_paa_dependent_sensitivity(self, enabled):
+        """Master PAA off → dependents not interactive (including AI Scans)."""
         ai_scans = self._settings.paa_allow_haiku
         self._paa_interval_row.set_sensitive(enabled)
         self._paa_stale_row.set_sensitive(enabled)
         self._paa_chat_model_row.set_sensitive(enabled)
         self._paa_ai_scans_row.set_sensitive(enabled)
+        self._paa_ai_scans_row.set_can_target(enabled)
         self._paa_unlimited_row.set_sensitive(enabled and ai_scans)
         self._paa_budget_row.set_sensitive(
             enabled and ai_scans and not self._settings.paa_budget_unlimited
         )
         self._paa_scan_model_row.set_sensitive(enabled and ai_scans)
         self._paa_autonomy_row.set_sensitive(enabled and ai_scans)
+
+    def _on_paa_enabled_toggled(self, row, _param):
+        enabled = row.get_active()
+        self._settings.paa_enabled = enabled
+        self._set_paa_dependent_sensitivity(enabled)
         self._save_and_notify()
 
     def _on_paa_interval_changed(self, scale):
@@ -1663,15 +1786,30 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._save_and_notify()
 
     def _on_paa_ai_scans_toggled(self, row, _param):
+        if self._suppress_paa_ai:
+            return
+        # Guard: if master PAA is off, ignore taps and keep switch in sync with
+        # stored value (AT-SPI can still report the control as sensitive on some
+        # Adw.SwitchRow builds).
+        if not self._settings.paa_enabled:
+            desired = self._settings.paa_allow_haiku
+            if row.get_active() != desired:
+                self._suppress_paa_ai = True
+                try:
+                    row.set_active(desired)
+                finally:
+                    self._suppress_paa_ai = False
+            self._paa_ai_scans_row.set_sensitive(False)
+            self._paa_ai_scans_row.set_can_target(False)
+            return
         ai_scans = row.get_active()
         self._settings.paa_allow_haiku = ai_scans  # storage key kept for back-compat
-        self._paa_unlimited_row.set_sensitive(self._settings.paa_enabled and ai_scans)
+        self._paa_unlimited_row.set_sensitive(ai_scans)
         self._paa_budget_row.set_sensitive(
-            self._settings.paa_enabled and ai_scans
-            and not self._settings.paa_budget_unlimited
+            ai_scans and not self._settings.paa_budget_unlimited
         )
-        self._paa_scan_model_row.set_sensitive(self._settings.paa_enabled and ai_scans)
-        self._paa_autonomy_row.set_sensitive(self._settings.paa_enabled and ai_scans)
+        self._paa_scan_model_row.set_sensitive(ai_scans)
+        self._paa_autonomy_row.set_sensitive(ai_scans)
         self._save_and_notify()
 
     def _on_paa_scan_model_changed(self, row, _param):
@@ -1831,8 +1969,12 @@ class SettingsWindow(Adw.PreferencesDialog):
             self._providers_group.remove(row)
         self._provider_card_rows = []
         # Drop Add row if present so provider rows insert above it cleanly.
+        # NOTE: PreferencesGroup parents rows under an internal ListBox, so
+        # ``add_row.get_parent() is self._providers_group`` is always False —
+        # that broken check used to skip the remove and re-add the same
+        # retained row → Adwaita-CRITICAL on every Add Provider / refresh.
         add_row = getattr(self, '_provider_add_row', None)
-        if add_row is not None and add_row.get_parent() is self._providers_group:
+        if add_row is not None and add_row.get_parent() is not None:
             self._providers_group.remove(add_row)
         if isinstance(self._settings.providers, dict):
             for pid in sorted(self._settings.providers):
@@ -1840,10 +1982,10 @@ class SettingsWindow(Adw.PreferencesDialog):
                 if not isinstance(prov, dict):
                     continue
                 row = self._build_provider_row(pid, prov)
-                self._providers_group.add(row)
+                _safe_group_add(self._providers_group, row)
                 self._provider_card_rows.append(row)
         if add_row is not None:
-            self._providers_group.add(add_row)
+            _safe_group_add(self._providers_group, add_row)
 
     def _build_provider_row(self, pid, prov):
         """A slim, one-line row for a provider in the Models page. The row's
@@ -1899,11 +2041,13 @@ class SettingsWindow(Adw.PreferencesDialog):
         while pid in self._settings.providers:
             i += 1
             pid = f'{base}{i}'
+        # In-memory only: do NOT save to disk yet. The editor opens on this
+        # blank entry; if the user dismisses without filling name/URL/models,
+        # ProviderEditorWindow._teardown discards it so settings.json never
+        # accumulates empty provider husks.
         self._settings.providers[pid] = {
             'name': '', 'base_url': '', 'api_key': '', 'models': [],
         }
-        self._settings.save()
-        self._app.emit('settings-changed')
         self._refresh_models_page()
         # Open the editor on the freshly-added empty provider so the user can
         # fill it immediately (the flow that lost fields under the ExpanderRow).
@@ -1914,20 +2058,22 @@ class SettingsWindow(Adw.PreferencesDialog):
     # ------------------------------------------------------------------ #
 
     def _build_native_model_sections(self, page):
-        """Placeholder sections for Grok / OpenCode model ownership.
+        """Placeholder sections for native-model harness ownership.
 
-        These harnesses pick models in their own configs; PM does not list or
-        edit those models here. One non-interactive row each points at that.
+        Grok / OpenCode / Kimi pick models in their own configs; PM does not
+        list or edit those models here. One non-interactive row each points
+        at that. Iterate every adapter whose load_harness_config is non-None
+        so new native-model harnesses show up without a hardcoded list.
         """
         import harnesses
         import harness_configs
-        for harness_id in ('grok', 'opencode'):
+        for harness_id in harnesses.ADAPTERS:
+            cfg = harness_configs.load_harness_config(harness_id)
+            if cfg is None:
+                continue
             adapter = harnesses.ADAPTERS.get(harness_id)
             display = adapter.display_name if adapter else harness_id
-            cfg = harness_configs.load_harness_config(harness_id)
-            shown_path = ''
-            if cfg is not None:
-                shown_path = harness_configs._display_path(cfg.source_path)
+            shown_path = harness_configs._display_path(cfg.source_path)
             group = Adw.PreferencesGroup(title=display)
             if shown_path:
                 group.set_description(
@@ -1955,17 +2101,34 @@ class SettingsWindow(Adw.PreferencesDialog):
         page = Adw.PreferencesPage(
             title='Harnesses', icon_name='applications-engineering-symbolic'
         )
+        page.set_tooltip_text(
+            'A harness is a coding-agent CLI (Claude Code, OpenCode, Grok Build, '
+            'Kimi Code, …). ProjectMan opens each project’s session with one '
+            'harness and tracks its status.')
         self.add(page)
 
-        default_group = Adw.PreferencesGroup(title='General')
+        default_group = Adw.PreferencesGroup(
+            title='General',
+            description=(
+                'A harness is the coding agent that runs in each project’s '
+                'terminal — for example Claude Code, OpenCode, Grok Build, or '
+                'Kimi Code. ProjectMan is the cockpit: it starts the harness, '
+                'shows live status dots, and restores sessions. Pick a default '
+                'below; override per project from the sidebar.'
+            ),
+        )
         page.add(default_group)
 
         self._harness_default_ids = list(harnesses.ADAPTERS.keys())
         labels = [harnesses.ADAPTERS[a].display_name for a in self._harness_default_ids]
-        self._harness_default_combo = Adw.ComboRow(title='Default Harness')
+        self._harness_default_combo = Adw.ComboRow(
+            title='Default Harness',
+            subtitle='Coding agent used for new projects and sessions',
+        )
         self._harness_default_combo.set_tooltip_text(
-            'The coding harness used for new sessions. Override per project '
-            'from the sidebar right-click menu.')
+            'Which coding-agent CLI (harness) to start for a new project '
+            'session. Change per project via the sidebar right-click menu '
+            '(or project row actions).')
         self._harness_default_combo.set_model(Gtk.StringList.new(labels))
         cur = self._settings.harness_default
         self._harness_default_combo.set_selected(
@@ -1981,7 +2144,10 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._bridge_rows = {}
         for harness_id in self._harness_default_ids:
             adapter = harnesses.ADAPTERS[harness_id]
-            group = Adw.PreferencesGroup(title=adapter.display_name)
+            group = Adw.PreferencesGroup(
+                title=adapter.display_name,
+                description=f'Coding-agent harness (binary: {harness_id})',
+            )
             page.add(group)
 
             cfg = self._settings.harnesses.get(harness_id, {}) if isinstance(
@@ -1991,7 +2157,9 @@ class SettingsWindow(Adw.PreferencesDialog):
             binary_row.set_show_apply_button(True)
             binary_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
             binary_row.set_tooltip_text(
-                f'Leave blank to use "{harness_id}" from PATH')
+                f'Path to the {adapter.display_name} executable. '
+                f'Leave blank to use "{harness_id}" from PATH. '
+                'Press Apply after editing.')
             binary_row.connect(
                 'apply', lambda r, aid=harness_id: self._on_harness_binary_apply(aid, r))
             group.add(binary_row)
@@ -2000,6 +2168,9 @@ class SettingsWindow(Adw.PreferencesDialog):
             # Doctor-lite: <binary> --version.
             check_row = Adw.ActionRow(title='Status')
             check_row.set_subtitle('Run a check to verify the binary')
+            check_row.set_tooltip_text(
+                f'Runs `{harness_id} --version` (or your custom binary path) '
+                'to confirm the harness is installed and callable.')
             check_btn = Gtk.Button(label='Check')
             check_btn.set_valign(Gtk.Align.CENTER)
             check_btn.add_css_class('flat')
@@ -2033,6 +2204,10 @@ class SettingsWindow(Adw.PreferencesDialog):
             if harnesses.harness_bridge_source(self._app_dir(), harness_id) is not None \
                     or harness_id == 'opencode':
                 bridge_row = Adw.ActionRow(title='Status bridge')
+                bridge_row.set_tooltip_text(
+                    'Installs a small plugin/hook so this harness reports '
+                    'working / waiting / done into ProjectMan’s sidebar status '
+                    'dots. Safe to re-run (idempotent).')
                 bridge_btn = Gtk.Button()
                 bridge_btn.set_valign(Gtk.Align.CENTER)
                 bridge_btn.add_css_class('flat')
@@ -2147,7 +2322,12 @@ class SettingsWindow(Adw.PreferencesDialog):
         info_group.add(name_row)
 
         desc_row = Adw.ActionRow(title='Description')
-        desc_row.set_subtitle('GTK4 desktop cockpit for AI coding harnesses')
+        desc_row.set_subtitle(
+            'GTK4 desktop cockpit for AI coding harnesses '
+            '(coding-agent CLIs such as Claude Code, OpenCode, Grok, Kimi Code)')
+        desc_row.set_tooltip_text(
+            'A harness is a coding-agent program ProjectMan launches per '
+            'project. Configure them under Settings → Harnesses.')
         desc_row.set_sensitive(False)
         info_group.add(desc_row)
 

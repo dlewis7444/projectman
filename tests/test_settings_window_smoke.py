@@ -687,3 +687,154 @@ def test_editor_model_row_shows_bare_title_when_1m_stored():
     editor = _make_editor(s, 'ollama')
     row = editor._model_row_for['my-model[1m]']
     assert row.get_title() == 'my-model'
+
+
+# --- #10: Adwaita CRITICAL + empty-provider-on-dismiss (release gate adversarial) -
+
+def test_rebuild_providers_group_reentry_safe():
+    """Regression for Adwaita-CRITICAL on Add Provider.
+
+    PreferencesGroup parents rows under an internal Gtk.ListBox, so a check
+    of ``add_row.get_parent() is providers_group`` never removes the sticky
+    Add Provider row before re-adding it. Rebuilding twice (Add Provider →
+    refresh, editor close → refresh) must not leave the add row parentless
+    or double-parented, and must not raise.
+    """
+    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    sw = _make_sw(s)
+    add_row = sw._provider_add_row
+    assert add_row.get_parent() is not None
+
+    # Simulate the Add-Provider / on-close refresh path several times.
+    for _ in range(3):
+        sw._rebuild_providers_group()
+        assert add_row is sw._provider_add_row
+        assert add_row.get_parent() is not None
+        # Provider card rows are fresh each rebuild; add row is retained.
+        assert any(r is add_row for r in
+                   (sw._provider_add_row,))
+        assert len(sw._provider_card_rows) == 1  # ollama
+
+    # Defensive helper itself: re-adding a parented child must not raise.
+    sw_mod._safe_group_add(sw._providers_group, add_row)
+    assert add_row.get_parent() is not None
+
+
+def test_safe_group_add_removes_prior_parent():
+    """_safe_group_add detaches a child that already has a parent before add."""
+    g1 = Adw.PreferencesGroup()
+    g2 = Adw.PreferencesGroup()
+    row = Adw.ActionRow(title='x')
+    g1.add(row)
+    assert row.get_parent() is not None
+    sw_mod._safe_group_add(g2, row)
+    assert row.get_parent() is not None
+    # No longer under g1's listbox.
+    # (PreferencesGroup has no public "contains"; parent type is ListBox of g2.)
+    parent = row.get_parent()
+    assert parent is not None
+
+
+def test_add_provider_dismiss_without_fill_does_not_persist(
+        monkeypatch, tmp_path):
+    """Add Provider → close editor without edits → empty husk not on disk
+    and not left in the live Settings.providers dict."""
+    import settings as settings_mod
+    monkeypatch.setattr(settings_mod, 'DEFAULT_SETTINGS_PATH',
+                        str(tmp_path / 'settings.json'))
+    s = Settings(providers={}, model_default='')
+    # Persist a clean baseline so a later load reflects disk truth.
+    s.save(settings_mod.DEFAULT_SETTINGS_PATH)
+    sw = _make_sw(s)
+
+    editors = []
+    orig_present = sw_mod.ProviderEditorWindow.present
+    sw_mod.ProviderEditorWindow.present = _no_present_factory()
+    try:
+        # Capture the editor instance constructed by _open_editor.
+        orig_init = sw_mod.ProviderEditorWindow.__init__
+
+        def _init_capture(self, *a, **k):
+            orig_init(self, *a, **k)
+            editors.append(self)
+
+        monkeypatch.setattr(sw_mod.ProviderEditorWindow, '__init__',
+                            _init_capture)
+        sw._on_add_provider(None)
+    finally:
+        sw_mod.ProviderEditorWindow.present = orig_present
+
+    assert editors
+    editor = editors[0]
+    pid = editor._pid
+    assert pid in s.providers  # in-memory only so far
+
+    # Disk must not yet have the empty provider (save deferred on add).
+    reloaded_mid = Settings.load(settings_mod.DEFAULT_SETTINGS_PATH)
+    assert pid not in (reloaded_mid.providers or {})
+
+    # Dismiss without filling — 'closed' → blank discard + save.
+    editor.emit('closed')
+
+    assert pid not in s.providers
+    reloaded = Settings.load(settings_mod.DEFAULT_SETTINGS_PATH)
+    assert pid not in (reloaded.providers or {})
+
+
+def test_add_provider_with_name_kept_on_close(monkeypatch, tmp_path):
+    """Add Provider → set name → close → provider kept and persisted."""
+    import settings as settings_mod
+    monkeypatch.setattr(settings_mod, 'DEFAULT_SETTINGS_PATH',
+                        str(tmp_path / 'settings.json'))
+    s = Settings(providers={}, model_default='')
+    s.save(settings_mod.DEFAULT_SETTINGS_PATH)
+    sw = _make_sw(s)
+
+    editors = []
+    orig_present = sw_mod.ProviderEditorWindow.present
+    sw_mod.ProviderEditorWindow.present = _no_present_factory()
+    try:
+        orig_init = sw_mod.ProviderEditorWindow.__init__
+
+        def _init_capture(self, *a, **k):
+            orig_init(self, *a, **k)
+            editors.append(self)
+
+        monkeypatch.setattr(sw_mod.ProviderEditorWindow, '__init__',
+                            _init_capture)
+        sw._on_add_provider(None)
+    finally:
+        sw_mod.ProviderEditorWindow.present = orig_present
+
+    assert editors
+    editor = editors[0]
+    pid = editor._pid
+    editor._name_row.set_text('My Provider')
+    editor._name_row.emit('apply')
+    editor.emit('closed')
+
+    assert pid in s.providers
+    assert s.providers[pid]['name'] == 'My Provider'
+    reloaded = Settings.load(settings_mod.DEFAULT_SETTINGS_PATH)
+    assert reloaded.providers[pid]['name'] == 'My Provider'
+
+
+def test_add_provider_does_not_save_before_editor_close(monkeypatch, tmp_path):
+    """_on_add_provider must not write settings.json until the editor
+    commits something meaningful (or discards on blank close)."""
+    import settings as settings_mod
+    monkeypatch.setattr(settings_mod, 'DEFAULT_SETTINGS_PATH',
+                        str(tmp_path / 'settings.json'))
+    s = Settings(providers={}, model_default='')
+    s.save(settings_mod.DEFAULT_SETTINGS_PATH)
+    saves = []
+    monkeypatch.setattr(s, 'save', lambda *a, **k: saves.append(1))
+    sw = _make_sw(s)
+    orig_present = sw_mod.ProviderEditorWindow.present
+    sw_mod.ProviderEditorWindow.present = _no_present_factory()
+    try:
+        sw._on_add_provider(None)
+    finally:
+        sw_mod.ProviderEditorWindow.present = orig_present
+    assert saves == []  # no disk write on add
+    assert s.providers  # in-memory yes

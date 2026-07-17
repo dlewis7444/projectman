@@ -7,6 +7,58 @@ All notable changes to ProjectMan will be documented in this file.
 _Deferred UX polish TODOs (editor unsaved-changes affordance; sidebar
 new-project count while inline-edit row is visible) remain open._
 
+## [1.5.0] - 2026-07-17
+
+### Added
+- **Kimi Code harness (4th first-class backend):** Moonshot AI `kimi` adapter
+  with full caps (continue/resume/sessions/status/model/headless). Continue does
+  **not** fall back via `|| kimi` (probed: kimi itself starts a fresh session
+  when nothing is continuable). Sessions via storage-scan of
+  `session_index.jsonl` + `state.json`. Status bridge under `bridges/kimi/` with
+  `[[hooks]]` merge into `~/.kimi-code/config.toml`. Model aliases from
+  `~/.kimi-code/config.toml`; VTE Shift+Enter capture; local and remote PATH
+  include installer bin dirs so bare `kimi` resolves for GUI-launched sessions.
+- **Virtual project groups:** organize projects into nested folders in the
+  sidebar **without** nesting on disk. Projects remain flat under each host's
+  `projects/` directory; only the UI tree and a membership map change.
+  - Nested groups, max depth 5 (root group = depth 1).
+  - Localhost: `~/.ProjectMan/project_groups.json`.
+  - Remote hosts: the same path on the remote home directory (fetch/push over
+    SSH; last-write-wins).
+  - How to use: host-line **+** menu → **New Project** / **New Group**; group-line
+    **+** menu → **New Subgroup** / **New Project** (right-click menus remain).
+    On a project row, **Move to group**. New group/project creation switches the
+    host section filter to **all**. Expanding a group shows its children;
+    expanding a project still shows sessions (unchanged).
+  - Design note: `docs/project-groups.md`. Experimental UI organization — disk
+    layout stays flat.
+  - Remote group push is **async** (off the GTK main thread) with coalesce;
+    health-fetch apply uses a per-host write generation so a stale fetch
+    cannot roll back a just-pushed forest. Nested `select_project` expands
+    ancestors with one persist per host (not one push per level).
+
+### Fixed
+- **Harness installer PATH for local spawn:** GUI-launched ProjectMan does not
+  source `.bashrc`, so bare `kimi` / `grok` / `opencode` failed after install.
+  Installer bin dirs are now prepended for local spawns, doctor, and at app
+  startup (same idea as remote PATH injection).
+- **Settings → Models Add Provider:** Adwaita CRITICAL from double-adding the
+  sticky “Add Provider” row (PreferencesGroup internal ListBox parent check),
+  and empty providers no longer persist when the editor is dismissed without
+  filling name/URL/models.
+- **Harness / PAA / ntfy discoverability:** plain-English definition of
+  “harness” on Settings → Harnesses; clearer PAA (Projects Admin Agent) and
+  ntfy.sh tooltips/subtitles.
+- **Project rename name policy:** local rename now rejects the same shell
+  metacharacters / path junk as create (`project_name_reject_reason`), so
+  `$(…)` / `` ` `` names cannot re-enter via rename after create was hardened.
+- **Grok `Ctrl+;` / `Ctrl+'` queue shortcut under VTE:** those chords were
+  arriving as bare `;` / `'` because VTE cannot encode Ctrl+punctuation.
+  ProjectMan now feeds Kitty CSI-u sequences at CAPTURE, driven by a new
+  per-harness `vte_key_captures` section in `settings.json` (Shift+Enter for
+  all four harnesses; Grok also gets the queue chords). See
+  `docs/grok-ctrl-semicolon-queue-shortcut.md`.
+
 ## [1.4.7] - 2026-07-14
 
 ### Added

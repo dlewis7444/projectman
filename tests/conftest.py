@@ -57,4 +57,16 @@ def _isolate_projectman_paths(tmp_path_factory, monkeypatch):
         )
     except ImportError:
         pass
+    # Virtual groups: Sidebar loads localhost forest on init; keep tests off
+    # the developer's real project_groups.json.
+    try:
+        import project_groups
+        monkeypatch.setattr(
+            project_groups,
+            'DEFAULT_GROUPS_PATH',
+            str(fake_home / 'project_groups.json'),
+            raising=False,
+        )
+    except ImportError:
+        pass
     yield
