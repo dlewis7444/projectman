@@ -225,6 +225,13 @@ class Settings:
     #   Absent → harness/provider default model. Present → adapters may pass
     #   -m (Grok/OpenCode today). Shared shape for future multi-harness picks.
     model_pins: dict = field(default_factory=dict)
+    # harness_axis_memory: {project_ref: {harness_id: {provider?: str, model?: str}}}
+    #   Per-harness snapshot of flat provider_overrides / model_pins for a
+    #   project. Lazy: written only on harness *leave* (not on every provider
+    #   pick). Flat maps remain the runtime SoT; this side map restores pins
+    #   when the user switches A→B→A. Encoding: omit "provider" = follow
+    #   model_default; "provider": "" = explicit native; omit "model" = no pin.
+    harness_axis_memory: dict = field(default_factory=dict)
     # tier_models: {provider_id: {tier: model_id | ''}}  — per-provider tier
     # assignments. Each custom provider carries its own Opus/Sonnet/Haiku/
     # Subagent/Fable mapping against ITS model list; '' = use the provider's
@@ -734,6 +741,7 @@ class Settings:
         self.harness_overrides = migrate_override_map(self.harness_overrides)
         self.provider_overrides = migrate_override_map(self.provider_overrides)
         self.model_pins = migrate_override_map(self.model_pins)
+        self._normalize_harness_axis_memory()
 
         if LOCALHOST_ID not in self.host_section_expanded:
             self.host_section_expanded[LOCALHOST_ID] = True
@@ -751,6 +759,43 @@ class Settings:
                 self.host_section_mode[hid] = 'all' if expanded else 'hidden'
         if LOCALHOST_ID not in self.host_section_mode:
             self.host_section_mode[LOCALHOST_ID] = 'all'
+
+    def _normalize_harness_axis_memory(self) -> None:
+        """Normalize ``harness_axis_memory`` shape and project_ref outer keys.
+
+        Outer keys → project_ref form. Inner must be ``{harness_id: entry}``
+        dicts. Entry may carry ``provider`` (str, including ``''``) and/or
+        ``model`` (non-empty str). Malformed layers drop silently.
+        """
+        from hosts import normalize_override_key
+        raw = self.harness_axis_memory
+        if not isinstance(raw, dict):
+            self.harness_axis_memory = {}
+            return
+        out: dict = {}
+        for key, harness_map in raw.items():
+            if not isinstance(key, str) or not key:
+                continue
+            if not isinstance(harness_map, dict):
+                continue
+            ref = normalize_override_key(key)
+            cleaned_harnesses = out.get(ref, {})
+            if not isinstance(cleaned_harnesses, dict):
+                cleaned_harnesses = {}
+            for harness_id, entry in harness_map.items():
+                if not isinstance(harness_id, str) or not harness_id:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                clean: dict = {}
+                if 'provider' in entry and isinstance(entry['provider'], str):
+                    clean['provider'] = entry['provider']
+                mid = entry.get('model')
+                if isinstance(mid, str) and mid:
+                    clean['model'] = mid
+                cleaned_harnesses[harness_id] = clean
+            out[ref] = cleaned_harnesses
+        self.harness_axis_memory = out
 
     def host_profiles(self) -> dict:
         """Return ``{id: HostProfile}`` for configured remotes (not localhost)."""
@@ -808,3 +853,155 @@ class Settings:
             except OSError:
                 pass
             raise
+
+
+# ── Per-harness axis memory (provider/model pins) ─────────────────────────────
+# Flat provider_overrides / model_pins remain runtime SoT. On harness leave, the
+# owned axis is snapshotted into harness_axis_memory; on return, that axis is
+# restored into the flat maps (the other axis is cleared for the project).
+
+# Hardcoded to avoid circular imports with harnesses.ADAPTERS. Unknown ids are
+# not treated as model-pin harnesses (see apply_project_axes).
+_PROVIDER_AXIS_HARNESS = 'claude'
+_MODEL_AXIS_HARNESSES = frozenset({'grok', 'opencode', 'kimi'})
+
+
+def snapshot_project_axes(settings: 'Settings', project_path: str,
+                          host_id: str = 'localhost',
+                          harness_id: str = '') -> dict:
+    """Capture the axis this harness *owns* from flat provider/model maps.
+
+    Ownership-filtered (matches apply_project_axes):
+      * ``claude`` — snapshot ``provider`` only (omit model even if pinned)
+      * ``grok`` / ``opencode`` / ``kimi`` — snapshot ``model`` only
+        (omit provider even if overridden)
+      * unknown harness id — empty dict (nothing ownership-scoped)
+
+    Encoding (lazy keys):
+      * no provider_overrides key → omit ``provider`` (follow model_default)
+      * provider_overrides == ''  → ``"provider": ""`` (explicit native)
+      * provider_overrides == id  → ``"provider": id``
+      * no model_pins key / empty → omit ``model``
+      * model_pins set            → ``"model": id``
+    """
+    from hosts import lookup_override, LOCALHOST_ID
+    hid = host_id or LOCALHOST_ID
+    entry: dict = {}
+    if harness_id == _PROVIDER_AXIS_HARNESS:
+        po = settings.provider_overrides if isinstance(
+            settings.provider_overrides, dict) else None
+        val, found = lookup_override(po, hid, project_path)
+        if found and isinstance(val, str):
+            entry['provider'] = val
+    elif harness_id in _MODEL_AXIS_HARNESSES:
+        mp = settings.model_pins if isinstance(
+            settings.model_pins, dict) else None
+        val, found = lookup_override(mp, hid, project_path)
+        if found and isinstance(val, str) and val:
+            entry['model'] = val
+    # else: unknown harness → empty snapshot
+    return entry
+
+
+def _dual_pop_override_maps(settings: 'Settings', project_path: str,
+                            host_id: str) -> tuple[dict, dict, str]:
+    """Return (provider_overrides, model_pins, ref) after dual-popping path+ref."""
+    from hosts import override_key, LOCALHOST_ID
+    hid = host_id or LOCALHOST_ID
+    ref = override_key(project_path, hid)
+    po = dict(settings.provider_overrides) if isinstance(
+        settings.provider_overrides, dict) else {}
+    mp = dict(settings.model_pins) if isinstance(
+        settings.model_pins, dict) else {}
+    po.pop(ref, None)
+    po.pop(project_path, None)
+    mp.pop(ref, None)
+    mp.pop(project_path, None)
+    return po, mp, ref
+
+
+def apply_project_axes(settings: 'Settings', project_path: str, host_id: str,
+                       harness_id: str, memory_entry) -> None:
+    """Apply a harness memory entry into flat provider/model maps.
+
+    Ownership (today):
+      * ``claude`` — restore provider_overrides only; clear model_pins
+      * ``grok`` / ``opencode`` / ``kimi`` — restore model_pins only;
+        clear provider_overrides
+      * unknown harness id — clear both axes; do not restore from memory
+      * missing / empty memory → clear both pins for the project
+
+    Always writes via ``override_key``; dual-pops bare path + ref.
+    Mutates *settings* in place; does not save.
+    """
+    po, mp, ref = _dual_pop_override_maps(settings, project_path, host_id)
+    mem = memory_entry if isinstance(memory_entry, dict) else {}
+    if harness_id == _PROVIDER_AXIS_HARNESS:
+        if 'provider' in mem and isinstance(mem['provider'], str):
+            po[ref] = mem['provider']
+    elif harness_id in _MODEL_AXIS_HARNESSES:
+        mid = mem.get('model')
+        if isinstance(mid, str) and mid:
+            mp[ref] = mid
+    # else: unknown harness — leave both maps cleared (no restore)
+    settings.provider_overrides = po
+    settings.model_pins = mp
+
+
+def remember_and_switch_axes(settings: 'Settings', project_path: str,
+                             host_id: str, old_harness: str,
+                             new_harness: str) -> None:
+    """Snapshot flat axes under *old_harness*; apply *new_harness* memory.
+
+    Snapshot is ownership-scoped to the harness being left. If
+    ``old_harness == new_harness``, no-op (caller may still update
+    harness_overrides). Mutates *settings* in place; does not save.
+    """
+    if old_harness == new_harness:
+        return
+    from hosts import override_key, LOCALHOST_ID
+    hid = host_id or LOCALHOST_ID
+    ref = override_key(project_path, hid)
+
+    if not isinstance(settings.harness_axis_memory, dict):
+        settings.harness_axis_memory = {}
+    mem_root = settings.harness_axis_memory
+
+    # Prefer canonical ref; fall back to bare path (legacy) then migrate.
+    proj_mem = mem_root.get(ref)
+    if not isinstance(proj_mem, dict):
+        proj_mem = mem_root.get(project_path)
+        if not isinstance(proj_mem, dict):
+            proj_mem = {}
+        elif project_path != ref:
+            mem_root.pop(project_path, None)
+    proj_mem = dict(proj_mem)
+
+    snap = snapshot_project_axes(
+        settings, project_path, hid, harness_id=old_harness)
+    proj_mem[old_harness] = snap
+    mem_root[ref] = proj_mem
+    if project_path != ref:
+        mem_root.pop(project_path, None)
+    settings.harness_axis_memory = mem_root
+
+    new_entry = proj_mem.get(new_harness)
+    if not isinstance(new_entry, dict):
+        new_entry = {}
+    apply_project_axes(settings, project_path, hid, new_harness, new_entry)
+
+
+def scrub_provider_from_axis_memory(settings: 'Settings',
+                                    provider_id: str) -> None:
+    """Drop ``provider`` fields equal to *provider_id* from harness_axis_memory.
+
+    Used when a custom provider is deleted so stale memory cannot resurrect it.
+    """
+    if not provider_id or not isinstance(settings.harness_axis_memory, dict):
+        return
+    for harness_map in settings.harness_axis_memory.values():
+        if not isinstance(harness_map, dict):
+            continue
+        for entry in harness_map.values():
+            if isinstance(entry, dict) and entry.get('provider') == provider_id:
+                entry.pop('provider', None)

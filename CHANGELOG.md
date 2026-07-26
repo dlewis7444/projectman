@@ -2,7 +2,63 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
-## [Unreleased]
+## [1.5.1] - 2026-07-26
+
+### Fixed
+- **Sidebar PopoverMenu leak — the 2026-07-24 ~60 s freeze + 12 GB heap:**
+  `_rebuild_popover` parented a brand-new `Gtk.PopoverMenu` to the row on
+  every menu-model change without `unparent()`ing the previous one; the old
+  trees accumulated forever (~74k popovers ≈ 11.7 GB, and the burst itself
+  was the main-loop freeze). The old popover is now unparented on rebuild,
+  and a throttled rebuild-storm guard (>20 rebuilds in 10 s logs a stack
+  trace) will catch the still-unidentified burst trigger if it recurs.
+- **Zellij main-thread hangs:** `kill_session()` now passes `timeout=5`
+  (its callers are synchronous UI paths — a wedged zellij server could hang
+  the UI indefinitely), and the zellij socket-dir change handler makes one
+  `alive_session_names()` call instead of N per-project `list-sessions`
+  subprocesses on the GTK main loop (up to ~60 s blocked per event).
+- **Active Only filter behavior:**
+  - Clicking a project with an already-running session while in Show-all
+    returns the host section to Active Only again (the M-UX.10b move of the
+    auto-flip to process-started-only had dropped this for reattach; failed
+    spawns still never flip the filter).
+  - Active Only now hides group rows that contain no active project
+    (decluttered filtered view); the group holding the just-spawned/active
+    project always survives, so the auto-flip still can't vanish the tree
+    you're looking at.
+- **Groups collapse on project switch (two mechanisms, both fixed):**
+  1. The M-UX.10b auto "Active Only" filter engages on every successful
+     spawn — the browse-Show-all → auto-return-to-active workflow. The
+     GroupRow filter rule hid every group without a running project, so the
+     organized tree vanished on each switch. Groups are no longer hidden by
+     the flip itself (superseded 2026-07-26: groups *without* an active
+     project are intentionally hidden in Active Only — see above); expansion
+     state is untouched by the flip.
+  2. A double-click on a project (or session) row inside a group's nested
+     listbox was delivered to both listboxes: the inner activated the project
+     (wanted) and the outer activated the containing GroupRow (leaked toggle
+     → the group collapsed). A GroupRow activation that immediately follows
+     a nested activation on the same ancestor chain is now ignored (one
+     suppression per ancestor per nested activation); genuine header toggles
+     and keyboard activation are unaffected.
+  Reproduced and verified end-to-end on the gated test bench (headless cage + pm-click
+  real double-clicks): auto Active-Only engages on spawn AND the group tree
+  survives; activation still fires; header double-click still toggles.
+  Regression coverage in `tests/test_groups_switch_expansion.py`.
+- **Remote hooks:** a remote rich-status install could register ProjectMan
+  hooks in the remote's `~/.claude/settings.json` without `hook.js` on disk,
+  breaking Claude Code on the remote (MODULE_NOT_FOUND on every lifecycle
+  event). `install.sh` now bundles `hooks/hook.js`, provisioning falls back
+  to the live local hook for pre-bundle trees, and registrations are only
+  written when `hook.js` is actually present on the remote.
+- **Per-harness provider/model memory:** switching harness no longer
+  permanently loses provider/model pins for the project. On leave, the flat
+  pin for the harness's owned axis is **stashed** into `harness_axis_memory`
+  (not left sitting in the flat maps); on return that axis is **restored**
+  into `provider_overrides` / `model_pins` (reverses the 1.4.x unconditional
+  clear-with-no-memory). Claude owns provider overrides; Grok/OpenCode/Kimi
+  own model pins. First visit to a harness still clears that harness's axis
+  for the project.
 
 _Deferred UX polish TODOs (editor unsaved-changes affordance; sidebar
 new-project count while inline-edit row is visible) remain open._

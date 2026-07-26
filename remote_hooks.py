@@ -63,11 +63,21 @@ def _grok_json_absolute(text: str) -> str:
 
 
 def _collect_bridge_files(app_dir: str | None = None) -> dict[str, tuple[bytes, bool]]:
-    """Map home-relative dest → (content, executable)."""
+    """Map home-relative dest → (content, executable).
+
+    Claude ``hook.js`` is required for rich status. Prefer the source tree
+    (``app_dir/hooks/hook.js``). Fall back to the live local install at
+    ``~/.claude/projectman/hook.js`` so an older installed app tree that
+    only shipped ``bridges/`` (pre-hooks-bundle) can still provision remotes.
+    """
     root = app_dir or _app_dir()
     files: dict[str, tuple[bytes, bool]] = {}
 
     hook = _read_bytes(os.path.join(root, 'hooks', 'hook.js'))
+    if hook is None:
+        # Live local Claude hook (install.sh always places it here even when
+        # the app install dir historically omitted hooks/).
+        hook = _read_bytes(os.path.expanduser('~/.claude/projectman/hook.js'))
     if hook is not None:
         files['.claude/projectman/hook.js'] = (hook, False)
 
@@ -134,54 +144,59 @@ for rel, meta in manifest.items():
             if rel not in written:
                 written.append(rel + "+x")
 
-# Claude settings.json — add ProjectMan hooks if missing (idempotent).
-settings_path = home / ".claude" / "settings.json"
-settings_path.parent.mkdir(parents=True, exist_ok=True)
-try:
-    if settings_path.is_file():
-        settings = json.loads(settings_path.read_text() or "{}")
-    else:
+# Claude settings.json — add ProjectMan hooks only when hook.js is present.
+# Never register a MODULE_NOT_FOUND command (settings-only installs break CC).
+hook_dest = home / ".claude" / "projectman" / "hook.js"
+if hook_dest.is_file():
+    settings_path = home / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if settings_path.is_file():
+            settings = json.loads(settings_path.read_text() or "{}")
+        else:
+            settings = {}
+    except Exception:
         settings = {}
-except Exception:
-    settings = {}
-if not isinstance(settings, dict):
-    settings = {}
-hooks = settings.setdefault("hooks", {})
-if not isinstance(hooks, dict):
-    hooks = {}
-    settings["hooks"] = hooks
-cmd = "node ~/.claude/projectman/hook.js"
-events = [
-    "PreToolUse", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit",
-    "PermissionRequest", "Notification", "Stop", "SessionStart", "SessionEnd",
-]
-changed = False
-for ev in events:
-    entries = hooks.get(ev)
-    if not isinstance(entries, list):
-        entries = []
-        hooks[ev] = entries
-    found = False
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        for h in entry.get("hooks") or []:
-            if isinstance(h, dict) and "projectman/hook.js" in str(h.get("command", "")):
-                found = True
+    if not isinstance(settings, dict):
+        settings = {}
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = {}
+        settings["hooks"] = hooks
+    cmd = "node ~/.claude/projectman/hook.js"
+    events = [
+        "PreToolUse", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit",
+        "PermissionRequest", "Notification", "Stop", "SessionStart", "SessionEnd",
+    ]
+    changed = False
+    for ev in events:
+        entries = hooks.get(ev)
+        if not isinstance(entries, list):
+            entries = []
+            hooks[ev] = entries
+        found = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            for h in entry.get("hooks") or []:
+                if isinstance(h, dict) and "projectman/hook.js" in str(h.get("command", "")):
+                    found = True
+                    break
+            if found:
                 break
-        if found:
-            break
-    if not found:
-        entries.append({"hooks": [{"type": "command", "command": cmd}]})
-        changed = True
-if changed:
-    # Backup existing once.
-    if settings_path.is_file():
-        bak = settings_path.with_suffix(settings_path.suffix + ".bak.projectman")
-        if not bak.exists():
-            bak.write_bytes(settings_path.read_bytes())
-    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
-    written.append(".claude/settings.json")
+        if not found:
+            entries.append({"hooks": [{"type": "command", "command": cmd}]})
+            changed = True
+    if changed:
+        # Backup existing once.
+        if settings_path.is_file():
+            bak = settings_path.with_suffix(settings_path.suffix + ".bak.projectman")
+            if not bak.exists():
+                bak.write_bytes(settings_path.read_bytes())
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+        written.append(".claude/settings.json")
+else:
+    print("WARN claude hook.js missing; skipped settings.json registration")
 
 # Grok: [compat.claude] hooks = false so only ~/.grok/hooks/projectman.json
 # drives status (mirrors bridges/grok/compat_toml.py).
@@ -269,6 +284,14 @@ def install_remote_status_bridges(
     files = _collect_bridge_files(app_dir)
     if not files:
         return False, 'no local bridge sources found'
+    # Refuse to provision a remote that would only register Claude hooks with
+    # no hook.js on disk (MODULE_NOT_FOUND on every Claude lifecycle event).
+    if '.claude/projectman/hook.js' not in files:
+        return (
+            False,
+            'claude hook.js not found under app hooks/ or ~/.claude/projectman/; '
+            're-run install.sh or restore hooks/hook.js',
+        )
 
     manifest = {}
     for rel, (content, executable) in files.items():

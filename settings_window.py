@@ -649,6 +649,7 @@ class ProviderEditorWindow(Adw.Dialog):
         self._rebuild_models_group()
 
     def _on_remove_provider(self, _btn):
+        from settings import scrub_provider_from_axis_memory
         if isinstance(self._settings.providers, dict):
             self._settings.providers.pop(self._pid, None)
         if self._settings.model_default == self._pid:
@@ -658,6 +659,7 @@ class ProviderEditorWindow(Adw.Dialog):
                 p: v for p, v in self._settings.provider_overrides.items()
                 if v != self._pid
             }
+        scrub_provider_from_axis_memory(self._settings, self._pid)
         if isinstance(self._settings.tier_models, dict):
             self._settings.tier_models.pop(self._pid, None)
         if isinstance(self._settings.classifier_temperature, dict):
@@ -722,6 +724,7 @@ class ProviderEditorWindow(Adw.Dialog):
         """Remove this provider and its tier/classifier side-state when it is
         still blank after commits. Used so Add Provider → dismiss without
         filling does not leave an empty husk in settings.json."""
+        from settings import scrub_provider_from_axis_memory
         if isinstance(self._settings.providers, dict):
             self._settings.providers.pop(self._pid, None)
         if self._settings.model_default == self._pid:
@@ -731,6 +734,7 @@ class ProviderEditorWindow(Adw.Dialog):
                 p: v for p, v in self._settings.provider_overrides.items()
                 if v != self._pid
             }
+        scrub_provider_from_axis_memory(self._settings, self._pid)
         if isinstance(self._settings.tier_models, dict):
             self._settings.tier_models.pop(self._pid, None)
         if isinstance(self._settings.classifier_temperature, dict):
