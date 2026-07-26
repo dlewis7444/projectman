@@ -1,3 +1,7 @@
+import logging
+import time
+import traceback
+from collections import deque
 from datetime import datetime
 
 import gi
@@ -8,6 +12,8 @@ from gi.repository import Gtk, Gio, GLib, GObject, Gdk, Pango, Adw
 import harnesses
 from model import ResourceReader
 from models import FOLLOW_DEFAULT, NATIVE_LABEL
+
+log = logging.getLogger(__name__)
 
 
 # Shared tooltips / accessible labels for create chrome (personas: empty Gio.Menu
@@ -176,6 +182,10 @@ class Sidebar(Gtk.Box):
         _esc.connect('key-pressed', self._on_sidebar_capture_key)
         self.add_controller(_esc)
 
+        # Last nested-listbox activation (monotonic time, ancestor group ids) —
+        # the leak guard's evidence; see _group_activation_leaked.
+        self._nested_activation = None
+
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         btn_row.set_halign(Gtk.Align.END)
         btn_row.set_margin_top(6)
@@ -275,8 +285,13 @@ class Sidebar(Gtk.Box):
         """Per-host ListBox filter: section mode + name filter.
 
         Applied to host listboxes and nested group child listboxes.
-        GroupRows stay visible when any descendant project would match
-        (or when mode is ``all`` with no name filter, including empty groups).
+        In Active Only, a GroupRow survives only when it has an active
+        (matching) descendant — empty-of-active groups are hidden so the
+        filtered view stays decluttered (the maintainer, 2026-07-26). The group holding
+        the just-spawned project always survives, so the auto-flip on spawn
+        still can't make the tree you're looking at vanish (the original
+        "groups collapse on project switch" concern). A name filter still
+        hides groups with no matching descendant in any mode.
         """
         def _filter_row(row):
             mode = self._section_mode(host_id)
@@ -287,10 +302,9 @@ class Sidebar(Gtk.Box):
             if isinstance(row, GroupRow):
                 if mode == 'hidden':
                     return False
-                # Show empty groups when not filtering by active/name.
-                if mode == 'all' and not self._filter_text:
-                    return True
-                return row.has_matching_descendant(mode, self._filter_text)
+                if mode == 'active' or self._filter_text:
+                    return row.has_matching_descendant(mode, self._filter_text)
+                return True
             return True
         return _filter_row
 
@@ -807,10 +821,50 @@ class Sidebar(Gtk.Box):
 
     def _on_row_activated(self, listbox, row):
         if isinstance(row, ProjectRow):
+            # A nested activation always precedes the leaked GroupRow one —
+            # mark the ancestor chain so _group_activation_leaked can tell a
+            # real group-header toggle from the leak.
+            ids = set()
+            w = row.get_parent()
+            while w is not None:
+                if isinstance(w, GroupRow):
+                    ids.add(w._group.id)
+                w = w.get_parent()
+            self._nested_activation = (time.monotonic(), ids)
             self.emit('project-activated', row._project.path)
         elif isinstance(row, GroupRow):
             # Groups never emit project-activated; activate toggles expand.
+            if self._group_activation_leaked(row):
+                return
             row.toggle_expanded()
+
+    def _group_activation_leaked(self, grow):
+        """True when a GroupRow ``row-activated`` leaked from a nested listbox.
+
+        A double-click on a project (or session) row inside a group's nested
+        listbox is delivered to BOTH listboxes' gestures: the inner one
+        activates the project (wanted) and, a moment later, the outer one
+        activates the containing GroupRow (unwanted toggle → the group
+        "collapses" on project switch). The GroupRow allocation spans its
+        children area, so the outer ListBox cannot tell the two apart — but
+        the leaked activation always immediately follows the nested one, on
+        the same ancestor chain. A genuine header toggle has no nested
+        activation just before it (and keyboard Enter has none at all).
+
+        Each nested activation legitimizes exactly one leaked activation per
+        ancestor group, so matched ids are consumed: the very next GroupRow
+        activation on that group (e.g. a deliberate header toggle) works.
+        """
+        if self._nested_activation is None:
+            return False
+        t, ids = self._nested_activation
+        if time.monotonic() - t > 0.5:
+            self._nested_activation = None
+            return False
+        if grow._group.id in ids:
+            ids.discard(grow._group.id)
+            return True
+        return False
 
     def _refresh_section_counts(self):
         """Update each section header's active(total) counts."""
@@ -1936,6 +1990,11 @@ class ProjectRow(Gtk.ListBoxRow):
         self._pending_deactivate = False
         self._is_zellij = False
         self._new_session_row = None
+        # None until _setup_context_menu builds the first popover.
+        self._popover = None
+        # Rebuild-storm guard state (see _check_rebuild_storm).
+        self._rebuild_times = deque()
+        self._rebuild_warned_at = 0.0
         # The harness id the LIVE child is actually running (C5 truth), pushed in
         # from window.py's process-started/exited flow. None when nothing runs.
         # When it disagrees with the configured/effective harness (a restored
@@ -2360,11 +2419,40 @@ class ProjectRow(Gtk.ListBoxRow):
                     break
             self._rebuild_popover()
 
+    # Popover rebuild-storm guard: more than this many rebuilds within the
+    # window logs a throttled warning + stack (burst trigger of the 2026-07-24
+    # 12 GB leak is still unidentified — see docs/popover-leak-main-thread-hang.md).
+    _REBUILD_STORM_COUNT = 20
+    _REBUILD_STORM_WINDOW = 10.0   # seconds
+    _REBUILD_WARN_INTERVAL = 60.0  # seconds between warnings per row
+
     def _rebuild_popover(self):
         """(Re)create the context-menu popover after the menu model changes."""
+        # The old popover must be unparented explicitly: set_parent() made it
+        # a child of this row, and merely reassigning self._popover leaked the
+        # whole widget tree (~74k trees ≈ 12 GB once — same doc as above).
+        if self._popover is not None:
+            self._popover.unparent()
         self._popover = Gtk.PopoverMenu.new_from_model(self._menu)
         self._popover.set_parent(self)
         self._popover.set_has_arrow(False)
+        self._check_rebuild_storm()
+
+    def _check_rebuild_storm(self):
+        """Log a throttled warning (with stack) if rebuilds come too fast."""
+        now = time.monotonic()
+        times = self._rebuild_times
+        times.append(now)
+        while times and now - times[0] > self._REBUILD_STORM_WINDOW:
+            times.popleft()
+        if (len(times) > self._REBUILD_STORM_COUNT
+                and now - self._rebuild_warned_at > self._REBUILD_WARN_INTERVAL):
+            self._rebuild_warned_at = now
+            log.warning(
+                'ProjectRow(%s): popover rebuilt %d times in %.0fs '
+                '— rebuild storm, stack follows',
+                self._project.path, len(times), self._REBUILD_STORM_WINDOW)
+            log.warning(''.join(traceback.format_stack()))
 
     def set_model_options(self, options, current, global_label):
         """Populate the Provider submenu for THIS row's effective harness.

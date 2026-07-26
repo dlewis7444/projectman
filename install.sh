@@ -147,6 +147,12 @@ cp -r "$SCRIPT_DIR/icons" "$INSTALL_DIR/"
 # Bundle the harness status bridges so the Settings → Harnesses "Install bridge"
 # button can find them in the installed tree (install.sh installs them too).
 cp -r "$SCRIPT_DIR/bridges" "$INSTALL_DIR/"
+# Claude hook source must live in the installed tree too: rich-status remote
+# install reads app_dir/hooks/hook.js (not only the live ~/.claude copy).
+# Without this, remote hosts get hooks registered in settings.json but no
+# hook.js on disk → Claude Code MODULE_NOT_FOUND on every lifecycle event.
+mkdir -p "$INSTALL_DIR/hooks"
+cp "$SCRIPT_DIR/hooks/hook.js" "$INSTALL_DIR/hooks/hook.js"
 
 # ── wrapper script ─────────────────────────────────────────────────────────────
 info "Creating $BIN_DIR/projectman ..."
