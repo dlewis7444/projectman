@@ -52,8 +52,11 @@ def kill_session(name: str) -> None:
     raises (a missing zellij binary / dead session is a no-op)."""
     try:
         if session_exists(name):
+            # timeout=: callers are synchronous UI paths (deactivate, archive,
+            # harness-change respawn) — a wedged zellij server must not hang
+            # the GTK main loop (docs/popover-leak-main-thread-hang.md).
             subprocess.run(['zellij', 'kill-session', name],
-                           capture_output=True)
+                           capture_output=True, timeout=5)
     except Exception:
         pass
 
