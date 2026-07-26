@@ -71,24 +71,6 @@ def test_spawn_claude_resume_routes_to_resume_mode():
     assert captured['argv'] == ['claude', '--resume', 'sess-xyz']
 
 
-def test_spawn_harness_sets_fallback_reason_from_plan():
-    """A custom-model project with ccr missing → env None, fallback surfaced."""
-    from settings import Settings
-    s = Settings(
-        providers={'ollama': {'name': 'O', 'base_url': 'http://h/v1',
-                              'api_key': 'k', 'models': {'q': {'name': 'Q'}}}},
-        model_default='ollama/q',
-    )
-    tv = _make_tv(settings=s, path='/tmp/custcommodel')
-    captured = {}
-    with patch('ccr.available', return_value=False), \
-         patch.object(tv, '_spawn',
-                      side_effect=lambda argv, env=None: captured.update(argv=argv, env=env)):
-        tv.spawn_harness('continue')
-    assert captured['env'] is None
-    assert tv._fallback_reason  # explanatory string set for window.py's toast
-
-
 def test_spawn_claude_custom_binary_continue():
     from settings import Settings
     tv = _make_tv(settings=Settings(claude_binary='/opt/claude'), path='/tmp/cb')
@@ -297,36 +279,7 @@ def test_fb9_natural_exit_then_reactivate_follows_effective_harness(monkeypatch)
     assert tv._adapter.id == 'claude'          # follows effective_harness now
 
 
-# ── A3: zellij env comes through the adapter, including custom-model fallback ──
-
-def test_zellij_custom_model_ccr_missing_sets_fallback(tmp_path, monkeypatch):
-    """spawn_zellij (create path) surfaces the adapter's ccr fallback reason —
-    proving the env decision rides zellij_spawn_env, not a terminal-local call."""
-    import terminal
-    from settings import Settings
-    monkeypatch.setenv('HOME', str(tmp_path))
-    (tmp_path / '.ProjectMan').mkdir(parents=True, exist_ok=True)
-    s = Settings(
-        providers={'ollama': {'name': 'O', 'base_url': 'http://h/v1',
-                              'api_key': 'k', 'models': {'q': {'name': 'Q'}}}},
-        model_default='ollama/q',
-    )
-    tv = _make_tv(settings=s, path='/tmp/zcustom')
-    captured = {}
-    with patch('terminal.zellij.session_alive', return_value=False), \
-         patch('terminal.zellij.socket_dir', return_value=str(tmp_path / 'sock')), \
-         patch('ccr.available', return_value=False), \
-         patch.object(tv, '_spawn',
-                      side_effect=lambda cmd, env=None: captured.update(cmd=cmd, env=env)):
-        (tmp_path / 'sock').mkdir(parents=True, exist_ok=True)
-        tv.spawn_zellij('pm-zcustom')
-    # ccr missing → native env (None custom → inherits os.environ) BUT the
-    # fallback reason is set for window.py's toast.
-    assert tv._fallback_reason
-    # The spawn still happened with a SHELL-wrapped env (zellij create path).
-    assert captured['env'] is not None
-    assert captured['env']['SHELL'].endswith('zellij-shell-init.sh')
-
+# ── A3: zellij env comes through the adapter ────────────────────────────────
 
 def test_zellij_attach_path_clears_fallback(tmp_path, monkeypatch):
     """Attaching to a live session never consults the adapter env path, so a

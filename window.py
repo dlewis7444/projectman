@@ -548,6 +548,11 @@ class AppWindow(Adw.ApplicationWindow):
         if self._settings.multiplexer != 'zellij':
             return
         import zellij as z
+        # ONE list-sessions call for all projects (2 s timeout total). The old
+        # per-project session_alive() loop ran N subprocesses on the GTK main
+        # loop — up to ~60 s blocked per event with ~30 projects
+        # (docs/popover-leak-main-thread-hang.md, landmine #2).
+        alive = z.alive_session_names()
         for project in self._store.load_projects():
             path = project.path
             sname = z.session_name(project.name)
@@ -555,7 +560,7 @@ class AppWindow(Adw.ApplicationWindow):
             currently_attached = tv is not None and tv._child_pid is not None
             if currently_attached:
                 continue  # process-exited will handle this case
-            if z.session_alive(sname):
+            if sname in alive:
                 self._sidebar.set_project_state(path, 'detached')
             else:
                 self._sidebar.set_project_state(path, 'inactive')
@@ -1291,16 +1296,25 @@ class AppWindow(Adw.ApplicationWindow):
                     tv.spawn_zellij(sname)
                 else:
                     tv.spawn_continue(project_name=project.name)
+        else:
+            # Reattach to an already-running session: the auto "Active Only"
+            # filter flip (_on_started) only fires when a child STARTS in this
+            # run, so flip here — otherwise clicking a running project in
+            # "all projects" mode never returns the section to "active only".
+            # Safe re M-UX.10b: a live child means no spawn can fail.
+            self._sidebar.set_active_only(True, path=path)
         tv.get_terminal().grab_focus()
 
     def _on_project_activated(self, sidebar, path):
         if self._search_entry.get_text():
             self._search_entry.set_text('')
-        # M-UX.10b (C7): do NOT enable "Active Only" here. The auto-filter now
-        # fires from the process-started handler (_on_started) — i.e. only once a
-        # child actually runs — so a spawn that FAILS (missing binary) leaves the
-        # row visible in 'inactive' instead of being hidden by an eagerly-set
-        # filter (the triple-whammy's third blow). The manual toggle is untouched.
+        # M-UX.10b (C7): do NOT enable "Active Only" on a spawn ATTEMPT. The
+        # auto-filter fires from the process-started handler (_on_started) —
+        # i.e. only once a child actually runs — so a spawn that FAILS (missing
+        # binary) leaves the row visible in 'inactive' instead of being hidden
+        # by an eagerly-set filter (the triple-whammy's third blow). Reattach
+        # to an already-running session flips it in _switch_to_project (a live
+        # child cannot fail to spawn). The manual toggle is untouched.
         self._switch_to_project(path)
 
     def _on_session_activated(self, sidebar, path, session_id):
@@ -1559,20 +1573,27 @@ class AppWindow(Adw.ApplicationWindow):
     def _on_project_model_change(self, sidebar, path, value):
         """A per-project provider was picked from the sidebar Provider menu."""
         from models import FOLLOW_DEFAULT, NATIVE_GROK, NATIVE_OPENCODE, NATIVE_KIMI
-        harness = self._settings.effective_harness(path)
+        from hosts import override_key
+        proj = self._find_project(path)
+        host_id = getattr(proj, 'host_id', 'localhost') if proj else 'localhost'
+        ref = override_key(path, host_id)
+        harness = self._settings.effective_harness(path, host_id=host_id)
         overrides = dict(self._settings.provider_overrides) \
             if isinstance(self._settings.provider_overrides, dict) else {}
         if value in (NATIVE_GROK, NATIVE_OPENCODE, NATIVE_KIMI):
             # Harness-native: no Settings provider pin.
+            overrides.pop(ref, None)
             overrides.pop(path, None)
         elif harness != 'claude':
             # Unselectable customs for OC/GB/Kimi today — ignore (model pins later).
             return
         elif value == FOLLOW_DEFAULT or value == (self._settings.model_default or ''):
             # Picking the global Settings default → track it (clear pin).
+            overrides.pop(ref, None)
             overrides.pop(path, None)
         else:
-            overrides[path] = value
+            overrides.pop(path, None)
+            overrides[ref] = value
         self._settings.provider_overrides = overrides
         self._settings.save()
         self._refresh_sidebar_models()
@@ -1584,36 +1605,37 @@ class AppWindow(Adw.ApplicationWindow):
         Writes ``harness_overrides``. Selecting the current global default (or
         the legacy FOLLOW_DEFAULT sentinel) clears the override so the project
         tracks Settings → Default Harness. Any other id pins that harness.
-        Clears both provider and model pins for the path so the user re-picks
-        axes that may mean different things under the new harness.
+
+        Remembers provider/model pins **per harness** via
+        ``harness_axis_memory``: leaving harness A snapshots the flat axes;
+        entering harness B restores B's last pins (or clears on first visit).
+        Flat ``provider_overrides`` / ``model_pins`` remain the runtime SoT.
+
         Then refreshes sidebar radio/subtitle and offers restart if needed.
         """
         from models import FOLLOW_DEFAULT
         from hosts import override_key
+        from settings import remember_and_switch_axes
         import harnesses
         proj = self._find_project(path)
         host_id = getattr(proj, 'host_id', 'localhost') if proj else 'localhost'
         ref = override_key(path, host_id)
+        # Capture effective harness BEFORE mutating harness_overrides.
+        old_harness = self._settings.effective_harness(path, host_id=host_id)
         overrides = dict(self._settings.harness_overrides)
         # Drop both canonical ref and raw path keys so nothing stale remains.
         if value == FOLLOW_DEFAULT or value == self._settings.harness_default:
             overrides.pop(ref, None)
             overrides.pop(path, None)
+            new_harness = self._settings.harness_default or 'claude'
         else:
             overrides.pop(path, None)
             overrides[ref] = value
+            new_harness = value
+        # Snapshot old harness axes → restore new (no-op when old == new).
+        remember_and_switch_axes(
+            self._settings, path, host_id, old_harness, new_harness)
         self._settings.harness_overrides = overrides
-        # Clear both axes (provider + model pin) for this project.
-        po = dict(self._settings.provider_overrides) \
-            if isinstance(self._settings.provider_overrides, dict) else {}
-        po.pop(ref, None)
-        po.pop(path, None)
-        self._settings.provider_overrides = po
-        mp = dict(self._settings.model_pins) \
-            if isinstance(self._settings.model_pins, dict) else {}
-        mp.pop(ref, None)
-        mp.pop(path, None)
-        self._settings.model_pins = mp
         self._settings.save()
         # S8 ship-blocker: an EXPLICIT per-project pick must defeat the A2
         # restore-stickiness. A restored session's TerminalView carries a sticky

@@ -14,7 +14,9 @@ Binding tests:
   M-UX.10a  spawn-fail(127) within window → toast text has binary + hint;
             row stays (process-exited still sets 'inactive', not removed)
   M-UX.10b  set_active_only(True) fires from process-started, NOT from the
-            activation attempt; a failed spawn never flips the filter
+            activation attempt; a failed spawn never flips the filter; a
+            reattach to an already-running session flips it in
+            _switch_to_project (a live child cannot fail to spawn)
   M-UX.10c  a successful spawn's behavior is unchanged
   M-UX.4    scan disabled → ZERO run_ai_checks calls (spy) + toast; enabled →
             result surfaced
@@ -179,6 +181,7 @@ class _Sidebar:
     def __init__(self):
         self.active_only_calls = []
         self.states = []
+        self.selected = []
 
     def set_active_only(self, v, path=None, paths=None):
         self.active_only_calls.append((v, path, paths))
@@ -186,10 +189,14 @@ class _Sidebar:
     def set_project_state(self, p, s, is_zellij=None):
         self.states.append((p, s))
 
+    def select_project(self, p):
+        self.selected.append(p)
+
 
 def test_on_project_activated_does_not_set_active_only():
     """BINDING T-b: the activation attempt no longer flips Active Only — only a
-    real process start does."""
+    real process start (or a reattach to a live session, inside
+    _switch_to_project) does."""
     from window import AppWindow
     sb = _Sidebar()
     switched = []
@@ -201,6 +208,55 @@ def test_on_project_activated_does_not_set_active_only():
     AppWindow._on_project_activated(fake, sb, '/proj')
     assert sb.active_only_calls == []        # NOT set on the attempt
     assert switched == ['/proj']             # but the switch still happened
+
+
+def _switch_fake(sb, child_pid):
+    """Unbound fake for AppWindow._switch_to_project with one terminal whose
+    _child_pid is *child_pid* (None → spawn-attempt path)."""
+    spawns = []
+    tv = types.SimpleNamespace(
+        _child_pid=child_pid,
+        spawn_continue=lambda **kw: spawns.append(('continue', kw)),
+        spawn_zellij=lambda s: spawns.append(('zellij', s)),
+        get_terminal=lambda: types.SimpleNamespace(grab_focus=lambda: None),
+    )
+    project = types.SimpleNamespace(path='/proj', name='proj')  # local (no host_id)
+    fake = types.SimpleNamespace(
+        _sidebar=sb,
+        _find_project=lambda path: project,
+        _get_or_create_terminal=lambda p: tv,
+        _stack=types.SimpleNamespace(set_visible_child_name=lambda n: None),
+        _set_active_project=lambda p: None,
+        _push_mru=lambda p: None,
+    )
+    return fake, spawns
+
+
+def test_switch_to_project_reattach_sets_active_only():
+    """Reattach to an already-running session flips Active Only ON — this is
+    what 'click in all-projects mode returns to active only' means when the
+    session was started in an earlier run (no process-started fires)."""
+    from window import AppWindow
+    sb = _Sidebar()
+    fake, spawns = _switch_fake(sb, child_pid=1234)
+    AppWindow._switch_to_project(fake, '/proj')
+    assert sb.active_only_calls == [(True, '/proj', None)]
+    assert spawns == []                       # no spawn attempted
+    assert sb.selected == ['/proj']
+
+
+def test_switch_to_project_spawn_attempt_does_not_set_active_only(monkeypatch):
+    """M-UX.10b preserved: a fresh spawn ATTEMPT does not flip the filter —
+    only _on_started (a child actually running) may. A failed spawn leaves the
+    row visible in 'all' mode."""
+    from window import AppWindow
+    import zellij
+    monkeypatch.setattr(zellij, 'session_alive', lambda name: False)
+    sb = _Sidebar()
+    fake, spawns = _switch_fake(sb, child_pid=None)
+    AppWindow._switch_to_project(fake, '/proj')
+    assert sb.active_only_calls == []         # no flip on the attempt
+    assert spawns == [('continue', {'project_name': 'proj'})]
 
 
 def test_active_only_set_when_process_starts():
