@@ -1303,7 +1303,13 @@ class AppWindow(Adw.ApplicationWindow):
             # "all projects" mode never returns the section to "active only".
             # Safe re M-UX.10b: a live child means no spawn can fail.
             self._sidebar.set_active_only(True, path=path)
-        tv.get_terminal().grab_focus()
+        # Defer the focus grab past the current click sequence: a double-click
+        # on a row inside a group's nested listbox also reaches the OUTER
+        # listbox's press gesture, which grabs focus to the GroupRow after
+        # this handler runs (the leaked activation/toggle is suppressed in
+        # sidebar.py, but the focus steal is not). Landing the grab on idle
+        # wins that race; for every other path it's equivalent.
+        GLib.idle_add(lambda: tv.get_terminal().grab_focus() and False)
 
     def _on_project_activated(self, sidebar, path):
         if self._search_entry.get_text():
