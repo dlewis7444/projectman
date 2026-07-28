@@ -2,6 +2,24 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
+## [1.5.2] - 2026-07-28
+
+### Fixed
+- **Project switch focused the nav menu instead of the terminal:** a
+  double-click on a row inside a group's nested listbox also reaches the
+  OUTER listbox's press gesture, which grabs keyboard focus to the GroupRow
+  after the activation handler runs (the leaked group toggle was suppressed
+  in 1.5.1, but the focus steal was not — typing went to the sidebar until
+  you clicked the terminal). The terminal focus grab in `_switch_to_project`
+  is now deferred to idle, landing after the whole click sequence. Regression
+  coverage: widget-level red/green test reproducing the outer-listbox steal
+  (fails with the synchronous grab, passes with the deferred one).
+- **Kimi bridge: dot stayed yellow while Kimi waited on the "user poll"
+  tool:** `AskUserQuestion` blocks the turn on the user's answer, but the
+  event map marked every `PreToolUse` as `working`. `PreToolUse` with
+  `tool_name: AskUserQuestion` now maps to `waiting` (blue); the answer's
+  `PostToolUse` restores `working` via the normal map.
+
 ## [1.5.1] - 2026-07-26
 
 ### Fixed
