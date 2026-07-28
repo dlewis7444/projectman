@@ -48,6 +48,12 @@ STATE = {
     "interrupt": "done",
 }
 
+# Tools whose PreToolUse means "parked on the user", not working. Kimi's
+# AskUserQuestion (the "user poll" tool) opens the question UI and blocks the
+# turn until the user answers; the plain map would show working (yellow) the
+# whole time. PostToolUse (answer submitted) restores working via STATE.
+WAITING_ON_USER_TOOLS = frozenset({"askuserquestion"})
+
 # SessionEnd → remove the status file (cleanup).
 CLEANUP_EVENTS = frozenset({
     "sessionend",
@@ -142,6 +148,16 @@ def main():
         # Unknown + Notification: no write, no crash.
         return
 
+    tool = (
+        payload.get("tool_name")
+        or payload.get("toolName")
+        or payload.get("tool")
+    )
+    if (event_name in ("pretooluse", "pre_tool_use")
+            and isinstance(tool, str)
+            and tool.strip().lower() in WAITING_ON_USER_TOOLS):
+        state = "waiting"
+
     import time
     now = int(time.time())
     # Prefer a stable event label for the status file: original casing if given,
@@ -154,11 +170,6 @@ def main():
         "ts": now,
         "session": session,
     }
-    tool = (
-        payload.get("tool_name")
-        or payload.get("toolName")
-        or payload.get("tool")
-    )
     if tool:
         status["tool"] = tool
 

@@ -128,6 +128,19 @@ def run():
     emit("PreToolUse", payload={"tool_name": "Read"})
     check("MAP PreToolUse -> working", read_state()["state"] == "working")
 
+    # AskUserQuestion ("user poll") parks the turn on the user -> waiting;
+    # the answer's PostToolUse restores working.
+    clear_status_file()
+    emit("PreToolUse", payload={"tool_name": "AskUserQuestion"})
+    s = read_state()
+    check("MAP PreToolUse+AskUserQuestion -> waiting",
+          s and s["state"] == "waiting")
+    check("MAP PreToolUse+AskUserQuestion carries tool",
+          s.get("tool") == "AskUserQuestion")
+    emit("PostToolUse", payload={"tool_name": "AskUserQuestion"})
+    check("MAP PostToolUse after answer -> working",
+          read_state()["state"] == "working")
+
     clear_status_file()
     emit("PostToolUse")
     check("MAP PostToolUse -> working", read_state()["state"] == "working")
