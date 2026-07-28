@@ -259,6 +259,40 @@ def test_switch_to_project_spawn_attempt_does_not_set_active_only(monkeypatch):
     assert spawns == [('continue', {'project_name': 'proj'})]
 
 
+def test_switch_to_project_focus_grab_is_deferred():
+    """Regression (groups): after switching projects, keyboard focus must land
+    on the terminal, not the sidebar nav. A double-click on a row inside a
+    group's nested listbox is ALSO delivered to the outer listbox's press
+    gesture, which grabs focus to the GroupRow after the activation handler
+    runs (sidebar.py suppresses the leaked toggle, but not the focus steal).
+    A synchronous grab_focus in _switch_to_project loses that race — the grab
+    must be deferred (GLib.idle_add) so it lands after the click sequence."""
+    from gi.repository import GLib
+    from window import AppWindow
+    sb = _Sidebar()
+    focuses = []
+    tv = types.SimpleNamespace(
+        _child_pid=1234,
+        get_terminal=lambda: types.SimpleNamespace(
+            grab_focus=lambda: focuses.append('focus')),
+    )
+    project = types.SimpleNamespace(path='/proj', name='proj')
+    fake = types.SimpleNamespace(
+        _sidebar=sb,
+        _find_project=lambda path: project,
+        _get_or_create_terminal=lambda p: tv,
+        _stack=types.SimpleNamespace(set_visible_child_name=lambda n: None),
+        _set_active_project=lambda p: None,
+        _push_mru=lambda p: None,
+    )
+    AppWindow._switch_to_project(fake, '/proj')
+    assert focuses == [], 'focus grab must be deferred past the click sequence'
+    ctx = GLib.MainContext.default()
+    while ctx.pending():
+        ctx.iteration(False)
+    assert focuses == ['focus'], 'terminal must be focused once events settle'
+
+
 def test_active_only_set_when_process_starts():
     """BINDING T-b/c: a successful start flips Active Only ON (preserving the
     pre-fix UX) and marks the row attached."""

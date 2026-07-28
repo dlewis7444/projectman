@@ -39,6 +39,7 @@ accepts both.
 | `SessionStart` | `done` |
 | `UserPromptSubmit` | `working` |
 | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` | `working` |
+| `PreToolUse` with `tool_name: AskUserQuestion` | **`waiting`** (the "user poll" tool parks the turn on the user's answer; `PostToolUse` restores `working`) |
 | **`PermissionRequest`** | **`waiting`** (fires just before approval — better than grok's silence-age inference) |
 | `PermissionResult` | `working` (clears waiting) |
 | `Stop` / `StopFailure` / `Interrupt` | `done` |

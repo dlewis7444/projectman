@@ -164,6 +164,70 @@ def test_row_activated_on_nested_project_does_not_toggle_group():
     assert _revealed(g2)
 
 
+def test_switch_focus_survives_outer_listbox_steal():
+    """End-to-end focus race: switching a project must leave keyboard focus in
+    the terminal, not on the nav (the maintainer: "it focuses my keyboard on the nav
+    menu"). A double-click inside a group's nested listbox also reaches the
+    OUTER listbox's press gesture, which grabs focus to the GroupRow AFTER the
+    activation handler ran (the leaked toggle is suppressed; the focus steal
+    was not). The terminal grab in _switch_to_project must therefore be
+    deferred to idle so it lands after the whole click sequence.
+
+    Reproduced here deterministically at the widget level: run the real
+    activation handler chain, then mimic the outer press gesture's
+    grab_focus(GroupRow), then drain idle and check the window focus widget.
+    A synchronous terminal grab would lose; the deferred one wins.
+    """
+    import types
+    from window import AppWindow
+
+    sb = _build_sidebar(mode='all')
+    win = Gtk.Window()
+    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+    win.set_child(box)
+    box.append(sb)
+    terminal = Gtk.TextView()   # stand-in focusable "terminal"
+    box.append(terminal)
+    win.present()
+    _drain()
+
+    project = types.SimpleNamespace(path='/tmp/gc-p3', name='p3')
+    tv = types.SimpleNamespace(_child_pid=1234, get_terminal=lambda: terminal)
+    fake = types.SimpleNamespace(
+        _sidebar=sb,
+        _search_entry=types.SimpleNamespace(
+            get_text=lambda: '', set_text=lambda t: None),
+        _find_project=lambda path: project,
+        _get_or_create_terminal=lambda p: tv,
+        _stack=types.SimpleNamespace(set_visible_child_name=lambda n: None),
+        _set_active_project=lambda p: None,
+        _push_mru=lambda p: None,
+        _active_path=None,
+    )
+    fake._switch_to_project = \
+        lambda p: AppWindow._switch_to_project(fake, p)
+    sb.connect('project-activated',
+               lambda *a: AppWindow._on_project_activated(fake, *a))
+
+    # The real double-click sequence on the nested p3 row: the inner listbox
+    # activates the project (runs the full switch)…
+    row = sb._rows['/tmp/gc-p3']
+    row.get_parent().emit('row-activated', row)
+    # …then the outer listbox's press gesture grabs focus to the GroupRow and
+    # leaks an activation (suppressed toggle — tested above).
+    g2 = _grow(sb, G2)
+    g2.grab_focus()
+    g2.get_parent().emit('row-activated', g2)
+    _drain()
+
+    try:
+        assert win.get_focus() is terminal, (
+            f'focus must land in the terminal after switching, '
+            f'got {type(win.get_focus()).__name__}')
+    finally:
+        win.destroy()
+
+
 def test_populate_rebuild_preserves_group_expansion():
     """A full rebuild (projects-changed watcher path) keeps groups open."""
     sb = _build_sidebar(mode='active')
