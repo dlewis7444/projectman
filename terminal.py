@@ -9,6 +9,7 @@ from gi.repository import Gtk, Vte, GLib, Pango, GObject, Gdk, Gio
 
 import harnesses
 import terminal_copy
+import terminal_links
 import zellij
 from settings import match_vte_key_capture
 
@@ -152,7 +153,7 @@ class TerminalView(Gtk.Box):
         # URL/path matching — opens links on click
         # PCRE2_MULTILINE (0x400) required by VTE's match_add_regex
         url_regex = Vte.Regex.new_for_match(
-            r'https?://\S+|file://\S+', -1, 0x400
+            terminal_links.URI_SCHEME_PATTERN, -1, 0x400
         )
         self._url_tag = self._terminal.match_add_regex(url_regex, 0)
         self._terminal.match_set_cursor_name(self._url_tag, 'pointer')
@@ -259,9 +260,35 @@ class TerminalView(Gtk.Box):
             self._debug(f'no match at ({x:.0f}, {y:.0f})')
             return False
         uri = ('file://' + url) if url.startswith('/') else url
+        return self._launch_uri(uri)
+
+    def _launch_uri(self, uri):
+        """Launch a URI, with browser fallback for browser-internal schemes.
+
+        Schemes such as vivaldi:// or chrome:// usually have no
+        x-scheme-handler desktop registration. Gio cannot launch those
+        directly, but the default web browser can receive them as an argument
+        and route them to its internal page.
+        """
         self._debug(f'launching {uri}')
-        Gio.AppInfo.launch_default_for_uri(uri, None)
-        return True
+        scheme = terminal_links.uri_scheme(uri)
+        app = None
+        if scheme not in (None, 'http', 'https', 'file'):
+            app = Gio.AppInfo.get_default_for_uri_scheme(scheme)
+            if app is None:
+                app = Gio.AppInfo.get_default_for_type('x-scheme-handler/http', True)
+
+        try:
+            if app is not None:
+                launched = app.launch_uris([uri], None)
+            else:
+                launched = Gio.AppInfo.launch_default_for_uri(uri, None)
+        except Exception as e:
+            self._debug(f'launch failed for {uri}: {e!r}')
+            return False
+        if not launched:
+            self._debug(f'launch failed for {uri}')
+        return bool(launched)
 
     def _on_right_click(self, gesture, n_press, x, y):
         url = self._url_at(x, y)
@@ -299,7 +326,7 @@ class TerminalView(Gtk.Box):
         if url:
             box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
             uri = ('file://' + url) if url.startswith('/') else url
-            box.append(item('Open URL', lambda u=uri: Gio.AppInfo.launch_default_for_uri(u, None)))
+            box.append(item('Open URL', lambda u=uri: self._launch_uri(u)))
             box.append(item('Copy URL', lambda u=url: self._set_clipboard(u)))
 
         popover.set_child(box)
