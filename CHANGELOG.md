@@ -2,6 +2,14 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
+## [1.5.3] - 2026-08-03
+
+### Added
+- **Terminal links:** Ctrl+click and right-click → Open URL now recognize any
+  RFC 3986 `scheme://` URI, not just `http(s)` and `file`. Custom schemes with
+  no desktop handler (for example `vivaldi://settings/keyboard`) are handed to
+  the default web browser so browser-internal pages can open.
+
 ## [1.5.2] - 2026-07-28
 
 ### Fixed
