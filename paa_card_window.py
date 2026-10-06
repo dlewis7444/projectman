@@ -1,7 +1,5 @@
 import os
-import shutil
 import signal
-import subprocess
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -11,21 +9,7 @@ from gi.repository import Gtk, Adw, Gdk, GLib, Vte, Pango
 
 from settings import match_vte_key_capture
 from terminal import _TERMINAL_PALETTES
-
-
-_TYPE_LABELS = {
-    'missing-claude-md': 'Missing CLAUDE.md',
-    'context-drift': 'Context Drift',
-    'no-git': 'No Git Repo',
-    # Phase 2 AI checks
-    'ai-semantic-staleness': 'Semantic Staleness',
-    'ai-dependency-outdated': 'Outdated Dependency',
-    'ai-health-concern': 'Health Concern',
-    # Phase 4 cross-project checks
-    'xp-dep-conflict': 'Dep Conflict',
-    'xp-broken-reference': 'Broken Reference',
-    'xp-stale-project': 'Stale Project',
-}
+from paa_findings import TYPE_LABELS as _TYPE_LABELS, discuss_finding_prompt
 
 _SEVERITY_CSS = {
     'info': 'paa-card-type-info',
@@ -49,6 +33,8 @@ class PAACardWindow(Adw.Window):
         self._child_pid = None
         self._spawn_cancelled = False
         self._discussing_item_id = None
+        self._watches = []
+        self._chat_harness_id = self._settings.effective_harness('') or 'claude'
 
         self.set_title('Projects Admin Agent')
         self.set_transient_for(parent)
@@ -105,6 +91,20 @@ class PAACardWindow(Adw.Window):
         self._budget_label.set_halign(Gtk.Align.END)
         stats.append(self._budget_label)
         content.append(stats)
+
+        # Always-visible chat/Discuss failure banner. The terminal pane can
+        # stay at zero width on Wayland (set_default_size after present is a
+        # no-op), so an error that only lands in VTE looks like "nothing
+        # came up."
+        self._error_bar = Gtk.Label(label='')
+        self._error_bar.add_css_class('error')
+        self._error_bar.set_wrap(True)
+        self._error_bar.set_xalign(0)
+        self._error_bar.set_margin_start(16)
+        self._error_bar.set_margin_end(16)
+        self._error_bar.set_margin_bottom(8)
+        self._error_bar.set_visible(False)
+        content.append(self._error_bar)
 
         # Health summary row
         self._health_label = Gtk.Label()
@@ -222,7 +222,7 @@ class PAACardWindow(Adw.Window):
 
         self._vte.connect('child-exited', self._on_child_exited)
 
-        # CAPTURE-phase VTE key remaps (settings.vte_key_captures['claude']).
+        # CAPTURE-phase VTE key remaps (resolved harness; updated on spawn).
         term_key_ctrl = Gtk.EventControllerKey.new()
         term_key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         term_key_ctrl.connect('key-pressed', self._on_terminal_key_pressed)
@@ -256,92 +256,114 @@ class PAACardWindow(Adw.Window):
 
     def _deploy_harness(self):
         """Deploy PAA harness files to .project-admin-agent/ and return the path."""
-        paa_dir = os.path.join(
-            self._settings.resolved_projects_dir, '.project-admin-agent'
-        )
-        system_dir = os.path.join(paa_dir, '.system')
-        claude_dir = os.path.join(paa_dir, '.claude')
-        os.makedirs(system_dir, exist_ok=True)
-        os.makedirs(claude_dir, exist_ok=True)
-
+        from paa_deploy import deploy_paa_harness
         src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'paa')
-        shutil.copy2(
-            os.path.join(src_dir, 'CLAUDE.md'),
-            os.path.join(paa_dir, 'CLAUDE.md'),
-        )
-        shutil.copy2(
-            os.path.join(src_dir, 'CLAUDE-SUPPLEMENT.md'),
-            os.path.join(system_dir, 'CLAUDE-SUPPLEMENT.md'),
-        )
-        shutil.copy2(
-            os.path.join(src_dir, 'settings.json'),
-            os.path.join(claude_dir, 'settings.json'),
-        )
-        gather_src = os.path.join(src_dir, 'gather-context.sh')
-        gather_dst = os.path.join(system_dir, 'gather-context.sh')
-        shutil.copy2(gather_src, gather_dst)
-        os.chmod(gather_dst, 0o755)
+        return deploy_paa_harness(src_dir, self._settings.resolved_projects_dir)
 
-        # USER.md — create once, never overwrite
-        user_md = os.path.join(paa_dir, 'USER.md')
-        if not os.path.exists(user_md):
-            with open(user_md, 'w') as f:
-                f.write(
-                    '<!-- Custom instructions for the Projects Admin Agent. -->\n'
-                    '<!-- This file is yours — ProjectMan will never overwrite it. -->\n'
-                )
-
-        # Refresh snapshot
+    def _show_chat_error(self, err):
+        """Surface a chat/Discuss failure on the cards side AND in VTE."""
+        msg = str(err).strip() or 'unknown error'
+        self._error_bar.set_label(f'PAA chat failed to start: {msg}')
+        self._error_bar.set_visible(True)
+        self._chat_status.set_label(f'Chat failed: {msg}')
         try:
-            subprocess.run(
-                [gather_dst], cwd=system_dir,
-                capture_output=True, timeout=10,
+            self._vte.feed(
+                f'\r\nPAA chat failed to start.\r\n{msg}\r\n'.encode('utf-8')
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except Exception:
+            pass
+        try:
+            from debug_log import debug_log
+            debug_log(self._settings, f'paa chat failed: {msg}')
+        except Exception:
             pass
 
-        return paa_dir
+    def _clear_chat_error(self):
+        self._error_bar.set_visible(False)
+        self._error_bar.set_label('')
 
-    # ── Claude spawning ───────────────────────────────────────────────────
+    # ── Chat / Discuss spawning ───────────────────────────────────────────
 
-    def _spawn_claude(self, prompt):
+    def _spawn_chat(self, prompt):
         self._kill_child()
         self._vte.reset(True, True)
-        paa_dir = self._deploy_harness()
-        claude_cmd = self._settings.resolved_claude_binary
-        self._spawn_cancelled = False
-        # Route Discuss/chat through the model axis (global default provider —
-        # PAA has no project pin). Same native-fallback contract as terminals.
-        from models import build_spawn_env, resolve_tier_model
-        env_dict, _reason = build_spawn_env(self._settings, '')
-        tier = (self._settings.paa_chat_model or 'sonnet').strip() or 'sonnet'
-        model = tier
-        env_list = None
-        if env_dict is not None:
-            # VTE wants a complete strv; coerce values (build_spawn_env is
-            # already stringly, but belt-and-suspenders).
-            env_list = [f'{k}={v}' for k, v in env_dict.items()
-                        if v is not None]
-            if tier in ('haiku', 'sonnet', 'opus', 'fable', 'subagent'):
-                resolved = resolve_tier_model(
-                    self._settings, self._settings.effective_provider(''), tier)
-                if resolved:
-                    model = resolved
-        self._vte.spawn_async(
-            Vte.PtyFlags(0), paa_dir,
-            [claude_cmd, '--model', model, prompt],
-            env_list, GLib.SpawnFlags.SEARCH_PATH,
-            None, None, -1, None,
-            self._on_spawn_done,
-        )
+        self._clear_chat_error()
+        try:
+            paa_dir = self._deploy_harness()
+            from paa_deploy import paa_interactive_plan, write_startup_prompt
+            write_startup_prompt(paa_dir, prompt)
+            ip = paa_interactive_plan(self._settings, paa_dir, prompt)
+            self._chat_harness_id = ip.harness_id
+            self._spawn_cancelled = False
+            argv = list(ip.plan.argv)
+            env = ip.plan.env
+        except Exception as e:
+            self._show_chat_error(e)
+            return
+        try:
+            from debug_log import debug_log, format_argv_for_debug
+            debug_log(
+                self._settings,
+                'session launch kind=discuss '
+                f'harness={ip.harness_id} cwd={paa_dir} '
+                f'argv={format_argv_for_debug(argv)}',
+            )
+        except Exception:
+            pass
+        if ip.plan.fallback_reason:
+            try:
+                from debug_log import debug_log
+                debug_log(self._settings,
+                          f'paa chat fallback: {ip.plan.fallback_reason}')
+            except Exception:
+                pass
+        self._spawn_vte_child(argv, env, paa_dir)
 
-    def _on_spawn_done(self, terminal, pid, error):
-        if pid == -1:
+    def _spawn_vte_child(self, argv, env, cwd):
+        """DIY fork+exec — same pidfd contract as TerminalView._spawn.
+
+        Vte.spawn_async leaks pidfds (see docs/pidfd-leak-investigation.md)
+        and does not prepend harness PATH. GUI-launched PM often cannot
+        resolve ``grok`` / ``kimi`` / ``opencode`` without that.
+        """
+        import harnesses
+        argv_list = list(argv)
+        if not argv_list:
+            self._show_chat_error('no command to spawn')
+            return
+        try:
+            pty = Vte.Pty.new_sync(Vte.PtyFlags(0), None)
+        except GLib.Error as e:
             self._child_pid = None
-        else:
-            self._child_pid = pid
-            if self._spawn_cancelled:
-                self._kill_child()
+            self._show_chat_error(e)
+            return
+        pty.set_size(
+            self._vte.get_row_count(),
+            self._vte.get_column_count(),
+        )
+        env_dict = dict(env) if env is not None else dict(os.environ)
+        env_dict = harnesses.with_harness_path(env_dict)
+        env_dict.setdefault('TERM', 'xterm-256color')
+        env_dict.setdefault('COLORTERM', 'truecolor')
+        env_dict.setdefault('DISABLE_AUTOUPDATER', '1')
+        pid = os.fork()
+        if pid == 0:
+            try:
+                try:
+                    os.chdir(cwd)
+                except OSError:
+                    pass
+                pty.child_setup()
+                os.execvpe(argv_list[0], argv_list, env_dict)
+            except Exception:
+                pass
+            os._exit(127)
+        self._vte.set_pty(pty)
+        self._child_pid = pid
+        if self._spawn_cancelled:
+            self._kill_child()
+            return
+        self._add_pidfd_watch(pid)
 
     def _on_child_exited(self, terminal, status):
         self._child_pid = None
@@ -357,6 +379,54 @@ class PAACardWindow(Adw.Window):
                     pass
         else:
             self._spawn_cancelled = True
+
+    def _add_pidfd_watch(self, pid):
+        try:
+            fd = os.pidfd_open(pid, 0)
+        except (OSError, ProcessLookupError):
+            self._reap(pid)
+            GLib.idle_add(self._on_child_gone, pid)
+            return
+        source_id = GLib.unix_fd_add_full(
+            GLib.PRIORITY_DEFAULT,
+            fd,
+            GLib.IOCondition.IN,
+            self._on_pidfd_ready,
+            pid,
+        )
+        self._watches.append({'pid': pid, 'fd': fd, 'source_id': source_id})
+
+    def _on_pidfd_ready(self, fd, condition, pid):
+        status = self._reap(pid)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        self._watches = [w for w in self._watches if w['fd'] != fd]
+        self._on_child_gone(pid, status)
+        return False
+
+    def _reap(self, pid):
+        try:
+            r = os.waitpid(pid, os.WNOHANG)
+            if r and r[0] == pid:
+                return r[1]
+        except (ChildProcessError, OSError):
+            pass
+        return 0
+
+    def _on_child_gone(self, pid, status=0):
+        if pid != self._child_pid:
+            return False
+        self._child_pid = None
+        try:
+            code = os.waitstatus_to_exitcode(status)
+        except (ValueError, ChildProcessError):
+            code = None
+        if code in (126, 127):
+            hid = self._chat_harness_id or 'harness'
+            self._show_chat_error(f'{hid} failed to start (exit {code})')
+        return False
 
     # ── Terminal panel reveal ─────────────────────────────────────────────
 
@@ -386,40 +456,10 @@ class PAACardWindow(Adw.Window):
             return
 
         type_label = _TYPE_LABELS.get(item.type, item.type)
-
-        # Collect other pending cards for the same project
-        siblings = [
-            i for i in self._ledger.pending_items()
-            if i.project == item.project and i.id != item.id
-        ]
-        sibling_block = ''
-        if siblings:
-            lines = []
-            for s in siblings:
-                lbl = _TYPE_LABELS.get(s.type, s.type)
-                lines.append(f'  - [{s.severity}] {lbl}: {s.summary}')
-            sibling_block = (
-                f'\n\nOTHER PENDING FINDINGS FOR THIS PROJECT '
-                f'({len(siblings)}):\n'
-                + '\n'.join(lines)
-                + '\n\nThe user may want to address some of these together. '
-                  'Focus on the primary finding above unless asked.'
-            )
-
-        prompt = (
-            f'DISCUSS FINDING\n\n'
-            f'Type: {item.type}\n'
-            f'Project: {item.project}\n'
-            f'Severity: {item.severity}\n'
-            f'Summary: {item.summary}\n'
-            f'Evidence: {item.evidence}\n\n'
-            f'Please help me understand this finding and suggest how to address it. '
-            f'The project is at ../{item.project}/ relative to your working directory.'
-            f'{sibling_block}'
-        )
+        prompt = discuss_finding_prompt(item, self._ledger.pending_items())
         self._discussing_item_id = item.id
         self._reveal_terminal()
-        self._spawn_claude(prompt)
+        self._spawn_chat(prompt)
         self._chat_status.set_label(
             f'Discussing: {item.project} \u2014 {type_label}'
         )
@@ -435,7 +475,7 @@ class PAACardWindow(Adw.Window):
             return
         self._discussing_item_id = None
         self._reveal_terminal()
-        self._spawn_claude('WELCOME')
+        self._spawn_chat('WELCOME')
         self._chat_status.set_label('General chat')
         GLib.idle_add(self._refresh)
         GLib.idle_add(self._vte.grab_focus)
@@ -443,7 +483,7 @@ class PAACardWindow(Adw.Window):
     # ── Terminal keyboard / context menu ──────────────────────────────────
 
     def _on_terminal_key_pressed(self, controller, keyval, keycode, state):
-        captures = self._settings.vte_captures_for('claude')
+        captures = self._settings.vte_captures_for(self._chat_harness_id)
         feed = match_vte_key_capture(captures, int(keyval), int(state))
         if feed is not None:
             self._vte.feed_child(feed)
@@ -517,9 +557,9 @@ class PAACardWindow(Adw.Window):
         projects = self._store.load_projects()
         total = len(projects)
         with_git = sum(1 for p in projects if os.path.isdir(os.path.join(p.path, '.git')))
-        with_claude = sum(1 for p in projects if os.path.isfile(os.path.join(p.path, 'CLAUDE.md')))
+        with_agents = sum(1 for p in projects if os.path.isfile(os.path.join(p.path, 'AGENTS.md')))
         self._health_label.set_label(
-            f'{total} projects \u2022 {with_git} with git \u2022 {with_claude} with CLAUDE.md'
+            f'{total} projects \u2022 {with_git} with git \u2022 {with_agents} with AGENTS.md'
         )
         self._health_label.set_visible(True)
 

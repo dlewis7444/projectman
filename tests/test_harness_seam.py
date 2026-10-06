@@ -240,7 +240,7 @@ class TestClaudeAdapterSpawnPlanParity:
                 'api_key': 'secret', 'models': ['qwen'],
             },
         }
-        return Settings(providers=providers, model_default='ollama', **kw)
+        return Settings(providers=providers, provider_defaults={'claude': 'ollama'}, **kw)
 
 
     def test_native_model_env_is_none(self, monkeypatch):
@@ -269,7 +269,7 @@ class TestClaudeAdapterSpawnPlanParity:
         a = harnesses.ClaudeAdapter()
         s = Settings(providers={
             'ollama': {'name': 'O', 'base_url': '', 'api_key': 'k', 'models': ['q']},
-        }, model_default='ollama')
+        }, provider_defaults={'claude': 'ollama'})
         plan = a.spawn_plan(s, self._project('/projects/myproj'), 'continue')
         assert plan.env is None
         assert isinstance(plan.fallback_reason, str) and plan.fallback_reason
@@ -469,7 +469,7 @@ def _custom_provider_settings(**kw):
     return Settings(providers={
         'ollama': {'name': 'O', 'base_url': 'http://host:11434',
                    'api_key': 'secret', 'models': ['qwen']},
-    }, model_default='ollama', **kw)
+    }, provider_defaults={'claude': 'ollama'}, **kw)
 
 
 
@@ -510,7 +510,7 @@ class TestZellijSpawnEnvUnderAdapter:
         a = harnesses.ClaudeAdapter()
         s = Settings(providers={
             'ollama': {'name': 'O', 'base_url': 'http://h', 'api_key': 'k',
-                       'models': ['q']}}, model_default='ollama')
+                       'models': ['q']}}, provider_defaults={'claude': 'ollama'})
         env, reason = a.zellij_spawn_env(s, _project('/p'))
         assert reason is None
         assert env is not None
@@ -522,7 +522,7 @@ class TestZellijSpawnEnvUnderAdapter:
         a = harnesses.ClaudeAdapter()
         s = Settings(providers={
             'ollama': {'name': 'O', 'base_url': '', 'api_key': 'k',
-                       'models': ['q']}}, model_default='ollama')
+                       'models': ['q']}}, provider_defaults={'claude': 'ollama'})
         env, reason = a.zellij_spawn_env(s, _project('/p'))
         assert env is None
         assert reason

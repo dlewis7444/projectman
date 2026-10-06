@@ -92,25 +92,25 @@ def test_build_tier_options_native_no_provider():
 
 def test_resolve_tier_model_explicit_value_used():
     s = Settings(providers={'p': {'models': ['a', 'b']}},
-                 model_default='p', tier_models={'p': {'opus': 'b'}})
+                 provider_defaults={'claude': 'p'}, tier_models={'p': {'opus': 'b'}})
     assert resolve_tier_model(s, 'p', 'opus') == 'b'
 
 
 def test_resolve_tier_model_empty_falls_to_first_model():
     s = Settings(providers={'p': {'models': ['a', 'b']}},
-                 model_default='p', tier_models={'p': {'opus': ''}})
+                 provider_defaults={'claude': 'p'}, tier_models={'p': {'opus': ''}})
     assert resolve_tier_model(s, 'p', 'opus') == 'a'
 
 
 def test_resolve_tier_model_stale_value_falls_to_first():
     # tier value not on the active provider → first model (defensive fallback)
     s = Settings(providers={'p': {'models': ['a', 'b']}},
-                 model_default='p', tier_models={'p': {'opus': 'gone'}})
+                 provider_defaults={'claude': 'p'}, tier_models={'p': {'opus': 'gone'}})
     assert resolve_tier_model(s, 'p', 'opus') == 'a'
 
 
 def test_resolve_tier_model_no_models_empty():
-    s = Settings(providers={'p': {'models': []}}, model_default='p')
+    s = Settings(providers={'p': {'models': []}}, provider_defaults={'claude': 'p'})
     assert resolve_tier_model(s, 'p', 'opus') == ''
 
 
@@ -172,16 +172,41 @@ def test_build_provider_menu_entries_opencode_only_native():
 def test_provider_menu_current_claude_uses_model_default():
     from models import provider_menu_current
     from settings import Settings
-    s = Settings(model_default='ollama',
+    s = Settings(provider_defaults={'claude': 'ollama'},
                  providers={'ollama': {'name': 'Ollama', 'base_url': 'x', 'models': []}})
     assert provider_menu_current(s, '/p', 'claude') == 'ollama'
 
 
-def test_provider_menu_current_grok_is_native_sentinel():
+def test_build_provider_menu_entries_grok_native_plus_customs():
+    from models import build_provider_menu_entries, NATIVE_GROK
+    from settings import Settings
+    s = Settings(providers={'ollama': {'name': 'Ollama', 'base_url': 'x', 'models': []}})
+    entries = build_provider_menu_entries(s, 'grok')
+    ids = [e[0] for e in entries]
+    assert ids == [NATIVE_GROK, 'ollama']
+    assert all(e[2] for e in entries)
+
+
+def test_provider_menu_current_grok_tracks_provider_axis():
+    """Grok now honors the provider axis: radio reflects the real effective
+    provider (default or per-project override), native sentinel only when
+    native."""
     from models import provider_menu_current, NATIVE_GROK
     from settings import Settings
-    s = Settings(harness_default='grok', model_default='ollama')
-    assert provider_menu_current(s, '/p', 'grok') == NATIVE_GROK
+    providers = {
+        'ollama': {'name': 'Ollama', 'base_url': 'x', 'models': []},
+        'kimi': {'name': 'Kimi', 'base_url': 'y', 'models': []},
+    }
+    s = Settings(harness_default='grok', provider_defaults={'grok': 'ollama'},
+                 providers=providers)
+    assert provider_menu_current(s, '/p', 'grok') == 'ollama'
+    # Per-project override wins over the global default.
+    s2 = Settings(harness_default='grok', provider_defaults={'grok': 'ollama'},
+                  providers=providers, provider_overrides={'/p': 'kimi'})
+    assert provider_menu_current(s2, '/p', 'grok') == 'kimi'
+    # Native (no custom provider effective) → the native sentinel.
+    native = Settings(harness_default='grok')
+    assert provider_menu_current(native, '/p', 'grok') == NATIVE_GROK
 
 
 def test_build_provider_menu_entries_kimi_only_native():
@@ -196,13 +221,13 @@ def test_build_provider_menu_entries_kimi_only_native():
 def test_provider_menu_current_kimi_is_native_sentinel():
     from models import provider_menu_current, NATIVE_KIMI
     from settings import Settings
-    s = Settings(harness_default='kimi', model_default='ollama')
+    s = Settings(harness_default='kimi', provider_defaults={'claude': 'ollama'})
     assert provider_menu_current(s, '/p', 'kimi') == NATIVE_KIMI
 
 
 def test_default_model_label_claude_uses_settings_provider():
     import harness_configs as ac
     from settings import Settings
-    s = Settings(harness_default='claude', model_default='ollama',
+    s = Settings(harness_default='claude', provider_defaults={'claude': 'ollama'},
                  providers={'ollama': {'name': 'Ollama', 'base_url': 'x', 'models': []}})
     assert ac.default_model_label(s) == 'Ollama'

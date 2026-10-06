@@ -7,7 +7,7 @@ tests/test_harness_configs.py and tests/test_agents_settings_page.py.
 Binding tests:
   M-UX.1  _refresh_sidebar_models pushes the harness-truthful default label
   M-UX.5  About subtitle is harness-neutral, not "Claude Code sessions"
-  M-UX.7  PAA "Enable AI Scans" copy names Claude Code + Models-page provider
+  M-UX.7  PAA "Enable AI Scans" copy names default harness + provider if any
   M-UX.12 app wires app.open-settings → Ctrl+comma → window._on_open_settings
 """
 import os
@@ -99,17 +99,20 @@ def test_readme_de_clauded():
     assert '### Coding harnesses (install at least one)' in src
 
 
-# ── M-UX.7: PAA AI-scan copy names Claude Code + configured provider ──────────
+# ── M-UX.7: PAA AI-scan copy names default harness (not Claude-only) ──────────
 
 def test_paa_ai_scan_copy_uses_provider_axis():
-    """PAA AI scans are not Anthropic-only; copy points at Models-page provider."""
+    """PAA AI scans follow the default harness; copy must not say Claude-only."""
     src = _read(os.path.join(REPO, 'settings_window.py'))
-    assert 'Models-page provider' in src
-    assert 'configured provider' in src
-    # Old Anthropic-only claim is gone
+    # Adjacent string literals in the PAA page (source is line-wrapped).
+    assert 'default harness' in src
+    assert 'default provider' in src
+    # Old Anthropic-only / Claude-only PAA claims are gone from the PAA page.
     assert 'Uses the claude CLI and Anthropic credentials' not in src
     assert 'regardless of your default harness' not in src
     assert "subtitle='Use Claude for deeper project analysis'" not in src
+    assert 'Fast (Haiku tier)' not in src
+    assert "subtitle='Claude Code tier for Discuss sessions'" not in src
 
 
 # ── M-UX.12: Ctrl+comma → Settings ────────────────────────────────────────────

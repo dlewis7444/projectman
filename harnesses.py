@@ -34,11 +34,54 @@ HARNESS_USER_BIN_DIRS = (
     '~/bin',
 )
 
+# ProjectMan-owned bin dir (shims only — never writes into harness install trees).
+PM_BIN_REL = '.ProjectMan/bin'
+
+# Zellij 0.44 reattach shim: Kimi renames its process title to ``kimi-co`` while
+# the binary is ``kimi``; suspended panes re-exec the title. Lives under PM_BIN.
+KIMI_CO_SHIM_NAME = 'kimi-co'
+
+_KIMI_CO_SHIM_BODY = '''#!/bin/bash
+# ProjectMan-owned shim — do not put this in ~/.kimi-code (not our tree).
+# Zellij reattach runs command="kimi-co"; the real CLI is "kimi".
+set -euo pipefail
+if [[ -n "${KIMI_REAL_BIN:-}" && -x "${KIMI_REAL_BIN}" ]]; then
+  exec "${KIMI_REAL_BIN}" "$@"
+fi
+# Prefer standard install locations, then PATH "kimi" (not this shim).
+for c in \\
+  "${HOME}/.kimi-code/bin/kimi" \\
+  "${HOME}/.local/bin/kimi"
+do
+  if [[ -x "$c" ]]; then
+    exec "$c" "$@"
+  fi
+done
+# PATH lookup excluding this script's directory (avoid recursion).
+_here=$(cd "$(dirname "$0")" && pwd)
+IFS=:
+for d in $PATH; do
+  [[ -z "$d" || "$d" == "$_here" ]] && continue
+  if [[ -x "$d/kimi" ]]; then
+    exec "$d/kimi" "$@"
+  fi
+done
+echo "ProjectMan: kimi not found (kimi-co shim; install Kimi Code or fix PATH)" >&2
+exit 127
+'''
+
+
+def projectman_bin_dir(*, home=None):
+    """Absolute ``~/.ProjectMan/bin`` (created on demand by ensure helpers)."""
+    h = home if home is not None else os.path.expanduser('~')
+    return os.path.join(h, '.ProjectMan', 'bin')
+
 
 def harness_user_bin_dirs(*, home=None):
     """Absolute existing dirs from ``HARNESS_USER_BIN_DIRS`` (skip missing).
 
-    ``home`` overrides ``~`` for tests. Never raises.
+    ``home`` overrides ``~`` for tests. Never raises. Does **not** include
+    ProjectMan's own bin (see :func:`with_harness_path` / PM shims).
     """
     out = []
     for raw in HARNESS_USER_BIN_DIRS:
@@ -57,16 +100,28 @@ def harness_user_bin_dirs(*, home=None):
 
 
 def with_harness_path(env=None, *, home=None):
-    """Return a copy of *env* (or ``os.environ``) with harness bin dirs on PATH.
+    """Return a copy of *env* (or ``os.environ``) with bin dirs on PATH.
 
-    Prepends only dirs that exist and are not already on PATH (idempotent).
-    Pure aside from reading the environment and the filesystem; never raises.
+    Prepends, in order (idempotent):
+
+    1. ProjectMan's own ``~/.ProjectMan/bin`` (PM shims, e.g. ``kimi-co``)
+    2. Harness installer dirs that exist (``~/.kimi-code/bin``, …)
+
+    Never raises. Does not write into harness install trees.
     """
     base = dict(env) if env is not None else dict(os.environ)
     existing = base.get('PATH', '') or ''
     parts = [p for p in existing.split(os.pathsep) if p]
     seen = set(parts)
     prefix = []
+    # PM bin first so our shims win over a missing harness-tree name.
+    pm_bin = projectman_bin_dir(home=home)
+    try:
+        if os.path.isdir(pm_bin) and pm_bin not in seen:
+            prefix.append(pm_bin)
+            seen.add(pm_bin)
+    except OSError:
+        pass
     for d in harness_user_bin_dirs(home=home):
         if d not in seen:
             prefix.append(d)
@@ -76,13 +131,45 @@ def with_harness_path(env=None, *, home=None):
     return base
 
 
+def ensure_kimi_co_shim(*, home=None):
+    """Write ProjectMan-owned ``kimi-co`` → real ``kimi`` launcher shim.
+
+    Wholly under ``~/.ProjectMan/bin`` — does **not** modify ``~/.kimi-code``
+    or any harness install. Safe if kimi is installed later: the shim resolves
+    ``kimi`` at exec time.
+
+    Idempotent; never raises. Returns the shim path when written/present, else ''.
+    """
+    try:
+        bindir = projectman_bin_dir(home=home)
+        os.makedirs(bindir, exist_ok=True)
+        shim = os.path.join(bindir, KIMI_CO_SHIM_NAME)
+        body = _KIMI_CO_SHIM_BODY
+        # Rewrite if missing or content drifted (keep shim behavior current).
+        cur = ''
+        try:
+            with open(shim, 'r', encoding='utf-8') as f:
+                cur = f.read()
+        except OSError:
+            pass
+        if cur != body:
+            with open(shim, 'w', encoding='utf-8') as f:
+                f.write(body)
+        os.chmod(shim, 0o755)
+        return shim
+    except OSError:
+        return ''
+
+
 def ensure_process_harness_path(*, home=None):
     """Mutate ``os.environ['PATH']`` so this process can resolve harness binaries.
 
     Called once at app startup so doctor / any PATH-based lookup sees the same
-    bins as a shell that sourced the installers' ``.bashrc`` snippets. Safe to
-    call repeatedly (idempotent). Returns the new PATH string.
+    bins as a shell that sourced the installers' ``.bashrc`` snippets. Also
+    ensures the PM-owned ``kimi-co`` zellij reattach shim exists. Safe to call
+    repeatedly (idempotent). Returns the new PATH string.
     """
+    ensure_kimi_co_shim(home=home)
     env = with_harness_path(os.environ, home=home)
     os.environ['PATH'] = env.get('PATH', '')
     return os.environ['PATH']
@@ -98,6 +185,10 @@ class HarnessCaps:
     rich_status: bool = False   # lifecycle events → live status dots
     model_select: bool = False  # per-project model is meaningful
     headless_json: bool = False # `-p`-style structured output (PAA-relevant)
+    # Headless *resume* (chat sessions by id) is a stronger claim than
+    # headless_json. Set True only after the adapter's headless_plan implements
+    # session_id resume and it has been verified against the installed binary.
+    headless_chat: bool = False
     # Continue-fallback policy (M-P3.3): when continue (`-c`) finds nothing to
     # resume, does the wrapper fall back to a fresh session? The decision is the
     # ADAPTER's, not the wrapper's hardcode — a harness whose continue exits
@@ -131,6 +222,230 @@ class SpawnPlan:
     argv: list
     env: dict | None = None
     fallback_reason: str | None = None
+
+
+@dataclass
+class HeadlessPlan:
+    """One-shot headless invocation: argv + env + cwd + timeout.
+
+    Used by PAA AI scans and the headless chat-turn primitive. ``env`` is
+    ``None`` to inherit the parent environment; a dict overrides it (e.g.
+    Claude provider injection via ``models.build_spawn_env``). ``cwd`` of
+    ``None`` means the runner should use its default PAA working directory.
+    ``fallback_reason`` is optional adapter-level degradation notes (distinct
+    from resolution-policy fallback in ``paa_headless.resolve_headless_adapter``).
+    """
+    argv: list
+    env: dict | None = None          # None = inherit parent env
+    cwd: str | None = None
+    timeout: int = 30
+    fallback_reason: str | None = None
+
+
+class HeadlessPolicyError(Exception):
+    """Non-legacy tool policy cannot be expressed without guessing argv."""
+
+
+@dataclass
+class HeadlessResult:
+    """Normalized headless outcome, any harness."""
+    text: str | None                 # None on failure
+    tokens: int = 0                  # input+output, 0 when unknown
+    session_id: str | None = None    # for chat resume; None when n/a
+    error: str | None = None         # human-readable failure note
+    # Set when resolution fell back to another harness. Stays off ``error``
+    # so a successful reply can still show the reason to the phone.
+    fallback_reason: str | None = None
+    # Structured denied-tool / question object from harness JSON, if the
+    # payload actually has one. Never scraped out of reply prose.
+    question: dict | None = None
+
+
+# Claude tier aliases used when resolving ``--model`` for headless scans/chat
+# under a custom provider (same set as paa_haiku / paa_card_window).
+_HEADLESS_TIER_ALIASES = frozenset(('haiku', 'sonnet', 'opus', 'fable', 'subagent'))
+
+
+def _default_headless_plan(self, prompt, settings, project_path, *,
+                           session_id=None, model=None,
+                           tool_policy='legacy', timeout=None):
+    """Default adapter headless plan: not implemented.
+
+    Returns ``None`` so resolution falls back to claude (or no-ops). Custom
+    adapters override this; builtins without a verified headless argv keep
+    this default.
+    """
+    return None
+
+
+_default_headless_plan.__headless_default__ = True  # type: ignore[attr-defined]
+
+
+def _default_parse_headless_output(self, stdout: str):
+    """Default headless stdout parser — override per harness JSON shape."""
+    return HeadlessResult(text=None, error='headless parse not implemented')
+
+
+_default_parse_headless_output.__headless_default__ = True  # type: ignore[attr-defined]
+
+
+def permission_modes_in_help(help_text: str) -> set[str]:
+    """Mode names advertised next to ``--permission-mode`` in a ``--help`` blob.
+
+    Looks only at the window that starts at that flag, so a stray ``plan``
+    elsewhere in the help does not count. Returns an empty set when the flag
+    itself is absent.
+    """
+    import re
+    if not help_text or '--permission-mode' not in help_text:
+        return set()
+    idx = help_text.find('--permission-mode')
+    window = help_text[idx:idx + 700]
+    modes = set(re.findall(r'"([A-Za-z0-9_-]+)"', window))
+    bracket = re.search(r'\[possible values:([^\]]+)\]', window)
+    if bracket:
+        for part in bracket.group(1).split(','):
+            name = part.strip()
+            if name:
+                modes.add(name)
+    return modes
+
+
+def policy_argv_from_help(tool_policy: str, help_text: str):
+    """Map ``plan`` / ``armed`` onto ``--permission-mode`` using help text.
+
+    Returns ``(extra_argv, error)``. ``error`` names the missing flag when
+    the help text does not show that spelling. Never emits ``--always-approve``,
+    ``bypassPermissions``, or ``dontAsk``.
+    """
+    if tool_policy in (None, '', 'legacy'):
+        return [], None
+    modes = permission_modes_in_help(help_text)
+    if tool_policy == 'plan':
+        if 'plan' in modes:
+            return ['--permission-mode', 'plan'], None
+        return [], 'missing flag --permission-mode plan'
+    if tool_policy == 'armed':
+        for spelling in ('acceptEdits', 'accept-edits'):
+            if spelling in modes:
+                return ['--permission-mode', spelling], None
+        return [], 'missing flag --permission-mode acceptEdits'
+    return [], f'unknown tool_policy {tool_policy!r}'
+
+
+_claude_help_cache: dict[str, str] = {}
+
+
+def read_claude_help(binary: str) -> str:
+    """Return ``claude --help`` text (stdout and stderr). Empty on failure.
+
+    Cached per binary for the process. Tests that need a different blob patch
+    this function.
+    """
+    import subprocess
+    cached = _claude_help_cache.get(binary)
+    if cached is not None:
+        return cached
+    try:
+        proc = subprocess.run(
+            [binary, '--help'],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ''
+    text = (proc.stdout or '') + '\n' + (proc.stderr or '')
+    _claude_help_cache[binary] = text
+    return text
+
+
+def structured_question(payload):
+    """Return a structured question/denied-tool object, or None.
+
+    Only explicit dict fields count. Reply prose is not inspected.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for key in ('denied_tool', 'question'):
+        val = payload.get(key)
+        if isinstance(val, dict):
+            return val
+    return None
+
+
+def _headless_model_flag(settings, project_path, model, *, model_select):
+    """``['-m', model]`` for non-claude headless plans, else ``[]``.
+
+    When *model* is None, uses ``settings.effective_model(project_path)`` —
+    the same resolution interactive ``spawn_plan`` uses (not claude tier
+    aliases). Empty model → no flag (harness native default).
+    """
+    if model is None:
+        path = '' if project_path is None else (project_path or '')
+        try:
+            model = settings.effective_model(path)
+        except Exception:
+            model = ''
+    model = (model or '').strip() if isinstance(model, str) else ''
+    if model and model_select:
+        return ['-m', model]
+    return []
+
+
+def _is_default_headless_plan(meth) -> bool:
+    """True when *meth* is (or wraps) the default stub ``_default_headless_plan``.
+
+    ``types.MethodType`` wrappers expose the underlying function as
+    ``__func__``; both the wrapper and the function may carry
+    ``__headless_default__`` (set on the unbound default).
+    """
+    if meth is None:
+        return False
+    if getattr(meth, '__headless_default__', False):
+        return True
+    func = getattr(meth, '__func__', None)
+    if func is not None and getattr(func, '__headless_default__', False):
+        return True
+    return False
+
+
+def adapter_implements_headless(adapter) -> bool:
+    """True when *adapter* can produce a real headless plan (not the stub).
+
+    Policy for resolve: ``caps.headless_json`` alone is not enough — an adapter
+    may claim the flag while still using the default stub plan. Requiring a
+    non-default ``headless_plan`` prevents pretending stub adapters work.
+    Builtins (claude/opencode/grok/kimi) all ship real plans after W5.
+
+    Instance overrides are honored: if ``adapter.__dict__`` has a callable
+    ``headless_plan`` that is not the default stub, that counts as implemented
+    even when the class still has the stub (or no method). Bound default stubs
+    attached by ``register_adapter`` (``__headless_default__``) do **not**
+    count — so customs without a real plan still fall back to claude.
+    """
+    if adapter is None:
+        return False
+    caps = getattr(adapter, 'caps', None)
+    if caps is None or not getattr(caps, 'headless_json', False):
+        return False
+
+    # Prefer a real instance attribute over the class (allows per-instance
+    # plans without subclassing). Skip default stubs either way.
+    inst_dict = getattr(adapter, '__dict__', None) or {}
+    if 'headless_plan' in inst_dict:
+        meth = inst_dict['headless_plan']
+        if not callable(meth) or _is_default_headless_plan(meth):
+            return False
+        return True
+
+    meth = getattr(type(adapter), 'headless_plan', None)
+    if meth is None or not callable(meth):
+        return False
+    if _is_default_headless_plan(meth):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +667,9 @@ class ClaudeAdapter:
         rich_status=True,
         model_select=True,
         headless_json=True,
+        # Resume via ``claude -p --resume <id>`` verified against installed
+        # ``claude --help`` (``-r, --resume [value]``) on 2026-08-05.
+        headless_chat=True,
     )
 
     def __init__(self):
@@ -398,6 +716,95 @@ class ClaudeAdapter:
         env, reason = build_spawn_env(settings, project.path)
         return SpawnPlan(argv=argv, env=env, fallback_reason=reason)
 
+    # --- headless contract (PAA scans + chat_turn) -------------------------
+
+    def headless_plan(self, prompt, settings, project_path, *,
+                      session_id=None, model=None,
+                      tool_policy='legacy', timeout=None):
+        """Build a one-shot headless ``claude -p`` invocation.
+
+        Stateless scan argv (no session_id) matches the historical
+        ``paa_haiku._run_scan_model`` shape byte-for-byte::
+
+            [bin, '-p', '--model', m, '--output-format', 'json', prompt]
+
+        With ``session_id``, inserts ``--resume <id>`` after ``-p`` (flag
+        verified via ``claude --help``). Provider env reuses
+        ``models.build_spawn_env``; when *model* is a tier alias under a custom
+        provider it is resolved via ``resolve_tier_model``.
+
+        ``project_path is None`` keeps the back-compat path (native inherit,
+        no env injection) used by older tests. ``project_path=''`` means the
+        global default provider.
+        """
+        claude_cmd = self._binary(settings)
+        model_arg = model
+        env = None  # None → subprocess inherits (native)
+
+        if project_path is not None:
+            from models import build_spawn_env, resolve_tier_model
+            env_dict, _reason = build_spawn_env(settings, project_path)
+            # reason set ⇒ env_dict is None ⇒ stay native with bare tier alias
+            if env_dict is not None:
+                env = env_dict
+                if (model_arg is not None
+                        and model_arg in _HEADLESS_TIER_ALIASES):
+                    resolved = resolve_tier_model(
+                        settings,
+                        settings.effective_provider(project_path, 'claude'),
+                        model_arg,
+                    )
+                    if resolved:
+                        model_arg = resolved
+
+        argv = [claude_cmd, '-p']
+        if session_id:
+            argv.extend(['--resume', session_id])
+        if model_arg is not None:
+            argv.extend(['--model', model_arg])
+        argv.extend(['--output-format', 'json', prompt])
+        if tool_policy not in (None, 'legacy'):
+            extra, err = policy_argv_from_help(
+                tool_policy, read_claude_help(claude_cmd))
+            if err:
+                raise HeadlessPolicyError(err)
+            argv.extend(extra)
+
+        plan_timeout = 30 if timeout is None else int(timeout)
+        return HeadlessPlan(argv=argv, env=env, cwd=None, timeout=plan_timeout)
+
+    def parse_headless_output(self, stdout: str) -> HeadlessResult:
+        """Parse ``claude -p --output-format json`` stdout into HeadlessResult.
+
+        Maps ``result`` → text, ``usage.input_tokens + output_tokens`` → tokens,
+        ``session_id`` → session_id. Bad JSON → text=None with error note.
+        """
+        import json as _json
+        try:
+            data = _json.loads(stdout)
+        except (ValueError, TypeError):
+            return HeadlessResult(text=None, error='unparseable JSON')
+        if not isinstance(data, dict):
+            return HeadlessResult(text=None, error='unparseable JSON')
+        response_text = data.get('result', '')
+        usage = data.get('usage') or {}
+        if not isinstance(usage, dict):
+            usage = {}
+        try:
+            tokens = int(usage.get('input_tokens', 0) or 0) + int(
+                usage.get('output_tokens', 0) or 0)
+        except (TypeError, ValueError):
+            tokens = 0
+        sid = data.get('session_id')
+        if sid is not None and sid != '':
+            sid = str(sid)
+        else:
+            sid = None
+        return HeadlessResult(
+            text=response_text, tokens=tokens, session_id=sid,
+            question=structured_question(data),
+        )
+
     # --- zellij path ------------------------------------------------------
 
     def zellij_continue_command(self, settings, project=None):
@@ -430,14 +837,20 @@ class ClaudeAdapter:
     def list_sessions(self, project, settings=None):
         """Return the project's recent sessions as ``SessionRef``s.
 
-        Delegates to the existing ``HistoryReader`` (``~/.claude/history.jsonl``,
-        newest-first, capped at 7 as today). ``HistoryReader`` is Claude-internal
-        plumbing now (A1): no consumer reads it directly — the sidebar expander
-        goes through ``list_sessions``. ``settings`` is accepted for protocol
-        uniformity (opencode uses it to resolve a custom binary); claude ignores
-        it. Imported lazily so this pure module stays headless-importable even
-        though ``model.py`` pulls in gi.
+        Localhost: ``HistoryReader`` (``~/.claude/history.jsonl``).
+        Remote: fetch the host's history over SSH and filter by project path
+        (see ``remote_sessions``). ``settings`` supplies the host profile.
         """
+        try:
+            from remote_sessions import host_profile_for_project, is_remote_project
+            if is_remote_project(project) and settings is not None:
+                prof = host_profile_for_project(settings, project)
+                if prof is not None:
+                    from remote_sessions import list_remote_claude_sessions
+                    return list_remote_claude_sessions(prof, project)
+                return []
+        except Exception:
+            pass
         from model import HistoryReader
         if self._history is None:
             self._history = HistoryReader()
@@ -665,6 +1078,11 @@ class OpencodeAdapter:
         rich_status=True,
         model_select=True,
         headless_json=True,
+        # W5 probe 2026-08-05 (opencode 1.3.17 on the primary workstation):
+        # ``opencode run <prompt> --format json`` one-shot NDJSON works via
+        # ollama pool; resume via ``-s <sessionID>`` keeps the same session
+        # headlessly. headless_chat=True.
+        headless_chat=True,
     )
 
     def __init__(self, *, run_fn=None, storage_dir=None):
@@ -735,6 +1153,120 @@ class OpencodeAdapter:
             raise ValueError(f"unknown spawn mode: {mode!r}")
         return SpawnPlan(argv=argv, env=None, fallback_reason=None)
 
+    # --- headless contract (PAA scans + chat_turn) -------------------------
+
+    def headless_plan(self, prompt, settings, project_path, *,
+                      session_id=None, model=None,
+                      tool_policy='legacy', timeout=None):
+        """One-shot / resume via ``opencode run`` (probed on the primary workstation 2026-08-05).
+
+        Argv (verified against ``opencode run --help`` + live ollama one-shot)::
+
+            [bin, 'run', prompt, '--format', 'json']  # + optional -m / -s
+
+        Resume: ``-s <sessionID>`` keeps the same session (headless_chat).
+        Model: explicit *model*, else ``settings.effective_model(project_path)``
+        (interactive axis — not claude tier aliases). Env always None.
+
+        No verified read-only flag. A non-legacy ``tool_policy`` returns None
+        so the caller can refuse instead of guessing argv.
+        """
+        if tool_policy not in (None, 'legacy'):
+            return None
+        binary = self._binary(settings)
+        argv = [binary, 'run', prompt, '--format', 'json']
+        argv.extend(_headless_model_flag(
+            settings, project_path, model,
+            model_select=self.caps.model_select,
+        ))
+        if session_id:
+            argv.extend(['-s', session_id])
+        plan_timeout = 30 if timeout is None else int(timeout)
+        return HeadlessPlan(argv=argv, env=None, cwd=None, timeout=plan_timeout)
+
+    def parse_headless_output(self, stdout: str) -> HeadlessResult:
+        """Parse ``opencode run --format json`` NDJSON event stream.
+
+        Events observed live: ``step_start`` / ``text`` / ``step_finish``.
+        Text is concatenated from ``type=="text"`` → ``part.text``; tokens
+        summed from ``step_finish.part.tokens.input+output``; session from
+        any event's ``sessionID``.
+
+        Failure: ``type=="error"`` (or equivalent) must not be papered over by
+        empty success text + sessionID — see error-event handling below.
+        """
+        import json as _json
+        texts = []
+        sid = None
+        tokens = 0
+        saw_json = False
+        errors = []
+        for line in (stdout or '').splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = _json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(obj, dict):
+                continue
+            saw_json = True
+            if obj.get('sessionID'):
+                sid = str(obj['sessionID'])
+            etype = obj.get('type')
+            part = obj.get('part')
+            if not isinstance(part, dict):
+                part = {}
+            if etype == 'error':
+                # Extract a human-readable note from common shapes.
+                err = obj.get('error')
+                msg = None
+                if isinstance(err, str) and err.strip():
+                    msg = err.strip()
+                elif isinstance(err, dict):
+                    for key in ('message', 'name', 'data'):
+                        v = err.get(key)
+                        if isinstance(v, str) and v.strip():
+                            msg = v.strip()
+                            break
+                        if v is not None and not isinstance(v, (dict, list)):
+                            msg = str(v)
+                            break
+                if msg is None:
+                    m = obj.get('message')
+                    if isinstance(m, str) and m.strip():
+                        msg = m.strip()
+                if msg is None:
+                    pmsg = part.get('message') or part.get('text')
+                    if isinstance(pmsg, str) and pmsg.strip():
+                        msg = pmsg.strip()
+                errors.append(msg or 'opencode error event')
+            elif etype == 'text':
+                t = part.get('text')
+                if t is not None and t != '':
+                    texts.append(str(t))
+            elif etype == 'step_finish':
+                tok = part.get('tokens') or {}
+                if isinstance(tok, dict):
+                    try:
+                        tokens += int(tok.get('input', 0) or 0) + int(
+                            tok.get('output', 0) or 0)
+                    except (TypeError, ValueError):
+                        pass
+        if not saw_json:
+            return HeadlessResult(text=None, error='unparseable JSON')
+        joined = ''.join(texts)
+        # Safer default: any error event → fail with text=None (even when
+        # sessionID present and/or partial text was emitted). Empty success
+        # text must not paper over tool/model error events.
+        if errors:
+            err_note = errors[-1] if len(errors) == 1 else '; '.join(errors)
+            return HeadlessResult(
+                text=None, tokens=tokens, session_id=sid, error=err_note)
+        return HeadlessResult(
+            text=joined, tokens=tokens, session_id=sid)
+
     # --- zellij path ------------------------------------------------------
 
     def zellij_continue_command(self, settings, project=None):
@@ -791,16 +1323,29 @@ class OpencodeAdapter:
         project directory** (the CLI is cwd-scoped; running
         it from PM's own cwd returned 0 rows while the same command from the
         project dir returned the real sessions) and then filtered by each
-        entry's ``directory``. Fallback: storage scan over the OLD file layout
-        (``storage/project`` + ``storage/session``) — KNOWN GAP: current
-        opencode builds (1.16+/1.17) store sessions in SQLite (``opencode.db``),
-        which this fallback does not read, so on those versions the CLI is the
-        only working path; SQLite support is P3 hardening. Defensive
-        throughout — any failure in one layer falls through to the next; a
-        total failure returns []. ``settings`` is optional (used only to
-        resolve a custom binary); the sidebar passes it via the adapter call.
+        entry's ``directory``. Remote projects run the same CLI over SSH in
+        ``project.remote_cwd``. Fallback: storage scan over the OLD file layout
+        (``storage/project`` + ``storage/session``), localhost only — KNOWN GAP:
+        current opencode builds (1.16+/1.17) store sessions in SQLite
+        (``opencode.db``). Defensive throughout — total failure returns [].
         """
         binary = self._binary(settings) if settings is not None else 'opencode'
+        try:
+            from remote_sessions import (
+                host_profile_for_project, is_remote_project, list_remote_cli_sessions,
+            )
+            if is_remote_project(project) and settings is not None:
+                prof = host_profile_for_project(settings, project)
+                if prof is None:
+                    return []
+                from remote_sessions import parse_opencode_sessions_remote
+                return list_remote_cli_sessions(
+                    prof, project,
+                    [binary, 'session', 'list', '--format', 'json', '-n', '200'],
+                    lambda out: parse_opencode_sessions_remote(out, project),
+                )
+        except Exception:
+            pass
         # Ask for a few extra rows before the per-directory filter trims to cap.
         result = self._run([binary, 'session', 'list', '--format', 'json',
                             '-n', '200'], cwd=project.path)
@@ -908,10 +1453,17 @@ class GrokAdapter:
         ``grok sessions list``; local-id resume is auth-free per the probe).
 
     Model: per-project model string passed verbatim as ``-m <value>`` when set
-    + ``caps.model_select``. Grok reaches custom OpenAI-compatible endpoints
-    (the ollama pool) via its OWN ``~/.grok/config.toml`` ``[model.<key>]`` —
-    so the model id here is a grok config KEY (e.g. ``pool-qwen``), and PM
-    injects NO env and NO ccr. Empty/default → no ``-m``.
+    + ``caps.model_select``. Native grok reaches custom OpenAI-compatible
+    endpoints (the ollama pool) via its OWN ``~/.grok/config.toml``
+    ``[model.<key>]`` — the model id there is a grok config KEY (e.g.
+    ``pool-qwen``), and PM injects NO env. A custom Settings → Models provider
+    (2026-10-05) is different: PM injects ``GROK_MODELS_BASE_URL`` +
+    ``XAI_API_KEY`` + a managed sessionless ``GROK_HOME`` (per-provider home
+    under the PM dotdir whose config wires every catalog model as BYOK —
+    never writes ``~/.grok/``) and the model is ALWAYS explicit via
+    :func:`models.resolve_grok_model` (a bare endpoint would otherwise pick
+    its first listed model, which may not support chat). Empty/default →
+    no ``-m``.
 
     NO ``--no-auto-update`` injection (F5: user's tool, user's policy — the
     bench pins versions bench-side via ``[cli] auto_update = false``). NO
@@ -926,6 +1478,13 @@ class GrokAdapter:
     """
     id = 'grok'
     display_name = 'Grok Build'
+    # Gate argv belt-and-suspenders (probe-verified 2026-10-01):
+    # run_terminal_cmd is the REAL internal shell-tool id (the
+    # run_terminal_command spelling is silently ignored by this binary);
+    # write/search_replace are the file-write ids from the model's own
+    # tool list. --disallowed-tools REMOVES the tools; the --deny rules
+    # remain the first layer.
+    GATE_DISALLOWED_TOOLS = 'run_terminal_cmd,write,search_replace'
     # M-UX.10 (C7): recovery hint surfaced on a missing-binary spawn failure —
     # the curl one-liner from the README's "Installing Grok Build".
     install_hint = 'Install: curl -fsSL https://x.ai/cli/install.sh | bash'
@@ -937,6 +1496,11 @@ class GrokAdapter:
         rich_status=True,
         model_select=True,
         headless_json=True,
+        # W5 probe 2026-08-05 (grok 0.2.118 on the primary workstation):
+        # ``grok -p <prompt> --output-format json`` one-shot works; resume via
+        # ``-r <sessionId>`` keeps the same session headlessly. headless_chat=True.
+        # Live cost ~$0.026 xAI (no ollama model key configured on this host).
+        headless_chat=True,
         # F1: `grok -c` exits 1 cleanly on nothing-to-continue (probe Q1), so
         # the standard `-c || fresh` fallback applies — same as claude/opencode.
         continue_falls_back_to_fresh=True,
@@ -961,8 +1525,15 @@ class GrokAdapter:
         return 'grok'
 
     def _model_args(self, settings, project):
-        """``['-m', value]`` for a set per-project model, else ``[]``."""
-        model = settings.effective_model(project.path)
+        """``['-m', value]`` for a resolved model, else ``[]``.
+
+        Native: the per-project pin verbatim (historical behavior). Custom
+        Settings provider: :func:`models.resolve_grok_model` — always a
+        concrete ``-m`` so grok never falls through to the endpoint's first
+        listed model (probe 2026-10-05: that model may not support chat).
+        """
+        from models import resolve_grok_model
+        model = resolve_grok_model(settings, project.path)
         if model and self.caps.model_select:
             return ['-m', model]
         return []
@@ -981,8 +1552,12 @@ class GrokAdapter:
                 + ['-r', session_id])
 
     def spawn_plan(self, settings, project, mode, session_id=None):
-        """Uniform spawn contract (A4). grok reaches providers via its own
-        config.toml, so env is always None and there is no ccr fallback.
+        """Uniform spawn contract (A4). Env delegates to
+        ``models.build_grok_spawn_env``: custom Settings provider → derived
+        ``GROK_MODELS_BASE_URL``/``XAI_API_KEY`` + managed sessionless
+        ``GROK_HOME``; native → ``None`` (grok's own creds). A
+        requested-but-unusable provider degrades to native with
+        ``fallback_reason`` (same toast shape as claude).
 
         For ``continue`` the model flag folds INTO the fallback wrapper so BOTH
         the ``grok -c`` attempt and the bare-``grok`` fallback carry
@@ -1003,7 +1578,177 @@ class GrokAdapter:
             )
         else:
             raise ValueError(f"unknown spawn mode: {mode!r}")
-        return SpawnPlan(argv=argv, env=None, fallback_reason=None)
+        from models import build_grok_spawn_env
+        env, reason = build_grok_spawn_env(settings, project.path)
+        return SpawnPlan(argv=argv, env=env, fallback_reason=reason)
+
+    # --- headless contract (PAA scans + chat_turn) -------------------------
+
+    def headless_plan(self, prompt, settings, project_path, *,
+                      session_id=None, model=None,
+                      tool_policy='legacy', timeout=None,
+                      approval_sock=None, approval_token=None,
+                      reasoning_effort=None):
+        """One-shot / resume via ``grok -p`` (probed on the primary workstation 2026-08-05).
+
+        Argv (verified against ``grok --help`` + live one-shot)::
+
+            [bin, '-p', prompt, '--output-format', 'json']  # + -m / -r
+
+        Resume: ``-r <sessionId>`` reuses the session (headless_chat).
+        Model: explicit *model* wins; else ``models.resolve_grok_model`` for
+        a non-empty *project_path* (native pin verbatim, custom provider →
+        concrete provider model), else the legacy
+        ``settings.effective_model(project_path)`` read. Env: the compat-MCP
+        isolation pair below is ALWAYS present; a custom Settings provider for
+        a non-empty *project_path* adds ``GROK_MODELS_BASE_URL``/``XAI_API_KEY``
+        + a managed sessionless ``GROK_HOME``
+        (``models.build_grok_spawn_env``). ``project_path == ''`` (PAA
+        Telegram turns) is byte-identical to the historical native posture —
+        NO provider env, NO provider-driven ``-m`` (PAA SAFETY INVARIANT:
+        their headless stays native-only pending recertification).
+
+        ``tool_policy='plan'`` is belt-and-suspenders: it keeps the compat alias
+        ``--permission-mode plan`` AND appends deny rules that grok documents
+        as always enforced (they win over every permission mode, even
+        bypassPermissions / always-approve): ``--deny Edit --deny Write
+        --deny Bash --deny MCPTool``. Live probes on 2026-09-30 showed both
+        ``--permission-mode plan`` and ``dontAsk`` still allowed /tmp file
+        creation, so the flags alone are not read-only.
+        ``tool_policy='armed'`` adds ``--permission-mode acceptEdits``.
+        Legacy (the scan default) adds neither, and never adds
+        ``--always-approve``, ``bypassPermissions``, or ``dontAsk``.
+
+        ``tool_policy='gate'`` (rw PAA Telegram bot turns only) adds
+        ``--permission-mode bypassPermissions`` plus deny rules for the
+        built-in mutators — ``--deny Edit --deny Write --deny Bash`` —
+        and EXPLICITLY no ``--deny MCPTool``: the bot-owned MCP server
+        (``paa_mcp.py``, registered as ``paa-shell`` in the PAA cwd's
+        ``.grok/config.toml``) is the mutation channel, and every
+        ``run_command`` call is vetted by the approval broker's automated
+        reviewer (verdict-final, the maintainer 2026-10-01). This is the maintainer's
+        explicit 2026-09-30 override of the repo-wide
+        ``bypassPermissions`` ban, and it exists ONLY here. It is safe
+        because grok does NOT fire PreToolUse hooks in headless ``-p``
+        mode (probe-proven 2026-10-01, which is what killed the old
+        hook-based gate): enforcement is the built-in deny rules plus
+        broker-gated MCP-only mutations — there is no ungated path. The
+        env half injects ``PAA_APPROVAL_SOCK``/``PAA_APPROVAL_TOKEN``
+        (the broker channel the MCP server passes through to its own
+        process; without both halves the server lists zero tools). A gate
+        request missing either half raises :class:`HeadlessPolicyError` —
+        never build a gate argv with half a review channel. plan/armed/
+        legacy keep every guarantee above and never emit
+        bypassPermissions.
+
+        The gate argv also carries ``--disallowed-tools
+        run_terminal_cmd,write,search_replace`` (belt-and-suspenders under
+        the deny rules): live probe 2026-10-01 proved
+        ``run_terminal_cmd`` is the real internal shell-tool id (the
+        ``run_terminal_command`` spelling is silently ignored), and
+        ``write``/``search_replace`` are the file-write ids from the
+        model's own tool list. ``--disallowed-tools`` REMOVES the tools;
+        the deny rules stay as the first layer.
+
+        *reasoning_effort* (item 4, 2026-10-01) appends
+        ``--reasoning-effort <value>`` for ANY policy when set to
+        anything but 'none' — the gate reviewer runs with
+        ``reviewer_effort`` from paa-telegram.json (default 'low') and
+        the user's turns with ``chat_effort`` (default 'medium').
+        """
+        binary = self._binary(settings)
+        argv = [binary]
+        if session_id:
+            argv.extend(['-r', session_id])
+        path = project_path or ''
+        provider_env = None
+        if path:
+            # Non-empty path only: '' is the PAA native-only invariant.
+            from models import build_grok_spawn_env, resolve_grok_model
+            provider_env, _reason = build_grok_spawn_env(settings, path)
+            if model is None:
+                try:
+                    model = resolve_grok_model(settings, path)
+                except Exception:
+                    model = None
+        argv.extend(_headless_model_flag(
+            settings, project_path, model,
+            model_select=self.caps.model_select,
+        ))
+        argv.extend(['-p', prompt, '--output-format', 'json'])
+        if tool_policy == 'plan':
+            argv.extend(['--permission-mode', 'plan'])
+            argv.extend(['--deny', 'Edit', '--deny', 'Write',
+                         '--deny', 'Bash', '--deny', 'MCPTool'])
+        elif tool_policy == 'armed':
+            argv.extend(['--permission-mode', 'acceptEdits'])
+        elif tool_policy == 'gate':
+            if not approval_sock or not approval_token:
+                raise HeadlessPolicyError(
+                    "tool_policy 'gate' requires both halves of the "
+                    'approval review channel (approval_sock, approval_token)')
+            argv.extend(['--permission-mode', 'bypassPermissions'])
+            argv.extend(['--deny', 'Edit', '--deny', 'Write', '--deny', 'Bash'])
+            argv.extend(['--disallowed-tools',
+                         self.GATE_DISALLOWED_TOOLS])
+        elif tool_policy not in (None, 'legacy'):
+            raise HeadlessPolicyError(f'unknown tool_policy {tool_policy!r}')
+        if reasoning_effort and str(reasoning_effort) != 'none':
+            argv.extend(['--reasoning-effort', str(reasoning_effort)])
+        plan_timeout = 30 if timeout is None else int(timeout)
+        # Compat MCP isolation (2026-10-01, PAA self-review): grok's
+        # claude/cursor compat layers import every MCP server the maintainer has
+        # configured (~/.claude.json: linux-use, supabase, cc-vision) into
+        # every headless run, and under bypassPermissions those tools run
+        # with no permission check and no review. PAA turns must see only
+        # the project-scoped paa-shell server. Probe-verified on this
+        # binary: the env switches mark the imported servers [disabled].
+        # The pair is merged into whatever base env won (provider env for a
+        # custom provider, os.environ otherwise) — never dropped.
+        env = dict(provider_env) if provider_env is not None else {**os.environ}
+        env['GROK_CLAUDE_MCPS_ENABLED'] = '0'
+        env['GROK_CURSOR_MCPS_ENABLED'] = '0'
+        if tool_policy == 'gate':
+            env['PAA_APPROVAL_SOCK'] = str(approval_sock)
+            env['PAA_APPROVAL_TOKEN'] = str(approval_token)
+        return HeadlessPlan(argv=argv, env=env, cwd=None,
+                            timeout=plan_timeout)
+
+    def parse_headless_output(self, stdout: str) -> HeadlessResult:
+        """Parse ``grok -p --output-format json`` single-object stdout.
+
+        Live shape: ``text``, ``sessionId``, ``usage.input_tokens`` +
+        ``usage.output_tokens``.
+        """
+        import json as _json
+        try:
+            data = _json.loads(stdout)
+        except (ValueError, TypeError):
+            return HeadlessResult(text=None, error='unparseable JSON')
+        if not isinstance(data, dict):
+            return HeadlessResult(text=None, error='unparseable JSON')
+        text = data.get('text')
+        if text is not None:
+            text = str(text)
+        else:
+            text = ''
+        usage = data.get('usage') or {}
+        if not isinstance(usage, dict):
+            usage = {}
+        try:
+            tokens = int(usage.get('input_tokens', 0) or 0) + int(
+                usage.get('output_tokens', 0) or 0)
+        except (TypeError, ValueError):
+            tokens = 0
+        sid = data.get('sessionId')
+        if sid is not None and sid != '':
+            sid = str(sid)
+        else:
+            sid = None
+        return HeadlessResult(
+            text=text, tokens=tokens, session_id=sid,
+            question=structured_question(data),
+        )
 
     # --- zellij path ------------------------------------------------------
 
@@ -1025,11 +1770,18 @@ class GrokAdapter:
         )
 
     def zellij_spawn_env(self, settings, project):
-        """No env override for grok (F5/B5) — grok reaches the pool through its
-        own ``~/.grok/config.toml``, no ccr, no PM env injection. Returns
-        ``(None, None)`` so terminal.py inherits os.environ unchanged.
+        """Env override for a NEW zellij session's server, or ``(None, None)`` (A3/M3).
+
+        Delegates to ``models.build_grok_spawn_env``: custom Settings provider
+        → the derived ``GROK_MODELS_BASE_URL``/``XAI_API_KEY`` + managed
+        sessionless ``GROK_HOME``; native → ``(None, None)`` so terminal.py
+        inherits os.environ unchanged (grok reaches native pool models through
+        its own ``~/.grok/config.toml``). The model folds into the flag-file
+        command via ``_model_args`` / ``zellij_continue_command``. Returns
+        ``(env_dict|None, fallback_reason|None)``.
         """
-        return (None, None)
+        from models import build_grok_spawn_env
+        return build_grok_spawn_env(settings, project.path)
 
     # --- sessions contract ------------------------------------------------
 
@@ -1055,13 +1807,26 @@ class GrokAdapter:
         """Recent grok sessions for ``project`` as SessionRefs (cap 7).
 
         CLI-first (F2): ``grok sessions list -n N`` run **from the project
-        directory** (cwd-scoped), parsed by ``parse_grok_session_list``. The CLI
-        emits newest-first by UPDATED and is authoritative (no storage parsing —
-        the JSON/JSONL session dirs exist but the CLI wins, P2 doctrine).
-        Defensive: a missing/failed CLI returns []. ``settings`` resolves a
-        custom binary; the sidebar passes it via the adapter call.
+        directory** (cwd-scoped), parsed by ``parse_grok_session_list``. Remote
+        projects run the same CLI over SSH in ``project.remote_cwd``. Defensive:
+        a missing/failed CLI returns [].
         """
         binary = self._binary(settings) if settings is not None else 'grok'
+        try:
+            from remote_sessions import (
+                host_profile_for_project, is_remote_project, list_remote_cli_sessions,
+            )
+            if is_remote_project(project) and settings is not None:
+                prof = host_profile_for_project(settings, project)
+                if prof is None:
+                    return []
+                return list_remote_cli_sessions(
+                    prof, project,
+                    [binary, 'sessions', 'list', '-n', '50'],
+                    parse_grok_session_list,
+                )
+        except Exception:
+            pass
         # Ask for a few extra rows; the parser caps to _SESSIONS_CAP.
         result = self._run([binary, 'sessions', 'list', '-n', '50'],
                            cwd=project.path)
@@ -1070,7 +1835,6 @@ class GrokAdapter:
             if rc == 0 and out and out.strip():
                 return parse_grok_session_list(out)
         return []
-
 
 # ---------------------------------------------------------------------------
 # Registry.
@@ -1259,6 +2023,11 @@ class KimiAdapter:
         rich_status=True,
         model_select=True,
         headless_json=True,
+        # W5 probe 2026-08-05 (kimi 0.32.0 on the primary workstation):
+        # ``kimi -p <prompt> --output-format stream-json`` one-shot works;
+        # resume via ``-S <session_id>`` (same-cwd) works headlessly.
+        # Note: ``-p`` cannot combine with ``--yolo`` (CLI error). headless_chat=True.
+        headless_chat=True,
         # Probed: kimi -c already falls through to a fresh session itself and
         # exits 0 when nothing is continuable — PM must NOT wrap with || kimi.
         continue_falls_back_to_fresh=False,
@@ -1323,6 +2092,88 @@ class KimiAdapter:
             raise ValueError(f"unknown spawn mode: {mode!r}")
         return SpawnPlan(argv=argv, env=None, fallback_reason=None)
 
+    # --- headless contract (PAA scans + chat_turn) -------------------------
+
+    def headless_plan(self, prompt, settings, project_path, *,
+                      session_id=None, model=None,
+                      tool_policy='legacy', timeout=None):
+        """One-shot / resume via ``kimi -p`` (probed on the primary workstation 2026-08-05).
+
+        Argv (verified against ``kimi --help`` + live one-shot)::
+
+            [bin, '-p', prompt, '--output-format', 'stream-json']  # + -m / -S
+
+        ``stream-json`` is the only structured output format (choices are
+        ``text`` | ``stream-json``). Do **not** pass ``--yolo`` — CLI rejects
+        ``-p`` + ``--yolo``. Model: explicit *model*, else
+        ``settings.effective_model(project_path)``. Env always None.
+
+        **Resume cwd contract:** ``-S <session_id>`` only works when the process
+        cwd matches the session's ``workDir``. Kimi enforces that. Headless
+        resume is therefore only valid for sessions created under the runner
+        cwd — PAA uses ``default_paa_cwd`` →
+        ``<projects_dir>/.project-admin-agent``. Do not pass a session_id from
+        an interactive project terminal (different workDir) into headless.
+
+        No verified read-only flag. A non-legacy ``tool_policy`` returns None
+        so the caller can refuse instead of guessing argv.
+        """
+        if tool_policy not in (None, 'legacy'):
+            return None
+        binary = self._binary(settings)
+        argv = [binary]
+        if session_id:
+            # Resume only valid when cwd == session workDir (see docstring).
+            argv.extend(['-S', session_id])
+        argv.extend(_headless_model_flag(
+            settings, project_path, model,
+            model_select=self.caps.model_select,
+        ))
+        argv.extend(['-p', prompt, '--output-format', 'stream-json'])
+        plan_timeout = 30 if timeout is None else int(timeout)
+        return HeadlessPlan(argv=argv, env=None, cwd=None, timeout=plan_timeout)
+
+    def parse_headless_output(self, stdout: str) -> HeadlessResult:
+        """Parse ``kimi -p --output-format stream-json`` NDJSON.
+
+        Live shape: ``{"role":"assistant","content":...}`` text lines plus a
+        trailing ``{"role":"meta","type":"session.resume_hint","session_id":...}``.
+        Token counts are not present → tokens=0.
+
+        **Resume cwd contract:** returned ``session_id`` is only resumable via
+        ``headless_plan(..., session_id=...)`` when the next run uses the same
+        cwd as this session's workDir (PAA: ``.project-admin-agent``). Cross-cwd
+        resume will fail at the kimi CLI layer.
+        """
+        import json as _json
+        texts = []
+        sid = None
+        saw_json = False
+        for line in (stdout or '').splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = _json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(obj, dict):
+                continue
+            saw_json = True
+            role = obj.get('role')
+            if role == 'assistant':
+                content = obj.get('content')
+                if content is not None:
+                    texts.append(str(content))
+            elif role == 'meta' and obj.get('type') == 'session.resume_hint':
+                s = obj.get('session_id')
+                if s is not None and s != '':
+                    sid = str(s)
+        if not saw_json:
+            return HeadlessResult(text=None, error='unparseable JSON')
+        return HeadlessResult(
+            text=''.join(texts), tokens=0, session_id=sid)
+
     # --- zellij path ------------------------------------------------------
 
     def zellij_continue_command(self, settings, project=None):
@@ -1349,12 +2200,29 @@ class KimiAdapter:
     def list_sessions(self, project, settings=None):
         """Recent kimi sessions for ``project`` as SessionRefs (cap 7).
 
-        Storage-scan of ``~/.kimi-code/session_index.jsonl`` + ``state.json``;
-        filtered by exact ``workDir`` match. No CLI list command exists.
+        Localhost: storage-scan of ``~/.kimi-code/session_index.jsonl`` +
+        ``state.json``; filtered by exact ``workDir`` match.
+        Remote: fetch the host's ``session_index.jsonl`` over SSH and match
+        ``workDir`` to the project (titles degraded — no remote state.json).
         """
+        try:
+            from remote_sessions import (
+                host_profile_for_project, is_remote_project, list_remote_kimi_sessions,
+            )
+            if is_remote_project(project) and settings is not None:
+                prof = host_profile_for_project(settings, project)
+                if prof is None:
+                    return []
+                return list_remote_kimi_sessions(prof, project)
+        except Exception:
+            pass
         import os as _os
         home = self._home if self._home is not None else _os.path.expanduser('~')
         return list_kimi_sessions_from_home(home, project.path)
+
+# W5 (2026-08-05): OpencodeAdapter, GrokAdapter, and KimiAdapter now implement
+# real headless_plan / parse_headless_output (probe-verified argv). Custom
+# adapters without those methods still get stubs via register_adapter.
 
 
 ADAPTERS = {
@@ -1482,7 +2350,15 @@ def register_adapter(adapter):
     registered id (builtin or a prior custom) is refused. Returns the registered
     adapter on success. (Builtins are wired into ``ADAPTERS`` at import time, not
     through this function.)
+
+    Headless defaults: if the adapter lacks a callable ``headless_plan`` or
+    ``parse_headless_output``, bind the same default stubs used by non-Claude
+    builtins so callers never AttributeError. Default stubs do not count as
+    "implemented" for ``adapter_implements_headless`` (resolve still falls back
+    to claude).
     """
+    import types as _types
+
     harness_id = getattr(adapter, 'id', None)
     if not harness_id:
         raise ValueError("adapter must declare a non-empty id")
@@ -1496,6 +2372,15 @@ def register_adapter(adapter):
             f"adapter id {harness_id!r} is already registered; "
             "ids must be unique"
         )
+
+    # Same defaults as adapters without a real headless plan. Only attach
+    # when missing so customs with real methods are left alone.
+    if not callable(getattr(adapter, 'headless_plan', None)):
+        adapter.headless_plan = _types.MethodType(_default_headless_plan, adapter)
+    if not callable(getattr(adapter, 'parse_headless_output', None)):
+        adapter.parse_headless_output = _types.MethodType(
+            _default_parse_headless_output, adapter)
+
     ADAPTERS[harness_id] = adapter
     return adapter
 

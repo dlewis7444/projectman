@@ -32,6 +32,32 @@ def test_session_name_all_special_chars():
     assert zellij.session_name('!!!') == 'pm----'
 
 
+def test_session_name_localhost_unchanged_for_reattach():
+    """Existing local sessions stay ``pm-<slug>`` so reattach keeps working."""
+    assert zellij.session_name('general') == 'pm-general'
+    assert zellij.session_name('general', 'localhost') == 'pm-general'
+
+
+def test_session_name_remote_does_not_collide_with_local():
+    """Local general and localhost/general must not share a zellij session name."""
+    local = zellij.session_name('general', 'localhost')
+    remote = zellij.session_name('general', '3842c94aa8cc')
+    assert local == 'pm-general'
+    assert remote != local
+    assert remote.startswith('pm-r-')
+    assert 'general' in remote
+
+
+def test_session_name_for_project_uses_host_id():
+    from model import Project
+    local = Project(name='general', path='/tmp/general')
+    remote = Project(
+        name='general', path='ssh:h1:general', host_id='h1',
+        remote_cwd='~/p/general')
+    assert zellij.session_name_for_project(local) == 'pm-general'
+    assert zellij.session_name_for_project(remote).startswith('pm-r-')
+
+
 def test_socket_dir_no_version_subdir(tmp_path, monkeypatch):
     """When no version subdir exists yet, returns the base zellij dir."""
     monkeypatch.setenv('XDG_RUNTIME_DIR', str(tmp_path))
@@ -75,9 +101,10 @@ def test_zellij_watcher_has_signal():
 
 
 def test_kill_session_passes_timeout(tmp_path, monkeypatch):
-    """kill_session runs on synchronous UI paths (deactivate/archive/respawn);
-    it must pass a timeout so a wedged zellij server cannot hang the GTK main
-    loop (docs/popover-leak-main-thread-hang.md, landmine #1)."""
+    """kill_session runs on the synchronous archive UI path; it must pass a
+    timeout so a wedged zellij server cannot hang the GTK main loop
+    (docs/popover-leak-main-thread-hang.md, landmine #1). Deactivate and
+    respawn are detach-only and no longer call this helper."""
     monkeypatch.setattr(zellij, 'socket_dir', lambda: str(tmp_path))
     (tmp_path / 'pm-proj').touch()
     calls = []

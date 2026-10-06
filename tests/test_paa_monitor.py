@@ -1,6 +1,6 @@
 from paa_monitor import (
     extract_file_references,
-    check_missing_claude_md,
+    check_missing_agents_md,
     check_context_drift,
     check_no_git,
     scan_project,
@@ -71,27 +71,39 @@ def test_extract_refs_tilde_path():
     assert '~/.ProjectMan/settings.json' in refs
 
 
-def test_check_missing_claude_md_absent(tmp_path):
+def test_check_missing_agents_md_absent(tmp_path):
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    items = check_missing_claude_md('myproj', str(proj))
+    items = check_missing_agents_md('myproj', str(proj))
     assert len(items) == 1
-    assert items[0].type == 'missing-claude-md'
+    assert items[0].type == 'missing-agents-md'
     assert items[0].severity == 'warning'
 
 
-def test_check_missing_claude_md_present(tmp_path):
+def test_check_missing_agents_md_present(tmp_path):
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text('# Instructions')
-    items = check_missing_claude_md('myproj', str(proj))
+    (proj / 'AGENTS.md').write_text('# Instructions')
+    items = check_missing_agents_md('myproj', str(proj))
     assert len(items) == 0
+
+
+def test_check_missing_agents_md_legacy_claude_only(tmp_path):
+    """A project with only the legacy CLAUDE.md is flagged, but with a
+    distinct transitional note."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text('# Legacy instructions')
+    items = check_missing_agents_md('myproj', str(proj))
+    assert len(items) == 1
+    assert items[0].type == 'missing-agents-md'
+    assert 'legacy CLAUDE.md' in items[0].summary
 
 
 def test_check_context_drift_detects_missing_file(tmp_path):
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         '# Project\n\nSee `src/gone.py` for the data layer.\n'
     )
     items = check_context_drift('myproj', str(proj))
@@ -104,22 +116,33 @@ def test_check_context_drift_ignores_existing_file(tmp_path):
     proj = tmp_path / 'myproj'
     proj.mkdir()
     (proj / 'model.py').write_text('# exists')
-    (proj / 'CLAUDE.md').write_text('The file `model.py` has the data layer.\n')
+    (proj / 'AGENTS.md').write_text('The file `model.py` has the data layer.\n')
     items = check_context_drift('myproj', str(proj))
     assert len(items) == 0
 
 
-def test_check_context_drift_no_claude_md(tmp_path):
+def test_check_context_drift_no_agents_md(tmp_path):
     proj = tmp_path / 'myproj'
     proj.mkdir()
     items = check_context_drift('myproj', str(proj))
-    assert len(items) == 0  # missing CLAUDE.md handled by other check
+    assert len(items) == 0  # missing AGENTS.md handled by other check
+
+
+def test_check_context_drift_falls_back_to_legacy_claude_md(tmp_path):
+    """When AGENTS.md is absent but legacy CLAUDE.md exists, drift is checked."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text('See `src/gone.py` for the data layer.\n')
+    items = check_context_drift('myproj', str(proj))
+    assert len(items) == 1
+    assert 'src/gone.py' in items[0].summary
+    assert 'CLAUDE.md' in items[0].summary
 
 
 def test_check_context_drift_multiple_refs(tmp_path):
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         '`src/a.py` and `src/b.py` are important.\n'
     )
     items = check_context_drift('myproj', str(proj))
@@ -136,7 +159,7 @@ def test_check_context_drift_bare_name_covered_by_full_path(tmp_path):
     ext_dir.mkdir(parents=True)
     script = ext_dir / 'setup-env.sh'
     script.write_text('#!/bin/bash\n')
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         f'| `{script}` | Setup script |\n\n'
         'If missing, run `setup-env.sh` to configure.\n'
     )
@@ -148,7 +171,7 @@ def test_check_context_drift_bare_name_no_covering_path(tmp_path):
     """Bare filename should still flag if no full-path ref covers it."""
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'Run `missing-tool.sh` to deploy.\n'
     )
     items = check_context_drift('myproj', str(proj))
@@ -163,7 +186,7 @@ def test_check_context_drift_bare_name_in_subdirectory(tmp_path):
     sub = proj / 'workflows'
     sub.mkdir()
     (sub / 'deploy.json').write_text('{}')
-    (proj / 'CLAUDE.md').write_text('Workflow: `deploy.json`\n')
+    (proj / 'AGENTS.md').write_text('Workflow: `deploy.json`\n')
     items = check_context_drift('myproj', str(proj))
     assert len(items) == 0, f'unexpected: {[i.summary for i in items]}'
 
@@ -172,7 +195,7 @@ def test_check_context_drift_skips_generic_bare_name(tmp_path):
     """Generic convention names (package.json, etc.) are prose FPs — never flag."""
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'Dependencies are declared in `package.json` in the usual format.\n'
         'See `.gitignore` for ignored paths; `Dockerfile` for the image build.\n'
     )
@@ -184,7 +207,7 @@ def test_check_context_drift_skips_placeholder_component(tmp_path):
     """Path components like YYYY-MM-DD or NAME are placeholders, not refs."""
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'Reports land at `reports/YYYY-MM-DD.md` once a day.\n'
         'Per-user dumps go to `dumps/NAME.json`.\n'
     )
@@ -196,7 +219,7 @@ def test_check_context_drift_skips_glob_token(tmp_path):
     """Tokens with glob/placeholder chars (<>, *, ?, [) aren't literal refs."""
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'Rotating logs live at `logs/*.log`.\n'
         'Templates are `configs/<env>.yaml`.\n'
     )
@@ -208,7 +231,7 @@ def test_check_context_drift_opt_out_marker(tmp_path):
     """`<!-- paa-ignore: context-drift -->` disables the check entirely."""
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         '<!-- paa-ignore: context-drift -->\n'
         'This project talks about remote files: `src/remote-only.py`.\n'
     )
@@ -220,7 +243,7 @@ def test_check_context_drift_unknown_tilde_user(tmp_path):
     """`~unknownuser/path` that doesn't expand stays literal, not flagged."""
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'Managed from `~definitely_not_a_user/bin/tool.sh` on the other host.\n'
     )
     items = check_context_drift('myproj', str(proj))
@@ -247,10 +270,10 @@ def test_check_no_git_present(tmp_path):
 def test_scan_project_combines_all_checks(tmp_path):
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    # No CLAUDE.md, no .git — should get both findings
+    # No AGENTS.md, no .git — should get both findings
     items = scan_project('myproj', str(proj))
     types = {i.type for i in items}
-    assert 'missing-claude-md' in types
+    assert 'missing-agents-md' in types
     assert 'no-git' in types
 
 
@@ -258,7 +281,7 @@ def test_scan_project_clean(tmp_path):
     proj = tmp_path / 'myproj'
     proj.mkdir()
     (proj / '.git').mkdir()
-    (proj / 'CLAUDE.md').write_text('# Clean project\n')
+    (proj / 'AGENTS.md').write_text('# Clean project\n')
     items = scan_project('myproj', str(proj))
     assert len(items) == 0
 
@@ -267,10 +290,10 @@ def test_run_scan_populates_ledger(tmp_path):
     """run_scan detects issues and adds them to the ledger."""
     projects_dir = tmp_path / 'projects'
     projects_dir.mkdir()
-    (projects_dir / 'alpha').mkdir()  # no CLAUDE.md, no .git
+    (projects_dir / 'alpha').mkdir()  # no AGENTS.md, no .git
     (projects_dir / 'beta').mkdir()
     (projects_dir / 'beta' / '.git').mkdir()
-    (projects_dir / 'beta' / 'CLAUDE.md').write_text('# Beta\n')
+    (projects_dir / 'beta' / 'AGENTS.md').write_text('# Beta\n')
 
     settings = Settings(projects_dir=str(projects_dir), paa_allow_haiku=False)
     store = ProjectStore(settings)
@@ -281,7 +304,7 @@ def test_run_scan_populates_ledger(tmp_path):
 
     assert ledger.pending_count >= 1  # alpha has issues
     types = {i.type for i in ledger.pending_items()}
-    assert 'missing-claude-md' in types or 'no-git' in types
+    assert 'missing-agents-md' in types or 'no-git' in types
 
 
 def test_run_scan_sweeps_resolved(tmp_path):
@@ -290,7 +313,7 @@ def test_run_scan_sweeps_resolved(tmp_path):
     projects_dir.mkdir()
     proj = projects_dir / 'alpha'
     proj.mkdir()
-    # First scan: no CLAUDE.md
+    # First scan: no AGENTS.md
     settings = Settings(projects_dir=str(projects_dir), paa_allow_haiku=False)
     store = ProjectStore(settings)
     ledger = Ledger(path=str(tmp_path / 'ledger.json'))
@@ -299,7 +322,7 @@ def test_run_scan_sweeps_resolved(tmp_path):
     assert ledger.pending_count >= 1
 
     # Fix the issue
-    (proj / 'CLAUDE.md').write_text('# Alpha\n')
+    (proj / 'AGENTS.md').write_text('# Alpha\n')
     (proj / '.git').mkdir()
 
     # Second scan: should resolve
@@ -317,7 +340,7 @@ def test_scan_runs_ai_when_budget_available(tmp_path):
     projects_dir.mkdir()
     proj = projects_dir / 'alpha'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text('# Alpha')
+    (proj / 'AGENTS.md').write_text('# Alpha')
     (proj / '.git').mkdir()
 
     settings = Settings(
@@ -436,7 +459,7 @@ def test_filesystem_checks_run_when_budget_exceeded(tmp_path):
     """Filesystem checks still produce findings even when AI budget is exhausted."""
     projects_dir = tmp_path / 'projects'
     projects_dir.mkdir()
-    (projects_dir / 'alpha').mkdir()  # no CLAUDE.md, no .git
+    (projects_dir / 'alpha').mkdir()  # no AGENTS.md, no .git
 
     settings = Settings(
         projects_dir=str(projects_dir),
@@ -460,7 +483,7 @@ def test_full_scan_with_mocked_ai(tmp_path):
     projects_dir.mkdir()
     proj = projects_dir / 'alpha'
     proj.mkdir()
-    # No CLAUDE.md, no .git -> filesystem checks will find issues
+    # No AGENTS.md, no .git -> filesystem checks will find issues
 
     ai_item = LedgerItem(
         id='ai-test-001',
@@ -492,7 +515,7 @@ def test_full_scan_with_mocked_ai(tmp_path):
     assert ledger.pending_count >= 2
     types = {i.type for i in ledger.pending_items()}
     assert 'ai-health-concern' in types
-    assert 'missing-claude-md' in types or 'no-git' in types
+    assert 'missing-agents-md' in types or 'no-git' in types
     assert settings.paa_budget_used == 1500
 
 
@@ -502,7 +525,7 @@ def test_full_scan_ai_failure_graceful(tmp_path):
     projects_dir.mkdir()
     proj = projects_dir / 'alpha'
     proj.mkdir()
-    # No CLAUDE.md -> filesystem will find an issue
+    # No AGENTS.md -> filesystem will find an issue
 
     settings = Settings(
         projects_dir=str(projects_dir),
@@ -522,7 +545,7 @@ def test_full_scan_ai_failure_graceful(tmp_path):
     # Filesystem findings should still be present despite AI failure
     assert ledger.pending_count >= 1
     types = {i.type for i in ledger.pending_items()}
-    assert 'missing-claude-md' in types or 'no-git' in types
+    assert 'missing-agents-md' in types or 'no-git' in types
     assert settings.paa_budget_used == 0  # No AI tokens consumed
 
 
@@ -589,7 +612,7 @@ def test_context_drift_remote_absolute_on_hostname(tmp_path):
     """Absolute path accompanied by 'on <hostname>' is not flagged."""
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'PIA scripts are at `/usr/local/bin/vpn.sh` on gw; edit there.\n'
     )
     items = check_context_drift('myproj', str(proj))
@@ -600,7 +623,7 @@ def test_context_drift_remote_absolute_on_the_host(tmp_path):
     """Absolute path described as 'on the host' is not flagged."""
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'The settings file on the host is `/etc/app/settings.yml`.\n'
     )
     items = check_context_drift('myproj', str(proj))
@@ -611,7 +634,7 @@ def test_context_drift_remote_absolute_in_container(tmp_path):
     """Absolute path in container context is not flagged."""
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'Bind-mounted into the container at `/etc/app/settings.yml`.\n'
     )
     items = check_context_drift('myproj', str(proj))
@@ -622,7 +645,7 @@ def test_context_drift_absolute_no_remote_context_does_flag(tmp_path):
     """Absolute path with no remote context is flagged when absent locally."""
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'Edit `/nonexistent-paa-test-12345/config.yml` to configure.\n'
     )
     items = check_context_drift('myproj', str(proj))
@@ -643,7 +666,7 @@ def test_context_drift_sibling_project_relative_ref(tmp_path):
     sibling = projects / 'otherproj'
     (sibling / 'playbooks').mkdir(parents=True)
     (sibling / 'playbooks' / 'deploy.yml').write_text('---\n')
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'Launched via `playbooks/deploy.yml` in the AWX project.\n'
     )
     items = check_context_drift('myproj', str(proj))
@@ -659,7 +682,7 @@ def test_context_drift_sibling_project_bare_name(tmp_path):
     sibling = projects / 'otherproj'
     sibling.mkdir()
     (sibling / 'runbook.md').write_text('# Runbook\n')
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'Rotate tokens via `runbook.md` in the other project.\n'
     )
     items = check_context_drift('myproj', str(proj))
@@ -673,7 +696,7 @@ def test_context_drift_not_in_any_sibling_does_flag(tmp_path):
     proj = projects / 'myproj'
     proj.mkdir()
     (projects / 'otherproj').mkdir()  # sibling exists but lacks the file
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'See `playbooks/nowhere.yml` for setup.\n'
     )
     items = check_context_drift('myproj', str(proj))
@@ -696,7 +719,7 @@ def test_context_drift_claude_memory_bare_name(tmp_path, monkeypatch):
 
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'Full findings in memory: `mouse_investigation_2026-05-06.md`.\n'
     )
     items = check_context_drift('myproj', str(proj))
@@ -712,7 +735,7 @@ def test_context_drift_claude_memory_not_found_does_flag(tmp_path, monkeypatch):
 
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text(
+    (proj / 'AGENTS.md').write_text(
         'See `missing_notes.md` for details.\n'
     )
     items = check_context_drift('myproj', str(proj))

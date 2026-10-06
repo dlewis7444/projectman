@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 import re
@@ -41,7 +42,7 @@ _GENERIC_BARE_NAMES = frozenset({
     'settings.json', 'tsconfig.json', 'jsconfig.json',
     'manifest.json', 'plugin.json',
     'index.html', 'index.js', 'index.ts',
-    'CLAUDE.md',
+    'AGENTS.md',
 })
 
 
@@ -100,16 +101,57 @@ def extract_file_references(content):
     return refs
 
 
-def check_missing_claude_md(project_name, project_path):
-    """Flag projects with no CLAUDE.md."""
-    if not os.path.exists(os.path.join(project_path, 'CLAUDE.md')):
+def _read_rules_file(project_path):
+    """Read the project's AGENTS.md, falling back to CLAUDE.md.
+
+    Returns (path_used, content) where path_used is the filename that was
+    actually read, or (None, None) when neither file exists.
+    """
+    agents_md = os.path.join(project_path, 'AGENTS.md')
+    claude_md = os.path.join(project_path, 'CLAUDE.md')
+    if os.path.exists(agents_md):
+        try:
+            with open(agents_md) as f:
+                return 'AGENTS.md', f.read()
+        except (OSError, UnicodeDecodeError):
+            pass
+    if os.path.exists(claude_md):
+        try:
+            with open(claude_md) as f:
+                return 'CLAUDE.md', f.read()
+        except (OSError, UnicodeDecodeError):
+            pass
+    return None, None
+
+
+def check_missing_agents_md(project_name, project_path):
+    """Flag projects with no AGENTS.md.
+
+    A root CLAUDE.md without AGENTS.md counts as missing (AGENTS.md is required
+    after migration), but emits a distinct transitional note so the user knows
+    the legacy file is present.
+    """
+    has_agents = os.path.exists(os.path.join(project_path, 'AGENTS.md'))
+    has_claude = os.path.exists(os.path.join(project_path, 'CLAUDE.md'))
+    if not has_agents:
+        if has_claude:
+            return [LedgerItem(
+                id=make_item_id('missing-agents-md', project_name, ''),
+                type='missing-agents-md',
+                project=project_name,
+                project_path=project_path,
+                summary=f'{project_name} has no AGENTS.md (only legacy CLAUDE.md)',
+                evidence='AGENTS.md is required after migration; legacy CLAUDE.md exists',
+                severity='warning',
+                created=now_iso(),
+            )]
         return [LedgerItem(
-            id=make_item_id('missing-claude-md', project_name, ''),
-            type='missing-claude-md',
+            id=make_item_id('missing-agents-md', project_name, ''),
+            type='missing-agents-md',
             project=project_name,
             project_path=project_path,
-            summary=f'{project_name} has no CLAUDE.md',
-            evidence='No CLAUDE.md file found in project root',
+            summary=f'{project_name} has no AGENTS.md',
+            evidence='No AGENTS.md file found in project root',
             severity='warning',
             created=now_iso(),
         )]
@@ -174,14 +216,11 @@ def _find_in_claude_memory(filename):
 
 
 def check_context_drift(project_name, project_path):
-    """Flag CLAUDE.md references to files that no longer exist."""
-    claude_md = os.path.join(project_path, 'CLAUDE.md')
-    try:
-        with open(claude_md) as f:
-            content = f.read()
-    except FileNotFoundError:
+    """Flag AGENTS.md (or legacy CLAUDE.md) references to files that no longer exist."""
+    rules_file, content = _read_rules_file(project_path)
+    if content is None:
         return []
-    # Opt-out: projects whose CLAUDE.md deliberately references off-box paths
+    # Opt-out: projects whose rules file deliberately references off-box paths
     # (e.g., a management point for a service running on a remote host) can
     # include `<!-- paa-ignore: context-drift -->` to disable this check.
     if _CONTEXT_DRIFT_OPT_OUT_RE.search(content):
@@ -189,7 +228,7 @@ def check_context_drift(project_name, project_path):
     refs = extract_file_references(content)
     # Two-pass check: first collect basenames of refs that resolve, then
     # skip bare-name failures whose basename is covered by a valid full-path
-    # ref.  This prevents false positives when CLAUDE.md mentions a file by
+    # ref.  This prevents false positives when AGENTS.md mentions a file by
     # bare name in prose while also giving its full external path elsewhere.
     valid_basenames = set()
     failing = []
@@ -237,8 +276,8 @@ def check_context_drift(project_name, project_path):
             type='context-drift',
             project=project_name,
             project_path=project_path,
-            summary=f'CLAUDE.md references `{ref}` which does not exist',
-            evidence=f'File reference `{ref}` in CLAUDE.md — not found on disk',
+            summary=f'{rules_file} references `{ref}` which does not exist',
+            evidence=f'File reference `{ref}` in {rules_file} — not found on disk',
             severity='action-needed',
             created=now_iso(),
         ))
@@ -259,6 +298,30 @@ def check_no_git(project_name, project_path):
             created=now_iso(),
         )]
     return []
+
+
+def _try_scan_lock():
+    """Non-blocking exclusive lock. ``None`` when another scanner holds it."""
+    path = SCAN_LOCK_PATH
+    directory = os.path.dirname(os.path.abspath(path)) or '.'
+    try:
+        os.makedirs(directory, exist_ok=True)
+        fh = open(path, 'a+')
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    return fh
+
+
+def _release_scan_lock(fh):
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    finally:
+        fh.close()
 
 
 def _current_month():
@@ -285,6 +348,7 @@ def _budget_allows_ai(settings):
 
 
 _MTIME_CACHE_PATH = os.path.expanduser('~/.ProjectMan/paa-mtime-cache.json')
+SCAN_LOCK_PATH = os.path.expanduser('~/.ProjectMan/paa-scan.lock')
 
 
 def _load_mtime_cache():
@@ -324,7 +388,7 @@ def _project_mtime(project_path):
 def scan_project(project_name, project_path):
     """Run all checks on a single project, return list of LedgerItems."""
     items = []
-    items.extend(check_missing_claude_md(project_name, project_path))
+    items.extend(check_missing_agents_md(project_name, project_path))
     items.extend(check_context_drift(project_name, project_path))
     items.extend(check_no_git(project_name, project_path))
     return items
@@ -399,6 +463,10 @@ class PAAMonitor(GObject.GObject):
         if not (self._settings.paa_enabled and self._settings.paa_allow_haiku):
             self.emit('scan-blocked', 'AI scans are disabled (Settings → PAA)')
             return False
+        lock_fh = _try_scan_lock()
+        if lock_fh is None:
+            self.emit('scan-blocked', 'The PAA service is scanning')
+            return False
 
         def _worker():
             self._active_ai_projects = {project_name}
@@ -427,7 +495,12 @@ class PAAMonitor(GObject.GObject):
             GLib.idle_add(
                 lambda n=project_name, k=new_findings:
                 self.emit('single-scan-complete', n, k) or False)
-        threading.Thread(target=_worker, daemon=True).start()
+        def _worker_locked():
+            try:
+                _worker()
+            finally:
+                _release_scan_lock(lock_fh)
+        threading.Thread(target=_worker_locked, daemon=True).start()
         return True
 
     def schedule_scan(self):
@@ -457,6 +530,21 @@ class PAAMonitor(GObject.GObject):
             self.start()
 
     def run_scan(self):
+        """Execute all checks across all active projects. Update ledger.
+
+        Holds ``SCAN_LOCK_PATH`` for the whole scan. If another scanner (the
+        bot, a GTK timer, or sidebar AI Scan) already holds it, return
+        immediately and do not write rows.
+        """
+        lock_fh = _try_scan_lock()
+        if lock_fh is None:
+            return
+        try:
+            self._run_scan_body()
+        finally:
+            _release_scan_lock(lock_fh)
+
+    def _run_scan_body(self):
         """Execute all checks across all active projects. Update ledger.
 
         Two-pass design: filesystem checks run first and post immediately,

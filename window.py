@@ -5,7 +5,7 @@ import sys
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, Gdk, GLib
+from gi.repository import Gtk, Adw, Gdk, Gio, GLib
 
 from sidebar import Sidebar
 from terminal import TerminalView
@@ -186,9 +186,10 @@ class AppWindow(Adw.ApplicationWindow):
         toolbar_view.set_content(self._toast_overlay)
         self.set_content(toolbar_view)
 
-        # Provider-fallback toast aggregation state: pending (project_name, reason) events
-        # batched for ~2s before display; at most ONE provider toast shown at a time.
-        self._provider_pending: list = []    # buffered (name, reason) pairs
+        # Provider-fallback toast aggregation state: pending (project_name,
+        # reason, harness) events batched for ~2s before display; at most ONE
+        # provider toast shown at a time.
+        self._provider_pending: list = []    # buffered (name, reason, harness) triples
         self._provider_toast_timer = None    # GLib.timeout_add source id | None
         self._provider_toast: Adw.Toast | None = None  # currently displayed toast
 
@@ -210,6 +211,57 @@ class AppWindow(Adw.ApplicationWindow):
         self._arm_remote_status_timer()
         # Initial remote list is kicked from main.py after present() at
         # DEFAULT_IDLE so the first frames stay interactive.
+        self._ledger_relay = None
+        self._ledger_monitor = None
+        self._start_ledger_watch()
+
+    def _start_ledger_watch(self):
+        """Reload the open ledger when ``paa-ledger.json`` changes on disk.
+
+        Same inotify style as ``StatusWatcher``: watch the parent directory
+        and ignore events for other files. The reload itself is
+        ``LedgerFileRelay``, which tests drive without a window.
+        """
+        if self._paa_ledger is None:
+            return
+        from paa_ledger import LedgerFileRelay
+        path = self._paa_ledger._path
+        self._ledger_relay = LedgerFileRelay(
+            self._paa_ledger,
+            on_count=self._sidebar.set_paa_pending_count,
+            on_refresh=self._refresh_open_paa_cards,
+        )
+        directory = os.path.dirname(os.path.abspath(path)) or '.'
+        try:
+            os.makedirs(directory, exist_ok=True)
+            gfile = Gio.File.new_for_path(directory)
+            self._ledger_monitor = gfile.monitor_directory(
+                Gio.FileMonitorFlags.NONE, None)
+            self._ledger_monitor.connect('changed', self._on_ledger_file)
+        except Exception:
+            self._ledger_monitor = None
+
+    def _on_ledger_file(self, monitor, file, other_file, event_type):
+        if self._ledger_relay is None or self._paa_ledger is None:
+            return
+        name = os.path.basename(self._paa_ledger._path)
+        try:
+            changed = file.get_basename()
+        except Exception:
+            return
+        if changed != name:
+            return
+        kind = {
+            Gio.FileMonitorEvent.CHANGED: 'CHANGED',
+            Gio.FileMonitorEvent.CREATED: 'CREATED',
+            Gio.FileMonitorEvent.DELETED: 'DELETED',
+        }.get(event_type)
+        if kind:
+            self._ledger_relay.on_file_event(kind)
+
+    def _refresh_open_paa_cards(self):
+        if self._paa_win is not None:
+            self._paa_win.refresh_from_scan()
 
     def _arm_remote_health_timer(self):
         if self._health_timer_id is not None:
@@ -553,9 +605,11 @@ class AppWindow(Adw.ApplicationWindow):
         # loop — up to ~60 s blocked per event with ~30 projects
         # (docs/popover-leak-main-thread-hang.md, landmine #2).
         alive = z.alive_session_names()
+        # Local store only (zellij sockets are on this machine). Session names
+        # are host-scoped so a remote sibling cannot light a localhost row.
         for project in self._store.load_projects():
             path = project.path
-            sname = z.session_name(project.name)
+            sname = z.session_name_for_project(project)
             tv = self._terminals.get(path)
             currently_attached = tv is not None and tv._child_pid is not None
             if currently_attached:
@@ -827,13 +881,19 @@ class AppWindow(Adw.ApplicationWindow):
 
         Falls back to session.json when no live sessions exist (e.g. first run after
         switching from direct-claude mode, or after a system reboot that cleared sessions).
-        _on_project_activated decides per-project whether to attach zellij or spawn claude.
+        Local projects: attach live zellij or spawn continue (same as before).
+
+        **Remotes:** local zellij never hosts remote work (v1: direct SSH only —
+        see ``_switch_to_project``). Previously this path only considered
+        ProjectStore (localhost) paths, so open remote tabs were silently dropped
+        whenever the multiplexer was zellij. Remotes listed in session.json are
+        restored via SSH continue, parallel to direct-mode restore.
         """
         import zellij as z
         alive_names = z.alive_session_names()
         live = []
         for project in self._store.load_projects():
-            sname = z.session_name(project.name)
+            sname = z.session_name_for_project(project)
             if sname in alive_names:
                 self._sidebar.set_project_state(project.path, 'detached')
                 live.append(project)
@@ -846,35 +906,64 @@ class AppWindow(Adw.ApplicationWindow):
         open_paths, focused_path = load_session(SESSION_FILE)
         # saved-harness-wins on restore (A2): the same map the direct path uses.
         self._restore_harnesses = load_harnesses(SESSION_FILE)
-        all_paths = {p.path for p in self._store.load_projects()}
+        local_paths = {p.path for p in self._store.load_projects()}
+        # Active map: localhost store + remotes synthesized from session refs.
+        active = {p.path: p for p in self._store.load_projects()}
+        for path in open_paths:
+            if path in active:
+                continue
+            proj = self._project_for_session_path(path)
+            if proj is not None:
+                active[path] = proj
 
-        restore_path = focused_path if focused_path and focused_path in all_paths else None
+        def _is_remote(p):
+            return isinstance(p, str) and p.startswith('ssh:')
+
+        restore_path = focused_path if focused_path and focused_path in active else None
         if restore_path is None:
             for path in open_paths:
-                if path in all_paths:
+                if path in active:
                     restore_path = path
                     break
 
-        background = [p for p in open_paths if p != restore_path and p in all_paths]
+        background = [p for p in open_paths if p != restore_path and p in active]
         restore_paths = [p.path for p in live]
-        if restore_path:
-            restore_paths.append(restore_path)
+        for path in open_paths:
+            if path in active and path not in restore_paths:
+                restore_paths.append(path)
         self._sidebar.set_active_only(
-            bool(live) or bool(restore_path),
+            bool(live) or bool(active),
             paths=restore_paths or None,
         )
 
         try:
-            if restore_path:
-                self._on_project_activated(self._sidebar, restore_path)
-
+            # Locals first (zellij attach is fast), remotes (SSH) next, focus last.
+            ordered = []
             for path in background:
-                project = self._find_project(path)
+                if not _is_remote(path):
+                    ordered.append(path)
+            for path in background:
+                if _is_remote(path):
+                    ordered.append(path)
+            if restore_path:
+                ordered.append(restore_path)
+
+            for path in ordered:
+                project = active.get(path) or self._find_project(path)
                 if not project:
                     continue
-                tv = self._get_or_create_terminal(project)
+                focus = (path == restore_path)
+                if _is_remote(path):
+                    # Never local-zellij-attach a remote project.
+                    self._restore_one_project(path, project, focus=focus)
+                    continue
+                if focus:
+                    self._on_project_activated(self._sidebar, path)
+                    continue
+                tv = self._get_or_create_terminal(
+                    project, harness_id=self._restore_harnesses.get(path))
                 if tv._child_pid is None:
-                    sname = z.session_name(project.name)
+                    sname = z.session_name_for_project(project)
                     if sname in alive_names:
                         tv.spawn_zellij(sname)
                     else:
@@ -906,8 +995,8 @@ class AppWindow(Adw.ApplicationWindow):
         return True
 
     def _debug(self, msg):
-        if self._settings.debug_logging:
-            print(f'[DBG] {msg}', flush=True)
+        from debug_log import debug_log
+        debug_log(self._settings, msg)
 
     def _host_label_for_project(self, project) -> str:
         """Sidebar-style host title for a project (localhost or remote display)."""
@@ -921,7 +1010,7 @@ class AppWindow(Adw.ApplicationWindow):
         return prof.title() if prof is not None else hid
 
     def _format_window_title(self, project) -> str:
-        """Window title: ``ProjectMan-<project>(<host>)``.
+        """Window title: ``ProjectMan (<host>/<project>)``.
 
         Host string matches the sidebar section title (display name or SSH
         target / localhost). Empty selection → plain ``ProjectMan``.
@@ -931,8 +1020,8 @@ class AppWindow(Adw.ApplicationWindow):
         host = self._host_label_for_project(project)
         name = getattr(project, 'name', None) or ''
         if not name:
-            return f'ProjectMan({host})'
-        return f'ProjectMan-{name}({host})'
+            return f'ProjectMan ({host})'
+        return f'ProjectMan ({host}/{name})'
 
     def _set_active_project(self, name_or_project):
         """Set window title from project (or clear). Accepts Project, name, or None.
@@ -953,7 +1042,7 @@ class AppWindow(Adw.ApplicationWindow):
             self._title.set_subtitle('')
             return
         # Legacy bare name
-        full = f'ProjectMan-{name_or_project}(localhost)'
+        full = f'ProjectMan (localhost/{name_or_project})'
         self.set_title(full)
         self._title.set_title(full)
         self._title.set_subtitle('')
@@ -1002,8 +1091,9 @@ class AppWindow(Adw.ApplicationWindow):
     def _spawn_failure_binary(self, harness_id, raw_binary):
         """Resolve the harness binary name for spawn-failure messaging.
 
-        The raw argv[0] can be 'bash' under the continue wrapper, so we prefer
-        the adapter's binary. Pure resolution; no GTK."""
+        The raw argv[0] can be 'bash' under the continue wrapper or 'ssh' under
+        the remote transport rewrite, so we prefer the adapter's binary for
+        those transparent transports. Pure resolution; no GTK."""
         import harnesses
         adapter = (harnesses.ADAPTERS.get(harness_id)
                    or harnesses.get_adapter(harness_id, self._settings))
@@ -1015,7 +1105,7 @@ class AppWindow(Adw.ApplicationWindow):
                 binary = adapter._binary(self._settings)
         except Exception:
             pass
-        if raw_binary and os.path.basename(raw_binary) not in ('bash', 'sh', ''):
+        if raw_binary and os.path.basename(raw_binary) not in ('bash', 'sh', 'ssh', ''):
             binary = raw_binary
         return binary
 
@@ -1060,6 +1150,12 @@ class AppWindow(Adw.ApplicationWindow):
         already-off filter is a no-op). Restore's eager filter for the
         successful path is untouched."""
         self._sidebar.set_active_only(False, path=project_path)
+        if raw_binary and os.path.basename(raw_binary) == 'zellij':
+            self._show_toast(
+                'zellij is not installed — install it '
+                '(e.g. `sudo dnf install zellij`) to use zellij sessions'
+            )
+            return
         key = (project_path, harness_id)
         if key in self._warned_spawn_fail:
             return
@@ -1094,8 +1190,12 @@ class AppWindow(Adw.ApplicationWindow):
             code = status
         tv.feed_session_ended(code)
 
-    def _show_provider_fallback_toast(self, project_name, reason):
+    def _show_provider_fallback_toast(self, project_name, reason, harness):
         """Enqueue a fallback notice for aggregation; flush after a ~2s window.
+
+        *harness* is the display name of the harness that actually spawned
+        (``adapter.display_name``) — it rides the event tuple so the aggregate
+        toast can say "running native Grok Build" instead of hardcoded Claude.
 
         Multiple projects failing within the same restore batch fire within
         milliseconds of each other. Batching them for 2s lets the aggregator
@@ -1104,7 +1204,7 @@ class AppWindow(Adw.ApplicationWindow):
         overlay at any time; a new aggregate dismisses any still-displayed one
         and re-adds rather than queueing (persistent timeout(0), spec §6).
         """
-        self._provider_pending.append((project_name, reason))
+        self._provider_pending.append((project_name, reason, harness))
         # Arm (or re-arm) the 2s flush timer; each new event resets the window
         # so closely spaced starts all land in the same batch.
         if self._provider_toast_timer is not None:
@@ -1207,9 +1307,13 @@ class AppWindow(Adw.ApplicationWindow):
                 # what keeps a failed-spawn row visible (a spawn that never starts
                 # never flips the filter, so the 'inactive' row isn't hidden).
                 self._sidebar.set_active_only(True, path=p)
-                # Surface provider fallback notice if this spawn fell back to native.
+                # Surface provider fallback notice if this spawn fell back to
+                # native. The toast names the harness that actually spawned —
+                # a grok fallback says "running native Grok Build", not Claude.
                 if t._fallback_reason:
-                    self._show_provider_fallback_toast(n, t._fallback_reason)
+                    self._show_provider_fallback_toast(
+                        n, t._fallback_reason,
+                        getattr(t._adapter, 'display_name', 'Claude'))
 
             def _on_exited(t, s, p=project.path):
                 self._sidebar.set_project_state(p, 'inactive', is_zellij=False)
@@ -1288,10 +1392,13 @@ class AppWindow(Adw.ApplicationWindow):
             is_remote = getattr(project, 'host_id', LOCALHOST_ID) != LOCALHOST_ID
             if is_remote:
                 # Remote: direct SSH spawn only (no local zellij in v1).
+                # Never session_name-match a local pm-* session by project name
+                # alone — that collided with localhost peers (e.g. local general
+                # + localhost/general both → pm-general).
                 tv.spawn_continue(project_name=project.name)
             else:
                 import zellij as z
-                sname = z.session_name(project.name)
+                sname = z.session_name_for_project(project)
                 if z.session_alive(sname):
                     tv.spawn_zellij(sname)
                 else:
@@ -1335,7 +1442,7 @@ class AppWindow(Adw.ApplicationWindow):
         tv.spawn_resume(session_id, project_name=project.name)
         tv.get_terminal().grab_focus()
 
-    # --- deactivate (kill process, keep in sidebar as inactive) ---
+    # --- deactivate (SIGTERM local child, keep in sidebar as inactive) ---
 
     def _on_project_deactivate(self, sidebar, path):
         # Timer-fired deactivate only; immediate-kill paths bypass the grace period.
@@ -1353,27 +1460,12 @@ class AppWindow(Adw.ApplicationWindow):
                     f"If it disappeared, switch the host filter to Show all."
                 )
             return
-        if tv._is_zellij:
-            import zellij as z
-            project = find(path) if callable(find) else project
-            if project:
-                sname = z.session_name(project.name)
-                # Clear zellij flags BEFORE killing the session so that
-                # _on_child_exited emits process-exited (not process-detached).
-                # Without this, a race exists: the VTE child may exit before
-                # zellij finishes cleaning up the session socket, causing
-                # session_alive() to return True and the project to stay
-                # visible as "detached" in the Active list.
-                existed = z.session_exists(sname)
-                tv._is_zellij = False
-                tv._zellij_session = None
-                if existed:
-                    z.kill_session(sname)   # FB-4: the shared kill helper
-                    if tv._child_pid is None:
-                        self._sidebar.set_project_state(path, 'inactive')
-        else:
-            tv.deactivate()
-            # process-exited signal fires → set_project_state(path, 'inactive')
+        # Detach-only policy: ProjectMan never kills the zellij SERVER session.
+        # For zellij, SIGTERM the local attach client; _fire_exit_if_current
+        # will see the still-alive server and emit process-detached. For direct
+        # children the same SIGTERM ends the session and emits process-exited.
+        tv.deactivate()
+        # process-exited / process-detached signal fires → set_project_state(...)
         # Soft feedback: one-click close is intentional for power users, but the
         # active-only filter can hide the row and look like "delete". Point at
         # Show all rather than "stays in the sidebar".
@@ -1396,9 +1488,13 @@ class AppWindow(Adw.ApplicationWindow):
             self._stack.remove(tv)
         project = self._find_project(path)
         if project:
+            # Archive is the ONE exception to the detach-only policy: the project
+            # is leaving the active set, so tear down its zellij SERVER session.
             if self._settings.multiplexer == 'zellij':
                 import zellij as z
-                z.kill_session(z.session_name(project.name))  # FB-4 shared helper
+                # Host-scoped name — archiving remote "general" must not kill
+                # localhost pm-general (and vice versa).
+                z.kill_session(z.session_name_for_project(project))
             # Drop group membership before disk move so prune stays consistent.
             forest = self._sidebar.get_group_forest(LOCALHOST_ID)
             if forest is not None:
@@ -1517,7 +1613,7 @@ class AppWindow(Adw.ApplicationWindow):
         tv.get_terminal().grab_focus()
 
     def _on_project_open_zellij(self, sidebar, path):
-        """Explicit 'Open in Zellij' — always create/attach zellij session."""
+        """Explicit 'Open in Zellij' — local zellij create/attach only."""
         if self._settings.multiplexer != 'zellij':
             # M-UX.3 (C6): "New Zellij Session" used to silently no-op (a brief
             # spinner, then nothing) when the multiplexer wasn't zellij. Say why,
@@ -1529,13 +1625,22 @@ class AppWindow(Adw.ApplicationWindow):
         project = self._find_project(path)
         if not project:
             return
+        from hosts import LOCALHOST_ID
+        if getattr(project, 'host_id', LOCALHOST_ID) != LOCALHOST_ID:
+            # Local zellij cannot host a remote agent; doing so used project.path
+            # (ssh:…) as cwd (fails → $HOME) and stole the name-only session
+            # namespace from any localhost peer with the same project name.
+            self._show_toast(
+                'Zellij is local-only for now — open the remote project '
+                'normally (SSH). Remote zellij is not supported yet.')
+            return
         import zellij as z
         tv = self._get_or_create_terminal(project)
         self._stack.set_visible_child_name(path)
         self._set_active_project(project)
         self._active_path = path
         self._push_mru(path)
-        sname = z.session_name(project.name)
+        sname = z.session_name_for_project(project)
         if not (tv._child_pid is not None and tv._is_zellij):
             tv.spawn_zellij(sname)
         tv.get_terminal().grab_focus()
@@ -1590,11 +1695,14 @@ class AppWindow(Adw.ApplicationWindow):
             # Harness-native: no Settings provider pin.
             overrides.pop(ref, None)
             overrides.pop(path, None)
-        elif harness != 'claude':
-            # Unselectable customs for OC/GB/Kimi today — ignore (model pins later).
+        elif harness not in ('claude', 'grok'):
+            # Customs stay unselectable for OpenCode/Kimi (model pins later);
+            # grok honors the provider axis env-only since 2026-10-05.
             return
-        elif value == FOLLOW_DEFAULT or value == (self._settings.model_default or ''):
-            # Picking the global Settings default → track it (clear pin).
+        elif value == FOLLOW_DEFAULT or value == (
+                self._settings.provider_defaults.get(harness, '')
+                if isinstance(self._settings.provider_defaults, dict) else ''):
+            # Picking this harness's Settings default → track it (clear pin).
             overrides.pop(ref, None)
             overrides.pop(path, None)
         else:

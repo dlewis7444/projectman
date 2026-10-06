@@ -76,6 +76,8 @@ python -m pytest
 
 - Per-project harness sessions with automatic session restore
 - Pluggable harnesses — Claude Code, OpenCode, Grok Build, and Kimi Code side by side
+- Custom providers for Claude Code and Grok Build (Settings → Models), with a
+  separate Active Provider per harness
 - Live status indicators: working / waiting / done / idle
 - Session history with expand/collapse per project
 - Optional [Zellij](https://zellij.dev) multiplexer integration
@@ -245,11 +247,44 @@ quirks, see [Troubleshooting](#troubleshooting).
 - Session history uses `grok sessions list` from the project directory
   (cwd-scoped). Session ids are UUIDv7. If `grok -c` has nothing to continue, it
   exits cleanly and ProjectMan falls back to a fresh `grok`.
-- **Per-project model** is passed as `-m <value>`, where `<value>` is a **config
-  key** from `~/.grok/config.toml` (not a `provider/model` string). Grok reaches
-  custom endpoints through its own config.
+- **Native backend** (the default): the per-project model is a **config key**
+  from `~/.grok/config.toml`, passed as `-m <key>` (not a `provider/model`
+  string). Grok signs in with a SuperGrok / xAI account unless that file points
+  somewhere else. A hand-edited native model is described under
+  [Grok + local endpoints](#grok--local-endpoints).
+- **Custom providers** use the same catalog as Claude Code (**Settings →
+  Models**): base URL, API key, model list, tiers, and an optional search
+  endpoint. Choose one under **Settings → Harnesses → Grok Build → Active
+  Provider**, or override a single project from the sidebar **Provider** menu.
+  The sidebar then shows the harness and the provider, for example
+  `Grok Build (Ollama)`. Under Zellij the provider applies to new sessions;
+  attaching an existing session keeps that session’s environment.
+- On a custom provider, ProjectMan spawns grok with a managed home at
+  `~/.ProjectMan/grok-homes/<provider>/`. That home is sessionless: one BYOK
+  model block per catalog id (`base_url` plus `env_key = "XAI_API_KEY"`). The
+  key stays in `~/.ProjectMan/settings.json` and is passed in the environment.
+  It is not written into the grok config, and nothing is written under
+  `~/.grok/`. `-m` is a catalog model id. Claude’s `[1m]` suffix is stripped;
+  a model that had it is given a 1M context window in the managed home. The
+  xAI login is not used for these spawns, so a third-party endpoint never
+  sees that token. When the provider’s **Subagent** tier names a catalog
+  model, grok’s subagents use that model.
+- **Remote SSH:** a custom-provider grok spawn does not start. The managed
+  home is on this machine and cannot be used on the remote host. Native grok
+  over SSH is unchanged.
+- **Web search** on a custom provider: Grok’s built-in web search does not
+  work against a third-party endpoint, so the managed home turns it off. Set
+  **Search endpoint (optional)** on the provider card to register ProjectMan’s
+  `pm-search` MCP tool (`web_search`). The endpoint must accept
+  `POST {"text_query", "limit"}` and return `{"search_results": [...]}`.
+  The tool is available in the main session and in `spawn_subagent` children.
+  Grok workflow `agent()` children with `capability_mode: "read-only"` receive
+  no MCP tools — Grok strips them, and ProjectMan cannot put them back. Copy
+  the workflow and set the agents that need search to
+  `capability_mode: "execute"`.
 - **Status dots** need the Grok bridge (`~/.grok/hooks/`) — installed by
-  `install.sh` or **Settings → Harnesses → Install bridge**. Details:
+  `install.sh` or **Settings → Harnesses → Install bridge**. Custom-provider
+  spawns reuse that same status script from the managed home. Details:
   [`bridges/grok/README.md`](bridges/grok/README.md).
 - **Waiting (blue) dot is inferred.** Grok does not fire a hook while a
   permission prompt is on screen, so ProjectMan promotes to `waiting` when a tool
@@ -257,13 +292,10 @@ quirks, see [Troubleshooting](#troubleshooting).
   show a false `waiting` until the tool completes — a false “needs you” beats a
   silently stalled session.
 
-By default grok signs in with a SuperGrok / xAI account (browser OAuth on first
-run). To use a local Ollama / OpenAI-compatible endpoint without an xAI account,
-see [Grok + local endpoints](#grok--local-endpoints).
-
 `install.sh` also sets `[compat.claude] hooks = false` in `~/.grok/config.toml`
 (idempotently) so Claude’s ProjectMan hook does not double-fire on grok events.
-If you manage that file by hand, keep that setting.
+The managed home sets the same flag. If you manage `~/.grok/config.toml` by
+hand, keep that setting.
 
 Grok auto-updates by default; ProjectMan does not suppress it. To pin a version:
 
@@ -272,6 +304,34 @@ Grok auto-updates by default; ProjectMan does not suppress it. To pin a version:
 [cli]
 auto_update = false
 ```
+
+#### Grok + local endpoints
+
+Two ways to point grok at a local Ollama / OpenAI-compatible API.
+
+**Preferred:** add the endpoint as a custom provider (**Settings → Models**)
+and select it as Grok Build’s **Active Provider**. A provider with no API key
+still works for servers that ignore the bearer (ProjectMan sends a dummy
+value). This path does not use an xAI account and does not write under
+`~/.grok/`.
+
+**Native backend only** (Active Provider left on native grok): add a model
+entry to `~/.grok/config.toml` that **includes `api_key`**:
+
+```toml
+[model.local-qwen]
+model = "qwen3.5:9b"
+base_url = "http://<host>:11434/v1"
+name = "Qwen3.5 9B (local)"
+context_window = 32768
+api_key = "ollama"
+```
+
+The `api_key` value can be any non-empty string (Ollama ignores it) — but it
+**must be present**. Without a per-model `api_key`, grok starts browser OAuth
+even for a custom endpoint. With it, turns complete offline of xAI and no
+`~/.grok/auth.json` is created. Set the per-project model in ProjectMan to the
+config **key** (`local-qwen` in the example).
 
 ### Kimi Code
 
@@ -299,26 +359,6 @@ auto_update = false
 Auth: `kimi login` (device-code OAuth). Presence of
 `~/.kimi-code/credentials/kimi-code.json` or `~/.kimi-code/oauth/kimi-code` is
 shown on the Harnesses page (contents never read).
-
-#### Grok + local endpoints
-
-To run grok against a local Ollama / OpenAI-compatible API with **no xAI
-account**, add a model entry that **includes `api_key`**:
-
-```toml
-[model.local-qwen]
-model = "qwen3.5:9b"
-base_url = "http://<host>:11434/v1"
-name = "Qwen3.5 9B (local)"
-context_window = 32768
-api_key = "ollama"
-```
-
-The `api_key` value can be any non-empty string (Ollama ignores it) — but it
-**must be present**. Without a per-model `api_key`, grok starts browser OAuth
-even for a custom endpoint. With it, turns complete offline of xAI and no
-`~/.grok/auth.json` is created. Set the per-project model in ProjectMan to the
-config **key** (`local-qwen` in the example).
 
 ## First-run setup
 
@@ -379,21 +419,25 @@ that scans your projects and surfaces findings in a card-based window.
 
 Always on while PAA is enabled:
 
-- Missing `CLAUDE.md`
+- Missing `AGENTS.md`
 - No git repository
-- Context drift — stale file references in `CLAUDE.md` (bare filenames, relative
-  paths, and absolute paths resolved; external references deduplicated)
+- Context drift — stale file references in `AGENTS.md` (or legacy `CLAUDE.md`;
+  bare filenames, relative paths, and absolute paths resolved; external
+  references deduplicated)
 
 ### AI checks
 
 Optional — **Settings → PAA → Enable AI Scans**.
 
-AI scans run Claude Code (`claude -p`) with your **Models-page provider** and
-scan tier (Haiku / Sonnet / Opus tiers mapped to that provider’s models). Native
-Anthropic is used when no custom provider is selected. Filesystem checks stay
-free either way; turn AI scans off if you do not want model calls.
+AI scans use the harness and provider in effect for that project (a sidebar
+override wins; otherwise the defaults under **Settings → Harnesses**, including
+**Active Provider** for Claude Code and Grok Build). **Discuss / Chat** uses
+the default harness and that harness’s Active Provider. OpenCode and Kimi stay
+on their own configs. Chat/scan **tier** (Fast / Standard / Capable) is
+set under Settings → PAA and applies when that harness maps those tiers.
+Filesystem checks stay free; turn AI scans off if you do not want model calls.
 
-- Semantic staleness — `CLAUDE.md` no longer matches what the project does
+- Semantic staleness — `AGENTS.md` no longer matches what the project does
 - Outdated or conflicting dependency versions
 - General project health
 
@@ -431,7 +475,8 @@ budget, and scan/chat tier.
 | `~/.claude/settings.json` | Claude Code settings (hook registration) |
 | `~/.config/opencode/plugins/projectman.js` | OpenCode status bridge |
 | `~/.grok/hooks/projectman.json` + `projectman-status.py` | Grok Build status bridge |
-| `~/.grok/config.toml` | Grok config (compat hooks, models, auto-update) |
+| `~/.grok/config.toml` | Native Grok config (compat hooks, models, auto-update) |
+| `~/.ProjectMan/grok-homes/<provider>/` | Managed home for a Grok custom provider |
 
 ## Troubleshooting
 

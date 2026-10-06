@@ -3,10 +3,10 @@ lifetime.
 
 A restored session's TerminalView carries a construction-time ``_explicit_harness``
 (A2 saved-harness-wins) that must NOT outlive the session: it is cleared when the
-child TRULY ends (natural exit, deactivate via SIGTERM, zellij-kill, spawn
-failure) so a PENDING per-project override is honored on the next activation —
-but it is PRESERVED through a zellij DETACH (the session lives on; a reattach
-legitimately resumes the same agent).
+child TRULY ends (natural exit, deactivate via SIGTERM, archive killing the
+zellij server, spawn failure) so a PENDING per-project override is honored on the
+next activation — but it is PRESERVED through a zellij DETACH (the session lives
+on; a reattach legitimately resumes the same agent).
 
 These exercise ``TerminalView._fire_exit_if_current`` UNBOUND against a
 ``types.SimpleNamespace`` recorder — the single funnel where ``_child_pid`` goes
@@ -58,10 +58,10 @@ def test_natural_exit_clears_explicit_harness():
     assert all(e[0] != 'process-detached' for e in t._emits)
 
 
-def test_zellij_kill_deactivate_clears_explicit_harness(monkeypatch):
-    """The zellij-KILL deactivate path: the session is dead (session_alive False),
-    so the child's exit is a true end → clears. (window._on_project_deactivate
-    flips _is_zellij off before the kill; here the session simply isn't alive.)"""
+def test_zellij_server_death_clears_explicit_harness(monkeypatch):
+    """If the zellij server session dies while we hold it, the child's exit is a
+    true end → clear the restore agent. (Deactivate only detaches; archive is the
+    path that actively kills the server. Here session_alive simply returns False.)"""
     monkeypatch.setattr(terminal.zellij, 'session_alive', lambda name: False)
     t = _fake_tv(explicit_agent='grok', is_zellij=True, zellij_session='pm-x')
     TerminalView._fire_exit_if_current(t, 4242, 0)

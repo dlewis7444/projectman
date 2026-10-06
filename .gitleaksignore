@@ -1,0 +1,7 @@
+# TOTP test fixtures — the RFC 6238 well-known test vector (base32 of
+# "12345678901234567890"), a public non-secret used by the TOTP unit tests.
+# These fingerprints match the private repo only. The publish gate rewrites
+# commit SHAs; .gitleaks.toml allowlists the same two paths so the filtered
+# history still passes.
+1ebd2e36f23b5408ba223051cafbd0c3a66018a9:tests/test_paa_totp.py:generic-api-key:13
+1ebd2e36f23b5408ba223051cafbd0c3a66018a9:tests/test_paa_unlock.py:generic-api-key:23

@@ -245,13 +245,25 @@ class PAAWindow(Adw.Window):
             env_list = [f'{k}={v}' for k, v in env_dict.items() if v is not None]
             if tier in ('haiku', 'sonnet', 'opus', 'fable', 'subagent'):
                 resolved = resolve_tier_model(
-                    self._settings, self._settings.effective_provider(''), tier)
+                    self._settings,
+                    self._settings.effective_provider('', 'claude'), tier)
                 if resolved:
                     model = resolved
+        argv = [claude_cmd, '--model', model, 'WELCOME']
+        try:
+            from debug_log import debug_log, format_argv_for_debug
+            debug_log(
+                self._settings,
+                'session launch kind=paa-welcome harness=claude '
+                f'model={model} cwd={paa_dir} '
+                f'argv={format_argv_for_debug(argv)}',
+            )
+        except Exception:
+            pass
         self._terminal.spawn_async(
             Vte.PtyFlags(0),
             paa_dir,
-            [claude_cmd, '--model', model, 'WELCOME'],
+            argv,
             env_list,
             GLib.SpawnFlags.SEARCH_PATH,
             None, None, -1, None,

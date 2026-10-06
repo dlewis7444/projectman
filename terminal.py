@@ -214,8 +214,8 @@ class TerminalView(Gtk.Box):
         return False
 
     def _debug(self, msg):
-        if self._settings.debug_logging:
-            print(f'[DBG] {msg}', flush=True)
+        from debug_log import debug_log
+        debug_log(self._settings, msg)
 
     def _on_ctrl_click(self, gesture, n_press, x, y):
         # GestureClick.get_current_event_state() and get_last_event() both
@@ -420,16 +420,11 @@ class TerminalView(Gtk.Box):
         # avoids a stale reason from a prior failed spawn leaking through.
         self._fallback_reason = None
         self.emit('spawn-begin')
-        # FB-4 (C4/C6): a harness-change / new-session DIRECT spawn over a live
-        # zellij project must tear down the zellij SERVER session first — the
-        # deactivate path already does this; the spawn path used to kill only the
-        # local attach child (_kill_child), orphaning the server. Mirror the
-        # deactivate kill via the shared zellij.kill_session helper. Only when
-        # this terminal currently holds a zellij session; a non-zellij spawn skips
-        # it. Clear the zellij flags so the new direct child isn't mistaken for a
-        # detach on its eventual exit.
+        # Detach-only policy: ProjectMan never kills the zellij SERVER session.
+        # When spawning a new direct child over a live zellij project, only the
+        # local attach client is torn down. Clear the zellij flags so the new
+        # direct child is not mistaken for a detach when it eventually exits.
         if self._is_zellij and self._zellij_session:
-            zellij.kill_session(self._zellij_session)
             self._is_zellij = False
             self._zellij_session = None
         self._kill_child()
@@ -455,14 +450,21 @@ class TerminalView(Gtk.Box):
         if argv is None:
             # _maybe_wrap_ssh set _fallback_reason
             return
-        self._spawn(argv, env)
+        self._spawn(
+            argv, env,
+            kind='vte',
+            mode=mode,
+            session_id=session_id,
+            fallback_reason=plan.fallback_reason,
+        )
 
     def _maybe_wrap_ssh(self, argv, env, host_id):
         """If project is remote, rewrite into ``ssh -tt … bash -lc …``.
 
         Returns ``(argv, env)`` for local ``_spawn``. Local env is None (inherit)
         so only the remote command carries provider env. Returns ``(None, None)``
-        on hard failure (unknown host).
+        on hard failure (unknown host; or a grok custom-provider spawn — the
+        managed GROK_HOME cannot cross hosts).
         """
         from hosts import LOCALHOST_ID
         if not host_id or host_id == LOCALHOST_ID:
@@ -471,6 +473,18 @@ class TerminalView(Gtk.Box):
         prof = profiles.get(host_id)
         if prof is None:
             self._fallback_reason = f'Unknown remote host {host_id!r}'
+            return None, None
+        # Custom Grok providers are local-only. The managed GROK_HOME is a
+        # laptop path: on the remote it either doesn't exist (a sessionless
+        # tree self-created there lacks our BYOK model blocks and status
+        # hooks, so the spawn dies) or — worse — a logged-in remote
+        # ~/.grok takes over and sends the xAI session JWT to a third-party
+        # endpoint. Refuse exactly like the unknown-host case above.
+        if (getattr(self._adapter, 'id', None) == 'grok'
+                and isinstance(env, dict) and env.get('GROK_HOME')):
+            self._fallback_reason = (
+                'custom Grok providers are local-only (managed GROK_HOME '
+                'cannot cross hosts)')
             return None, None
         # Rebuild argv with the host's binary (never a local absolute path).
         # Preserve resume flags (-S/-s/-r/--resume), -m model pairs, and continue
@@ -568,9 +582,10 @@ class TerminalView(Gtk.Box):
             # created — attaching to an existing session inherits whatever the
             # server already has. Per-project models under zellij are therefore
             # best-effort; the default (non-multiplexed) path is fully supported.
-            # The adapter owns the env decision (A3/M3): for claude this is the
-            # provider env; for opencode/grok (model-as-argv) it is None.
-            # terminal.py never names ANTHROPIC_* keys itself.
+            # The adapter owns the env decision (A3/M3): for claude and grok
+            # this is the provider env (grok env-only since 2026-10-05); for
+            # opencode/kimi it is None. terminal.py never names ANTHROPIC_* or
+            # GROK_MODELS_BASE_URL keys itself.
             custom, self._fallback_reason = self._adapter.zellij_spawn_env(
                 self._settings, self._project
             )
@@ -578,7 +593,14 @@ class TerminalView(Gtk.Box):
             env['SHELL'] = wrapper
             env['ZELLIJ_REAL_SHELL'] = os.environ.get('SHELL', '/bin/bash')
             cmd = ['zellij', 'attach', '--create', session_name]
-        self._spawn(cmd, env)
+        zellij_mode = 'zellij-attach' if alive else 'zellij-create'
+        self._spawn(
+            cmd, env,
+            kind='zellij',
+            mode=zellij_mode,
+            session_id=session_name,
+            fallback_reason=self._fallback_reason,
+        )
 
     def deactivate(self):
         """Gracefully stop the child; terminal output is preserved for context."""
@@ -590,7 +612,8 @@ class TerminalView(Gtk.Box):
                     pass
             # child-exited signal will fire and emit process-exited
 
-    def _spawn(self, argv, env=None):
+    def _spawn(self, argv, env=None, *, kind='vte', mode=None,
+               session_id=None, fallback_reason=None):
         """DIY fork + exec — PM owns the child watch end-to-end.
 
         Replaces Vte.Terminal.spawn_async, which routes through vte's
@@ -606,6 +629,10 @@ class TerminalView(Gtk.Box):
         register a unix-fd watch at G_PRIORITY_DEFAULT. We never call
         vte_terminal_watch_child, so vte's reaper never gets a pidfd and
         can't leak one.
+
+        When debug logging is on, every call emits a single ``session launch``
+        line (harness, mode, project, argv) so launches are visible regardless
+        of path (fresh / continue / resume / zellij / remote ssh wrap).
         """
         try:
             pty = Vte.Pty.new_sync(Vte.PtyFlags(0), None)
@@ -617,8 +644,44 @@ class TerminalView(Gtk.Box):
             self._terminal.get_column_count(),
         )
 
-        working_dir = self._project.path
+        # Local child cwd: real project path on localhost. Remote projects use
+        # ``ssh:…`` as Project.path (not a local directory) — chdir would fail
+        # and leave the process in $HOME (seen as "zellij at localhost:/home/user"
+        # when local zellij was wrongly used for a remote). Prefer home for the
+        # local ssh client; remote agent cwd is set inside the SSH script.
+        from hosts import LOCALHOST_ID
+        host = getattr(self._project, 'host_id', None) or LOCALHOST_ID
+        if host != LOCALHOST_ID:
+            working_dir = os.path.expanduser('~')
+        else:
+            working_dir = self._project.path
         argv_list = list(argv)
+        # Debug: one line per new session / re-spawn (gate on settings).
+        try:
+            from debug_log import debug_log, format_argv_for_debug
+            proj = getattr(self._project, 'name', None) or getattr(
+                self._project, 'path', '?')
+            bits = [
+                'session launch',
+                f'kind={kind}',
+                f'harness={getattr(self._adapter, "id", "?")}',
+            ]
+            if mode:
+                bits.append(f'mode={mode}')
+            bits.append(f'project={proj}')
+            bits.append(f'host={host}')
+            if session_id:
+                sid = str(session_id)
+                if len(sid) > 48:
+                    sid = sid[:47] + '…'
+                bits.append(f'session_id={sid}')
+            if fallback_reason:
+                bits.append(f'fallback={fallback_reason}')
+            bits.append(f'cwd={working_dir}')
+            bits.append(f'argv={format_argv_for_debug(argv_list)}')
+            debug_log(self._settings, ' '.join(bits))
+        except Exception:
+            pass
         # Vte.Terminal.spawn_async used to inject TERM/COLORTERM into the child
         # env for us; the DIY fork+exec path (pty.child_setup only touches the
         # controlling tty) does not. Launched from a desktop launcher, PM has
@@ -739,8 +802,8 @@ class TerminalView(Gtk.Box):
             self._zellij_session = None
         # FB-9 (the maintainer's reveal #2, C8-amended): sticky-agent lifetime = SESSION
         # lifetime. We are past the detach early-return, so the child has TRULY
-        # ended (natural exit, deactivate via SIGTERM, zellij-kill, or spawn
-        # failure) — not detached. Drop the construction-time restore agent so a
+        # ended (natural exit, deactivate via SIGTERM, archive killing the
+        # zellij server, or spawn failure) — not detached. Drop the construction-time restore agent so a
         # PENDING per-project override (e.g. restored-grok with the row now set
         # to claude) is honored on the next activation, instead of the dead
         # session's agent outliving it. The next spawn re-resolves the adapter

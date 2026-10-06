@@ -54,6 +54,9 @@ def test_load_missing_file_persists_defaults(tmp_path):
     data = json.loads(path.read_text())
     # The persisted content is the full defaults (round-trips to the same obj).
     assert data['font_size'] == 11
+    assert data['provider_defaults'] == {}
+    # Old-app interop mirror: model_default persists as a COPY of claude's
+    # default only (never an independent source of truth).
     assert data['model_default'] == ''
     assert Settings.load(str(path)).font_size == s.font_size
 
@@ -189,7 +192,7 @@ def test_provider_defaults():
 
 def test_providers_roundtrip(tmp_path):
     path = str(tmp_path / 'settings.json')
-    s = Settings(providers=_sample_providers(), model_default='ollama',
+    s = Settings(providers=_sample_providers(), provider_defaults={'claude': 'ollama'},
                  tier_models={'opus': 'qwen'})
     s.save(path)
     s2 = Settings.load(path)
@@ -208,28 +211,28 @@ def test_load_old_file_without_provider_keys(tmp_path):
 
 
 def test_effective_provider_global_default():
-    s = Settings(providers=_sample_providers(), model_default='ollama')
-    assert s.effective_provider('/p/a') == 'ollama'
+    s = Settings(providers=_sample_providers(), provider_defaults={'claude': 'ollama'})
+    assert s.effective_provider('/p/a', 'claude') == 'ollama'
 
 
 def test_effective_provider_per_project_override():
-    s = Settings(providers=_sample_providers(), model_default='ollama',
+    s = Settings(providers=_sample_providers(), provider_defaults={'claude': 'ollama'},
                  provider_overrides={'/p/a': ''})
-    assert s.effective_provider('/p/a') == ''          # pinned to native
-    assert s.effective_provider('/p/b') == 'ollama'    # follows default
+    assert s.effective_provider('/p/a', 'claude') == ''          # pinned to native
+    assert s.effective_provider('/p/b', 'claude') == 'ollama'    # follows default
 
 
 def test_effective_harness_defaults_to_claude():
     assert Settings().effective_harness('/p') == 'claude'
     assert Settings(providers=_sample_providers(),
-                    model_default='ollama').effective_harness('/p') == 'claude'
+                    provider_defaults={'claude': 'ollama'}).effective_harness('/p') == 'claude'
 
 
 def test_effective_model_reads_model_pins_only():
-    s = Settings(providers=_sample_providers(), model_default='ollama',
+    s = Settings(providers=_sample_providers(), provider_defaults={'claude': 'ollama'},
                  provider_overrides={'/p': 'ollama'},
                  model_pins={'/p': 'ollama/qwen'})
-    assert s.effective_provider('/p') == 'ollama'
+    assert s.effective_provider('/p', 'claude') == 'ollama'
     assert s.effective_model('/p') == 'ollama/qwen'
     # Provider pin alone does not invent a model pin.
     s2 = Settings(providers=_sample_providers(),
@@ -237,30 +240,33 @@ def test_effective_model_reads_model_pins_only():
     assert s2.effective_model('/p') == ''
 
 
-def test_stale_provider_override_falls_back_to_default():
-    s = Settings(providers=_sample_providers(), model_default='ollama',
+def test_stale_provider_override_is_native():
+    """An override naming a deleted/unknown provider is stale → native
+    (same spirit as stale model pins; the old fall-back-to-global-default was
+    the cross-harness leak)."""
+    s = Settings(providers=_sample_providers(), provider_defaults={'claude': 'ollama'},
                  provider_overrides={'/p': 'not-a-provider'})
-    assert s.effective_provider('/p') == 'ollama'
+    assert s.effective_provider('/p', 'claude') == ''
 
 
 def test_uses_custom_provider():
-    s = Settings(providers=_sample_providers(), model_default='ollama')
+    s = Settings(providers=_sample_providers(), provider_defaults={'claude': 'ollama'})
     assert s.uses_custom_provider('/p/a') is True
     # native default
     assert Settings().uses_custom_provider('/p/a') is False
     # provider id not defined
-    s2 = Settings(model_default='ghost')
+    s2 = Settings(provider_defaults={'claude': 'ghost'})
     assert s2.uses_custom_provider('/p/a') is False
     # provider defined but no base_url
     s3 = Settings(providers={'p': {'name': 'P', 'base_url': '',
                                      'api_key': '', 'models': []}},
-                  model_default='p')
+                  provider_defaults={'claude': 'p'})
     assert s3.uses_custom_provider('/p/a') is False
 
 
 def test_any_custom_provider_active():
     assert Settings().any_custom_provider_active() is False
-    s = Settings(providers=_sample_providers(), model_default='ollama')
+    s = Settings(providers=_sample_providers(), provider_defaults={'claude': 'ollama'})
     assert s.any_custom_provider_active() is True
     # custom only via a per-project override
     s2 = Settings(providers=_sample_providers(),
@@ -449,3 +455,76 @@ def test_default_vte_key_captures_constant_matches_report():
     assert grok[('Return', ('shift',))] == '\x1b[13;2u'
     assert grok[('semicolon', ('control',))] == '\x1b[59;5u'
     assert grok[('apostrophe', ('control',))] == '\x1b[39;5u'
+
+
+# --- Per-harness provider defaults (2026-10-05) -----------------------------
+
+_PROV = {
+    'ollama': {'name': 'Ollama', 'base_url': 'http://x', 'models': []},
+    'kimi-code': {'name': 'Kimi Code', 'base_url': 'http://y', 'models': []},
+}
+
+
+def test_bug_grok_project_does_not_inherit_claude_default():
+    """THE round-5 bug: claude's default provider (Ollama) leaked onto every
+    unpinned grok project because model_default was global. Provider defaults
+    are per-harness now: grok absent from provider_defaults → native."""
+    s = Settings(providers=_PROV, provider_defaults={'claude': 'ollama'},
+                 harness_default='grok')
+    assert s.effective_provider('/p', 'grok') == ''
+    assert s.effective_provider('/p', 'claude') == 'ollama'
+    from models import build_grok_spawn_env, build_spawn_env
+    # Same project, both harnesses: grok native (no env), claude on Ollama.
+    assert build_grok_spawn_env(s, '/p') == (None, None)
+    env, _ = build_spawn_env(s, '/p')
+    assert env is not None and env['ANTHROPIC_BASE_URL'] == 'http://x'
+
+
+def test_provider_defaults_override_and_native():
+    s = Settings(providers=_PROV,
+                 provider_defaults={'claude': 'ollama', 'grok': 'kimi-code'})
+    assert s.effective_provider('/p', 'claude') == 'ollama'
+    assert s.effective_provider('/p', 'grok') == 'kimi-code'
+    s.provider_overrides = {'/p': ''}
+    assert s.effective_provider('/p', 'grok') == ''     # explicit native wins
+    s.provider_overrides = {'/p': 'ollama'}
+    assert s.effective_provider('/p', 'grok') == 'ollama'  # override wins
+
+
+def test_migration_model_default_becomes_claude_default(tmp_path):
+    """The old GLOBAL model_default was semantically Claude's (the Models-page
+    combo said 'Default Provider, Claude Code') → provider_defaults['claude'];
+    grok gets NO default (native). model_default is never persisted again."""
+    p = str(tmp_path / 'settings.json')
+    with open(p, 'w') as f:
+        json.dump({'model_default': 'ollama', 'providers': _PROV}, f)
+    s = Settings.load(p)
+    assert s.provider_defaults.get('claude') == 'ollama'
+    assert 'grok' not in s.provider_defaults
+    orig_save = s.save
+    s.save = lambda path=None: orig_save(p)
+    s.save()
+    data = json.loads(open(p).read())
+    assert data.get('provider_defaults', {}).get('claude') == 'ollama'
+    # Mirror: the legacy key carries claude's migrated default for old apps.
+    assert data.get('model_default') == 'ollama'
+    # And grok stays native under the migrated default.
+    assert s.effective_provider('/p', 'grok') == ''
+
+
+def test_set_provider_default_persists_and_reloads(tmp_path):
+    p = str(tmp_path / 'settings.json')
+    s = Settings(providers=_PROV)
+    orig = s.save
+    s.save = lambda path=None: orig(p)
+    s.set_provider_default('grok', 'kimi-code')
+    s.set_provider_default('claude', '')          # native clears the key
+    s.set_provider_default('kimi', 'ollama')      # inert but stored
+    s2 = Settings.load(p)
+    assert s2.provider_defaults == {'grok': 'kimi-code', 'kimi': 'ollama'}
+    assert s2.effective_provider('/p', 'grok') == 'kimi-code'
+    # Mirror pins claude (native here) even though only grok/kimi have
+    # defaults — a stale legacy value can never resurrect a cleared default.
+    data = json.loads(open(p).read())
+    assert data['model_default'] == ''
+    assert data['provider_defaults'] == {'grok': 'kimi-code', 'kimi': 'ollama'}

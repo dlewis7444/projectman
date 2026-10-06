@@ -288,6 +288,35 @@ def test_default_model_label_for_follow_default_matches_global(tmp_path):
     assert 'Grok Build' in per_row
 
 
+def test_default_model_label_grok_custom_provider_names_provider(tmp_path):
+    """Grok + custom Settings provider (2026-10-05): the model comes from PM's
+    env/-m, so the 'Default (…)' label attributes the PROVIDER — not
+    'Managed by Grok Build (~/.grok/config.toml)'."""
+    providers = {
+        'ollama': {'name': 'Ollama', 'base_url': 'http://x', 'models': []},
+        'kimi-code': {'name': 'Kimi Code', 'base_url': 'http://y', 'models': []},
+    }
+    home = _home_with_grok(tmp_path)
+    # Global default provider.
+    s = Settings(harness_default='grok', provider_defaults={'grok': 'ollama'},
+                 providers=providers)
+    label = ac.default_model_label_for(s, '/proj/grok', home=home)
+    assert label == 'Ollama'
+    assert 'Grok Build' not in label
+    assert 'config.toml' not in label
+    assert ac.default_model_label(s, home=home) == 'Ollama'
+    # Per-project provider override wins over the global default.
+    s2 = Settings(harness_default='grok', provider_defaults={'grok': 'ollama'},
+                  providers=providers,
+                  provider_overrides={'/proj/grok': 'kimi-code'})
+    assert ac.default_model_label_for(s2, '/proj/grok', home=home) == 'Kimi Code'
+    # Native grok (no provider effective) keeps the config.toml story.
+    s3 = Settings(harness_default='grok')
+    label3 = ac.default_model_label_for(s3, '/proj/grok', home=home)
+    assert 'Grok Build' in label3
+    assert 'Qwen3.5 9B (Ollama pool)' in label3
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # B1 / M-UX.8-residual — grok [compat.claude] hooks: three states → three strings
 # ════════════════════════════════════════════════════════════════════════════

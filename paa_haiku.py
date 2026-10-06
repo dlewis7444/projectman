@@ -1,11 +1,46 @@
+import contextvars
+import logging
 import os
-import json
-import subprocess
+from contextlib import contextmanager
+from dataclasses import replace
+
 from paa_ledger import LedgerItem, make_item_id, now_iso
 
 _SCAN_TIMEOUT = 30
 _MAX_CONTENT_CHARS = 16000
-_TIER_ALIASES = ('haiku', 'sonnet', 'opus', 'fable', 'subagent')
+
+log = logging.getLogger(__name__)
+
+# Log-once window for scan harness fallback messages.
+# * None (default): log every resolve / plan-None reason (standalone
+#   ``_run_scan_model`` and other callers).
+# * ``{'logged': bool}``: at most one ``paa scan harness fallback`` line for
+#   the whole ``run_ai_checks`` run (covers resolve *and* plan-None). Using a
+#   ContextVar so concurrent ThreadPoolExecutor scans do not share state.
+_scan_fallback_log_once = contextvars.ContextVar(
+    'paa_scan_fallback_log_once', default=None)
+
+
+def _maybe_log_scan_fallback(reason):
+    """Log a scan harness fallback reason, honoring the once-per-run window."""
+    if not reason:
+        return
+    state = _scan_fallback_log_once.get()
+    if state is not None:
+        if state.get('logged'):
+            return
+        state['logged'] = True
+    log.info('paa scan harness fallback: %s', reason)
+
+
+@contextmanager
+def _scan_fallback_once_window():
+    """At most one fallback log for the duration of the ``with`` block."""
+    token = _scan_fallback_log_once.set({'logged': False})
+    try:
+        yield
+    finally:
+        _scan_fallback_log_once.reset(token)
 
 # Manifest files to check for dependency analysis (first found wins)
 _MANIFEST_FILES = [
@@ -14,60 +49,97 @@ _MANIFEST_FILES = [
 ]
 
 
-def _run_scan_model(prompt, settings, project_path=None, timeout=_SCAN_TIMEOUT):
-    """Invoke ``claude -p --model <scan-tier> --output-format json``.
+def _claude_scan_model(settings, project_path):
+    """Resolve the claude-axis scan tier (``paa_scan_model``).
 
-    Routes through the model axis when *project_path* is provided: custom
-    providers get ``build_spawn_env`` (``ANTHROPIC_BASE_URL`` etc.) and the
-    tier alias is resolved to the provider's model id. Native / unusable
-    custom providers fall back to inherited env + bare tier alias (same as
-    terminal spawn fallback).
+    Returns the tier alias string (e.g. ``'haiku'``). Provider-side tier→model
+    id resolution happens inside ``ClaudeAdapter.headless_plan`` when a custom
+    provider is active. Tier aliases apply only when the resolved harness is
+    claude (callers pass this model only on that path).
+    """
+    tier = (settings.paa_scan_model or 'haiku')
+    if isinstance(tier, str):
+        tier = tier.strip() or 'haiku'
+    else:
+        tier = 'haiku'
+    return tier
+
+
+def _run_scan_model(prompt, settings, project_path=None, timeout=_SCAN_TIMEOUT):
+    """Invoke the effective harness headlessly for an AI scan.
+
+    Routes through ``paa_headless.resolve_headless_adapter`` (same harness axis
+    as the main UI) and ``adapter.headless_plan`` / ``run_headless``. Claude
+    tier aliases (``paa_scan_model``) apply only when the resolved adapter is
+    claude; non-claude adapters receive ``model=None`` (their normal default).
 
     *project_path* is optional for back-compat tests; production callers must
     pass it (use ``''`` for global default provider — no project pin).
 
+    Fallback logging uses ``_maybe_log_scan_fallback`` so ``run_ai_checks`` can
+    log once per scan run for resolve *or* plan-None reasons (not 0 for
+    plan-None, not 3× across checks).
+
     Returns ``(response_text, tokens_used)`` or ``(None, 0)`` on failure.
     tokens_used = input_tokens + output_tokens (excludes cache).
+
+    Failure semantics are preserved: any error → ``(None, 0)``.
     """
-    claude_cmd = settings.resolved_claude_binary
-    tier = (settings.paa_scan_model or 'haiku').strip() or 'haiku'
-    model_arg = tier
-    env = None  # None → subprocess inherits (native)
+    from paa_headless import (
+        plan_with_none_fallback,
+        resolve_headless_adapter,
+        run_headless,
+    )
 
-    if project_path is not None:
-        from models import build_spawn_env, resolve_tier_model
-        env_dict, _reason = build_spawn_env(settings, project_path)
-        # reason set ⇒ env_dict is None ⇒ stay native with bare tier alias
-        if env_dict is not None:
-            env = env_dict
-            if tier in _TIER_ALIASES:
-                resolved = resolve_tier_model(
-                    settings, settings.effective_provider(project_path), tier)
-                if resolved:
-                    model_arg = resolved
+    # Back-compat: project_path=None means "native inherit, no provider axis".
+    # Resolution still uses '' for the harness axis (global default).
+    resolve_path = '' if project_path is None else project_path
+    adapter, hid, fallback_reason = resolve_headless_adapter(
+        settings, resolve_path)
+    _maybe_log_scan_fallback(fallback_reason)
+    if adapter is None:
+        return (None, 0)
 
-    # Run from PAA's own directory to avoid polluting real project sessions
-    paa_dir = os.path.join(settings.resolved_projects_dir, '.project-admin-agent')
-    os.makedirs(paa_dir, exist_ok=True)
+    # Claude-axis tier only when the adapter that will actually run is claude.
+    scan_tier = _claude_scan_model(settings, project_path)
+    if getattr(adapter, 'id', None) == 'claude':
+        model = scan_tier
+    else:
+        model = None
+
+    # If headless_plan returns None, fall back to claude (W5 safety) rather
+    # than silent (None, 0) with no claude attempt.
+    adapter, plan, none_reason = plan_with_none_fallback(
+        adapter, hid, settings, prompt, project_path,
+        session_id=None, model=model, claude_model=scan_tier,
+    )
+    _maybe_log_scan_fallback(none_reason)
+    if plan is None or adapter is None:
+        return (None, 0)
+
+    # Explicit scan-routing line (debug only). run_headless also logs the
+    # full argv; this names the resolved harness even when argv is opaque.
     try:
-        result = subprocess.run(
-            [claude_cmd, '-p', '--model', model_arg, '--output-format', 'json', prompt],
-            capture_output=True, text=True, timeout=timeout,
-            cwd=paa_dir, stdin=subprocess.DEVNULL,
-            env=env,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        from debug_log import debug_log
+        aid = getattr(adapter, 'id', hid)
+        reason = none_reason or fallback_reason
+        msg = f'paa scan harness={aid} project_path={resolve_path!r}'
+        if reason:
+            msg += f' fallback={reason}'
+        debug_log(settings, msg)
+    except Exception:
+        pass
+
+    # Prefer a fresh plan with the requested timeout over mutating the
+    # adapter-returned dataclass in place.
+    if plan.timeout != timeout:
+        plan = replace(plan, timeout=timeout)
+
+    result = run_headless(
+        plan, adapter.parse_headless_output, settings=settings)
+    if result.text is None:
         return (None, 0)
-    if result.returncode != 0:
-        return (None, 0)
-    try:
-        data = json.loads(result.stdout)
-    except (json.JSONDecodeError, ValueError):
-        return (None, 0)
-    response_text = data.get('result', '')
-    usage = data.get('usage', {})
-    tokens = usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
-    return (response_text, tokens)
+    return (result.text, result.tokens)
 
 
 # Back-compat alias (older imports / tests may still use the haiku name).
@@ -77,6 +149,7 @@ _run_haiku = _run_scan_model
 def _parse_haiku_response(text):
     """Parse structured JSON response from Haiku.
     Returns list of dicts with 'summary' and 'evidence' keys, or [] on failure."""
+    import json
     # Strip markdown code fences (Haiku often wraps JSON in ```json ... ```)
     text = text.strip()
     if text.startswith('```'):
@@ -114,29 +187,34 @@ def _top_level_listing(project_path):
 
 
 def check_semantic_staleness(project_name, project_path, settings):
-    """AI check: is CLAUDE.md still accurate for the codebase?
+    """AI check: is AGENTS.md still accurate for the codebase?
     Returns (list[LedgerItem], int tokens_used)."""
+    agents_md = os.path.join(project_path, 'AGENTS.md')
     claude_md = os.path.join(project_path, 'CLAUDE.md')
-    content = _read_truncated(claude_md)
+    rules_file = 'AGENTS.md'
+    content = _read_truncated(agents_md)
+    if content is None:
+        content = _read_truncated(claude_md)
+        rules_file = 'CLAUDE.md'
     if content is None:
         return ([], 0)
 
     listing = _top_level_listing(project_path)
     prompt = (
-        'You are auditing a project\'s CLAUDE.md for accuracy.\n'
+        f'You are auditing a project\'s {rules_file} for accuracy.\n'
         'IMPORTANT: Do NOT read any files yourself. ALL project data is provided below. '
         'Your working directory is NOT the project — do not inspect it.\n\n'
         f'Project: {project_name}\n'
         f'Project directory listing (top-level):\n{listing}\n\n'
-        f'CLAUDE.md contents (may be truncated):\n{content}\n\n'
-        'Check if CLAUDE.md references files, directories, commands, or patterns '
+        f'{rules_file} contents (may be truncated):\n{content}\n\n'
+        f'Check if {rules_file} references files, directories, commands, or patterns '
         'that no longer match the actual project structure shown in the listing above.\n'
         'Only flag concrete mismatches where a referenced file/directory is NOT in the listing. '
         'Do NOT flag truncation, incomplete sections, or markdown formatting.\n\n'
         'Respond with JSON only: {"issues": [{"summary": "...", "evidence": "...", "critical": false}]}\n'
         'Set "critical" to true ONLY for issues that would cause builds to fail, '
         'data loss, or security vulnerabilities. Stale documentation alone is never critical.\n'
-        'If CLAUDE.md accurately reflects the project, respond: {"issues": []}'
+        f'If {rules_file} accurately reflects the project, respond: {{"issues": []}}'
     )
     response, tokens = _run_scan_model(prompt, settings, project_path=project_path)
     if response is None:
@@ -220,9 +298,13 @@ def check_project_health(project_name, project_path, settings):
     readme = _read_truncated(os.path.join(project_path, 'README.md'))
     if readme:
         context += f'\n\nREADME.md (truncated):\n{readme}'
-    claude_md = _read_truncated(os.path.join(project_path, 'CLAUDE.md'))
-    if claude_md:
-        context += f'\n\nCLAUDE.md (truncated):\n{claude_md}'
+    agents_md = _read_truncated(os.path.join(project_path, 'AGENTS.md'))
+    rules_file = 'AGENTS.md'
+    if agents_md is None:
+        agents_md = _read_truncated(os.path.join(project_path, 'CLAUDE.md'))
+        rules_file = 'CLAUDE.md'
+    if agents_md:
+        context += f'\n\n{rules_file} (truncated):\n{agents_md}'
 
     prompt = (
         'You are doing a quick health check on a project.\n'
@@ -236,11 +318,11 @@ def check_project_health(project_name, project_path, settings):
         'NEVER flag any of the following, even if the project appears to "lack" them. '
         'The default assumption is that their absence is intentional:\n'
         '  - Missing LICENSE, COPYING, NOTICE, or any licensing file\n'
-        '  - Missing README.md (CLAUDE.md often serves as the primary doc)\n'
+        '  - Missing README.md (AGENTS.md often serves as the primary doc)\n'
         '  - Missing .gitignore — UNLESS the listing clearly shows committed files '
         'that obviously should be ignored (e.g., a tracked `.env`, a `node_modules/` '
         'directory, large build artifacts checked in by mistake)\n'
-        '  - Missing CLAUDE.md (handled separately)\n'
+        '  - Missing AGENTS.md (handled separately)\n'
         '  - Missing tests, CI config, docs/, or contributing guides\n'
         '  - Empty directory / "project appears uninitialized" — empty is valid state\n'
         '  - Screenshots, images, or files at the root rather than in a subdir\n'
@@ -250,8 +332,8 @@ def check_project_health(project_name, project_path, settings):
         'copies of a value that must stay in sync with no mechanism to enforce it)\n'
         '  - Files that ARE present in the listing (read carefully before flagging)\n\n'
         'DO flag only concrete, actionable problems you are highly confident about:\n'
-        '  - Secrets or credentials committed in plaintext\n'
-        '  - Broken internal references (README/CLAUDE.md points at a file NOT in the listing)\n'
+        f'  - Secrets or credentials committed in plaintext\n'
+        f'  - Broken internal references (README/{rules_file} points at a file NOT in the listing)\n'
         '  - Obvious security risks (world-writable configs, hard-coded tokens in scripts)\n'
         '  - Clear contradictions between claimed and observed state\n\n'
         'When in doubt, do not flag. False positives are more costly than missed nits.\n\n'
@@ -286,16 +368,30 @@ def check_project_health(project_name, project_path, settings):
 
 def run_ai_checks(project_name, project_path, settings):
     """Run all AI checks for one project. Respects paa_allow_haiku.
-    Returns (list[LedgerItem], int total_tokens_used)."""
+    Returns (list[LedgerItem], int total_tokens_used).
+
+    Logs harness fallback **once per scan run** for resolve *or* plan-None
+    reasons (not once per check, and not silent when only plan-None fires).
+    No UI surface in Phase A.
+    """
     if not settings.paa_allow_haiku:
         return ([], 0)
+
     items = []
     total_tokens = 0
-    for check_fn in [check_semantic_staleness, check_dependency_versions, check_project_health]:
-        try:
-            new_items, tokens = check_fn(project_name, project_path, settings)
-            items.extend(new_items)
-            total_tokens += tokens
-        except Exception:
-            continue  # Don't let one check failure block others
+    # Log-once window: first resolve reason or plan-None none_reason from any
+    # of the three checks emits one line; later checks stay quiet.
+    with _scan_fallback_once_window():
+        for check_fn in [
+            check_semantic_staleness,
+            check_dependency_versions,
+            check_project_health,
+        ]:
+            try:
+                new_items, tokens = check_fn(
+                    project_name, project_path, settings)
+                items.extend(new_items)
+                total_tokens += tokens
+            except Exception:
+                continue  # Don't let one check failure block others
     return (items, total_tokens)
