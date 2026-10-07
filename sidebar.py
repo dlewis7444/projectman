@@ -38,7 +38,8 @@ _TIP_ADD_HOST = (
 )
 _TIP_CLOSE_SESSION = (
     'Close session — stops the running agent terminal for this project. '
-    'Open it again to continue the session.'
+    'For zellij, only the local attach client closes; the zellij session '
+    'keeps running and can be reattached.'
 )
 _TIP_UNDO_CLOSE_SESSION = (
     'Keep session open — cancel the pending close (session stays running).'
@@ -1014,11 +1015,12 @@ class Sidebar(Gtk.Box):
         self._pending_deactivate_timers[path] = GLib.timeout_add(
             self.PENDING_DEACTIVATE_MS, self._fire_pending_deactivate, path)
         # Soft confirm: 5s UNDO is already on the row; toast so distracted
-        # users notice before the session actually dies.
+        # users notice before ProjectMan's terminal view closes. For zellij the
+        # server session keeps running (detach); for direct agents the process ends.
         root = self.get_root()
         if root is not None and hasattr(root, '_show_toast'):
             root._show_toast(
-                'Closing session — click UNDO on the project row to keep it open',
+                'Closing session — click UNDO on the project row to keep it running',
                 timeout=4,
             )
 
@@ -2034,6 +2036,9 @@ class ProjectRow(Gtk.ListBoxRow):
         self._name_label.set_halign(Gtk.Align.START)
         self._name_label.set_ellipsize(Pango.EllipsizeMode.END)
         self._name_box.append(self._name_label)
+        # Subtitle line: harness text + green Z badge for zellij sessions.
+        self._subtitle_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self._subtitle_box.set_halign(Gtk.Align.START)
         self._subtitle_label = Gtk.Label()
         self._subtitle_label.set_halign(Gtk.Align.START)
         self._subtitle_label.set_ellipsize(Pango.EllipsizeMode.END)
@@ -2041,7 +2046,12 @@ class ProjectRow(Gtk.ListBoxRow):
         self._subtitle_label.add_css_class('caption')
         self._subtitle_label.add_css_class('pm-harness-subtitle')
         self._subtitle_label.set_visible(False)
-        self._name_box.append(self._subtitle_label)
+        self._subtitle_box.append(self._subtitle_label)
+        self._zellij_badge = Gtk.Label(label='Z')
+        self._zellij_badge.add_css_class('zellij-badge')
+        self._zellij_badge.set_visible(False)
+        self._subtitle_box.append(self._zellij_badge)
+        self._name_box.append(self._subtitle_box)
         top.append(self._name_box)
 
         self._rename_entry = Gtk.Entry()
@@ -2183,9 +2193,11 @@ class ProjectRow(Gtk.ListBoxRow):
 
         Two shapes:
           * NO live mismatch — the running harness is absent OR equals the
-            configured/effective harness: today's string, BYTE-IDENTICAL —
-            ``<AgentDisplay>`` (+ ``" · " + model`` when a model is pinned),
-            and ``None`` for a plain default harness with no model.
+            configured/effective harness: ``<AgentDisplay>`` annotated with the
+            effective custom provider when one is in effect (claude/grok only:
+            ``Grok Build (Kimi Code)``; native → plain name), plus
+            ``" · " + model`` when a model is pinned, and ``None`` for a plain
+            default harness with no model.
           * LIVE mismatch — a child is running a DIFFERENT agent than the one
             configured for the next session (a restored saved-harness-wins
             session, A2): lead with what is ACTUALLY running, naming the next:
@@ -2201,17 +2213,38 @@ class ProjectRow(Gtk.ListBoxRow):
         mismatch = running is not None and running != harness_id
         if mismatch:
             head = (f'{self._harness_display_name(running)} '
-                    f'(next: {self._harness_display_name(harness_id)})')
+                    f'(next: {self._configured_harness_label(harness_id)})')
         else:
             is_default_agent = (
                 harness_id == self._settings.harness_default == harnesses.DEFAULT_HARNESS)
-            if is_default_agent and not model:
+            head = self._configured_harness_label(harness_id)
+            # A custom provider in effect annotates even a default-harness
+            # row — only a truly plain row stays clean.
+            if is_default_agent and not model and \
+                    head == self._harness_display_name(harness_id):
                 return None
-            head = self._harness_display_name(harness_id)
         parts = [head]
         if model:
             parts.append(model)
         return ' · '.join(parts)
+
+    def _configured_harness_label(self, harness_id):
+        """Harness display name, annotated with the effective custom provider
+        for provider-aware harnesses (claude/grok): "Grok Build (Kimi Code)".
+        Native/default provider → the plain harness name; opencode/kimi never
+        annotate (native-only adapters)."""
+        label = self._harness_display_name(harness_id)
+        if harness_id not in ('claude', 'grok') or self._settings is None:
+            return label
+        try:
+            pid = self._settings.effective_provider(self._project.path, harness_id)
+        except Exception:
+            pid = ''
+        if not pid:
+            return label
+        from models import provider_label
+        name = provider_label(getattr(self._settings, 'providers', None), pid)
+        return f'{label} ({name})'
 
     def _update_subtitle(self):
         """Render the subtitle from the pure builder (B3 + C5).
@@ -2224,9 +2257,17 @@ class ProjectRow(Gtk.ListBoxRow):
         text = self._subtitle_text()
         if text is None:
             self._subtitle_label.set_visible(False)
+        else:
+            self._subtitle_label.set_text(text)
+            self._subtitle_label.set_visible(True)
+        self._update_zellij_badge()
+
+    def _update_zellij_badge(self):
+        """Show the green Z badge when this row represents a zellij session."""
+        if not hasattr(self, '_zellij_badge'):
             return
-        self._subtitle_label.set_text(text)
-        self._subtitle_label.set_visible(True)
+        show = self._is_zellij and self._process_state in ('attached', 'detached')
+        self._zellij_badge.set_visible(show)
 
     def set_running_harness(self, harness_id):
         """Record the harness the live child is actually running (C5) and refresh
@@ -2558,10 +2599,59 @@ class ProjectRow(Gtk.ListBoxRow):
         # (A5: caps.resume_by_id) — otherwise only the New Session entry shows.
         if not self._caps().resume_by_id:
             return
+        from hosts import LOCALHOST_ID
+        is_remote = (
+            getattr(self._project, 'host_id', LOCALHOST_ID) != LOCALHOST_ID
+        )
+        if is_remote:
+            # SSH list can take a few seconds — never block the GTK main loop.
+            # Placeholder row until the worker finishes.
+            loading = Gtk.ListBoxRow()
+            loading.set_activatable(False)
+            loading.set_selectable(False)
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            box.set_margin_start(12)
+            box.set_margin_end(8)
+            box.set_margin_top(4)
+            box.set_margin_bottom(4)
+            lbl = Gtk.Label(label='Loading remote sessions…', xalign=0)
+            lbl.add_css_class('dim-label')
+            box.append(lbl)
+            loading.set_child(box)
+            self._session_listbox.append(loading)
+            self._remote_sessions_loading = loading
+
+            def work():
+                try:
+                    refs = self._adapter().list_sessions(
+                        self._project, self._settings)
+                except Exception:
+                    refs = []
+                GLib.idle_add(self._apply_remote_session_refs, refs)
+
+            import threading
+            threading.Thread(
+                target=work, daemon=True, name='pm-remote-sessions',
+            ).start()
+            return
         refs = self._adapter().list_sessions(self._project, self._settings)
         for i, ref in enumerate(refs):
             self._session_listbox.append(SessionHistoryRow(ref, is_default=(i == 0)))
 
+    def _apply_remote_session_refs(self, refs):
+        """Main-thread: replace the loading placeholder with SessionHistoryRows."""
+        loading = getattr(self, '_remote_sessions_loading', None)
+        if loading is not None:
+            parent = loading.get_parent()
+            if parent is not None:
+                parent.remove(loading)
+            self._remote_sessions_loading = None
+        if not self._expanded:
+            return False
+        for i, ref in enumerate(refs or []):
+            self._session_listbox.append(
+                SessionHistoryRow(ref, is_default=(i == 0)))
+        return False
     def _on_session_activated(self, listbox, row):
         if isinstance(row, NewSessionRow):
             self.emit('project-new-session')
@@ -2617,6 +2707,7 @@ class ProjectRow(Gtk.ListBoxRow):
         else:
             self._name_label.remove_css_class('project-row-detached')
             self._name_label.set_tooltip_text('')
+        self._update_zellij_badge()
         self.update_status()
 
     def update_status(self):

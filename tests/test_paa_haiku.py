@@ -99,7 +99,7 @@ def test_run_scan_model_custom_provider_injects_env_and_resolves_tier():
     """Custom model_default → ANTHROPIC_BASE_URL + resolved tier model id."""
     settings = Settings(
         providers=_ollama_providers(),
-        model_default='ollama',
+        provider_defaults={'claude': 'ollama'},
         paa_scan_model='haiku',
         tier_models={'ollama': {
             'haiku': 'ministral-3',
@@ -145,7 +145,7 @@ def test_run_scan_model_unusable_provider_falls_back_native():
     settings = Settings(
         providers={'bad': {'name': 'Bad', 'base_url': '', 'api_key': '',
                            'models': ['x']}},
-        model_default='bad',
+        provider_defaults={'claude': 'bad'},
         paa_scan_model='haiku',
     )
     mock_result = MagicMock()
@@ -164,10 +164,10 @@ def test_check_semantic_staleness_passes_project_path_to_scan(tmp_path):
     """AI check functions must thread project_path into the scan runner."""
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text('# docs\n')
+    (proj / 'AGENTS.md').write_text('# docs\n')
     settings = Settings(
         providers=_ollama_providers(models=['mini', 'big']),
-        model_default='ollama',
+        provider_defaults={'claude': 'ollama'},
         paa_scan_model='haiku',
         tier_models={'ollama': {'haiku': 'mini'}},
     )
@@ -209,10 +209,10 @@ def test_parse_haiku_response_missing_key():
 def test_check_semantic_staleness_finds_issue(tmp_path):
     proj = tmp_path / 'myproj'
     proj.mkdir()
-    (proj / 'CLAUDE.md').write_text('# Old docs\nReferences `old_module.py`')
+    (proj / 'AGENTS.md').write_text('# Old docs\nReferences `old_module.py`')
     (proj / 'main.py').write_text('print("hello")')
 
-    response_json = '{"issues": [{"summary": "CLAUDE.md references old_module.py which does not exist", "evidence": "old_module.py"}]}'
+    response_json = '{"issues": [{"summary": "AGENTS.md references old_module.py which does not exist", "evidence": "old_module.py"}]}'
     mock_result = MagicMock()
     mock_result.returncode = 0
     mock_result.stdout = _make_claude_json(response_json, 100, 200)
@@ -225,13 +225,28 @@ def test_check_semantic_staleness_finds_issue(tmp_path):
     assert tokens == 300
 
 
-def test_check_semantic_staleness_no_claude_md(tmp_path):
+def test_check_semantic_staleness_no_agents_md(tmp_path):
     proj = tmp_path / 'myproj'
     proj.mkdir()
     settings = Settings()
     items, tokens = check_semantic_staleness('myproj', str(proj), settings)
     assert items == []
     assert tokens == 0
+
+
+def test_check_semantic_staleness_falls_back_to_legacy_claude_md(tmp_path):
+    """When AGENTS.md is absent but legacy CLAUDE.md exists, the audit runs."""
+    proj = tmp_path / 'myproj'
+    proj.mkdir()
+    (proj / 'CLAUDE.md').write_text('# Legacy docs\n')
+    settings = Settings()
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = _make_claude_json('{"issues": []}')
+    with patch('subprocess.run', return_value=mock_result):
+        items, tokens = check_semantic_staleness('myproj', str(proj), settings)
+    assert items == []
+    assert tokens == 150
 
 
 def test_check_dependency_versions_no_manifest(tmp_path):

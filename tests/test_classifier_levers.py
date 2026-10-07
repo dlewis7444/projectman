@@ -20,7 +20,7 @@ def _provider(pid='ollama', base_url='http://localhost:11434', api_key='secret-k
 def test_unset_classifier_temperature_is_omitted():
     """When no classifier temperature is configured, the env dict must NOT
     contain CLAUDE_CODE_AUTO_MODE_TEMPERATURE so CC uses its own default."""
-    s = Settings(providers=_provider(models=['a', 'b']), model_default='ollama')
+    s = Settings(providers=_provider(models=['a', 'b']), provider_defaults={'claude': 'ollama'})
     env, _ = build_spawn_env(s, '/p')
     assert 'CLAUDE_CODE_AUTO_MODE_TEMPERATURE' not in env
 
@@ -28,7 +28,7 @@ def test_unset_classifier_temperature_is_omitted():
 def test_classifier_temperature_present():
     s = Settings(
         providers=_provider(),
-        model_default='ollama',
+        provider_defaults={'claude': 'ollama'},
         classifier_temperature={'ollama': 0.25},
     )
     env, _ = build_spawn_env(s, '/p')
@@ -40,7 +40,7 @@ def test_classifier_temperature_zero_is_emitted():
     as unset."""
     s = Settings(
         providers=_provider(),
-        model_default='ollama',
+        provider_defaults={'claude': 'ollama'},
         classifier_temperature={'ollama': 0.0},
     )
     env, _ = build_spawn_env(s, '/p')
@@ -48,7 +48,7 @@ def test_classifier_temperature_zero_is_emitted():
 
 
 def test_classifier_temperature_unset_omitted():
-    s = Settings(providers=_provider(), model_default='ollama')
+    s = Settings(providers=_provider(), provider_defaults={'claude': 'ollama'})
     env, _ = build_spawn_env(s, '/p')
     assert 'CLAUDE_CODE_AUTO_MODE_TEMPERATURE' not in env
 
@@ -61,7 +61,7 @@ def test_classifier_temperature_resolves_against_override_provider():
             **_provider('ollama', base_url='http://a'),
             **_provider('openrouter', base_url='http://b', models=['or1']),
         },
-        model_default='ollama',
+        provider_defaults={'claude': 'ollama'},
         provider_overrides={'/p': 'openrouter'},
         classifier_temperature={'ollama': 0.1, 'openrouter': 0.9},
     )
@@ -75,7 +75,7 @@ def test_classifier_temperature_scrubs_inherited_parent_env():
     so a stale launcher value doesn't leak into the spawned session."""
     os.environ['CLAUDE_CODE_AUTO_MODE_TEMPERATURE'] = '9.9'
     try:
-        s = Settings(providers=_provider(models=['a']), model_default='ollama')
+        s = Settings(providers=_provider(models=['a']), provider_defaults={'claude': 'ollama'})
         env, _ = build_spawn_env(s, '/p')
         assert 'CLAUDE_CODE_AUTO_MODE_TEMPERATURE' not in env
     finally:

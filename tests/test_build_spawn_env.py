@@ -32,7 +32,7 @@ def test_native_returns_none_env_and_no_reason():
 
 
 def test_per_project_override_to_native_returns_none():
-    s = Settings(providers=_provider(), model_default='ollama',
+    s = Settings(providers=_provider(), provider_defaults={'claude': 'ollama'},
                  provider_overrides={'/p': ''})
     env, reason = build_spawn_env(s, '/p')
     assert env is None
@@ -42,7 +42,7 @@ def test_per_project_override_to_native_returns_none():
 # --- custom provider path ---------------------------------------------------
 
 def test_custom_provider_injects_full_env():
-    s = Settings(providers=_provider(), model_default='ollama')
+    s = Settings(providers=_provider(), provider_defaults={'claude': 'ollama'})
     env, reason = build_spawn_env(s, '/p')
     assert reason is None
     assert env is not None
@@ -55,7 +55,7 @@ def test_custom_provider_injects_full_env():
 
 
 def test_custom_provider_resolves_all_four_tiers():
-    s = Settings(providers=_provider(models=['a', 'b']), model_default='ollama',
+    s = Settings(providers=_provider(models=['a', 'b']), provider_defaults={'claude': 'ollama'},
                  tier_models={'ollama': {'opus': 'b', 'sonnet': 'a', 'haiku': '',
                                          'subagent': ''}})
     env, _ = build_spawn_env(s, '/p')
@@ -71,7 +71,7 @@ def test_custom_provider_resolves_all_four_tiers():
 
 def test_tier_models_empty_uses_provider_first_model():
     s = Settings(providers=_provider(models=['first', 'second']),
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     env, _ = build_spawn_env(s, '/p')
     for tier in ('opus', 'sonnet', 'haiku'):
         key = {'opus': 'ANTHROPIC_DEFAULT_OPUS_MODEL',
@@ -85,7 +85,7 @@ def test_tier_models_empty_uses_provider_first_model():
 def test_custom_provider_inherits_parent_environ():
     os.environ['PM_TEST_PARENT_VAR'] = 'present'
     try:
-        s = Settings(providers=_provider(), model_default='ollama')
+        s = Settings(providers=_provider(), provider_defaults={'claude': 'ollama'})
         env, _ = build_spawn_env(s, '/p')
         assert env['PM_TEST_PARENT_VAR'] == 'present'
     finally:
@@ -96,7 +96,7 @@ def test_per_project_override_to_provider_uses_it():
     s = Settings(providers={**_provider('ollama', base_url='http://a'),
                             **_provider('mistral', base_url='http://b',
                                         models=['m'])},
-                 model_default='ollama',
+                 provider_defaults={'claude': 'ollama'},
                  provider_overrides={'/p': 'mistral'})
     env, _ = build_spawn_env(s, '/p')
     assert env['ANTHROPIC_BASE_URL'] == 'http://b'
@@ -111,7 +111,7 @@ def test_per_provider_tiers_resolve_against_override_provider():
                                         models=['glm', 'kimi']),
                             **_provider('openrouter', base_url='http://b',
                                         models=['or-opus', 'or-sonnet'])},
-                 model_default='',  # native default — TA still applies to overrides
+                 provider_defaults={'claude': ''},  # native default — TA still applies to overrides
                  provider_overrides={'/p': 'openrouter'},
                  tier_models={
                      'ollama': {'opus': 'glm', 'sonnet': 'kimi'},
@@ -130,7 +130,7 @@ def test_per_provider_tiers_resolve_against_override_provider():
 
 def test_subagent_explicit_is_forced():
     """An explicitly-assigned Subagent tier model is emitted (opt-in force)."""
-    s = Settings(providers=_provider(models=['a', 'b']), model_default='ollama',
+    s = Settings(providers=_provider(models=['a', 'b']), provider_defaults={'claude': 'ollama'},
                  tier_models={'ollama': {'subagent': 'a'}})
     env, _ = build_spawn_env(s, '/p')
     assert env['CLAUDE_CODE_SUBAGENT_MODEL'] == 'a'
@@ -141,7 +141,7 @@ def test_subagent_unset_is_scrubbed_from_parent_env():
     (e.g. from a claude-ollama launcher) is scrubbed — no forced subagent."""
     os.environ['CLAUDE_CODE_SUBAGENT_MODEL'] = 'inherited-glm'
     try:
-        s = Settings(providers=_provider(models=['a']), model_default='ollama')
+        s = Settings(providers=_provider(models=['a']), provider_defaults={'claude': 'ollama'})
         env, _ = build_spawn_env(s, '/p')
         assert 'CLAUDE_CODE_SUBAGENT_MODEL' not in env
     finally:
@@ -153,7 +153,7 @@ def test_subagent_stale_value_is_omitted():
     treated as unset → not forced, and any inherited value is scrubbed."""
     os.environ['CLAUDE_CODE_SUBAGENT_MODEL'] = 'inherited'
     try:
-        s = Settings(providers=_provider(models=['a']), model_default='ollama',
+        s = Settings(providers=_provider(models=['a']), provider_defaults={'claude': 'ollama'},
                      tier_models={'ollama': {'subagent': 'gone'}})
         env, _ = build_spawn_env(s, '/p')
         assert 'CLAUDE_CODE_SUBAGENT_MODEL' not in env
@@ -166,7 +166,7 @@ def test_subagent_stale_value_is_omitted():
 def test_tier_model_ids_emitted_verbatim_including_1m():
     """Spawn no longer name-matches glm|deepseek; [1m] must already be stored."""
     s = Settings(providers=_provider(models=['glm-5.2:cloud[1m]', 'other']),
-                 model_default='ollama',
+                 provider_defaults={'claude': 'ollama'},
                  tier_models={'ollama': {
                      'opus': 'glm-5.2:cloud[1m]',
                      'sonnet': 'glm-5.2:cloud[1m]',
@@ -183,7 +183,7 @@ def test_bare_model_id_not_auto_suffixed_at_spawn():
     """Without the stored [1m] flag, spawn leaves the id bare (migration may
     have rewritten load-time settings; in-memory fixtures stay as given)."""
     s = Settings(providers=_provider(models=['qwen-max', 'some-model']),
-                 model_default='ollama',
+                 provider_defaults={'claude': 'ollama'},
                  tier_models={'ollama': {'opus': 'qwen-max', 'sonnet': 'some-model'}})
     env, _ = build_spawn_env(s, '/p')
     assert env['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'qwen-max'
@@ -195,13 +195,13 @@ def test_bare_model_id_not_auto_suffixed_at_spawn():
 def test_max_context_tokens_injected_when_set():
     prov = _provider()
     prov['ollama']['max_context_tokens'] = 200000
-    s = Settings(providers=prov, model_default='ollama')
+    s = Settings(providers=prov, provider_defaults={'claude': 'ollama'})
     env, _ = build_spawn_env(s, '/p')
     assert env['CLAUDE_CODE_MAX_CONTEXT_TOKENS'] == '200000'
 
 
 def test_max_context_tokens_omitted_when_unset():
-    s = Settings(providers=_provider(), model_default='ollama')
+    s = Settings(providers=_provider(), provider_defaults={'claude': 'ollama'})
     env, _ = build_spawn_env(s, '/p')
     assert 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' not in env
 
@@ -209,7 +209,7 @@ def test_max_context_tokens_omitted_when_unset():
 def test_max_context_tokens_scrubs_inherited_parent_env():
     os.environ['CLAUDE_CODE_MAX_CONTEXT_TOKENS'] = '999'
     try:
-        s = Settings(providers=_provider(), model_default='ollama')
+        s = Settings(providers=_provider(), provider_defaults={'claude': 'ollama'})
         env, _ = build_spawn_env(s, '/p')
         assert 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' not in env
     finally:
@@ -226,48 +226,85 @@ def test_native_still_injects_nothing_including_max_context():
 # --- misconfiguration fallback ----------------------------------------------
 
 def test_missing_provider_falls_back_native_with_reason():
-    s = Settings(model_default='ghost')  # provider not defined
-    env, reason = build_spawn_env(s, '/p')
-    assert env is None
-    assert reason is not None
-    assert 'ghost' in reason
-
-
-def test_provider_without_base_url_falls_back_native_with_reason():
+    """A provider dict that exists but has no base_url → fallback reason."""
     s = Settings(providers={'p': {'name': 'P', 'base_url': '', 'api_key': '',
-                                   'models': ['m']}},
-                 model_default='p')
+                                  'models': ['m']}},
+                 provider_defaults={'claude': 'p'})
     env, reason = build_spawn_env(s, '/p')
     assert env is None
     assert reason is not None
     assert 'base_url' in reason
 
 
-# --- aggregate_fallback_notices --------------------------------------------
+def test_stale_default_provider_is_silently_native():
+    """Unknown/stale default pids → native, no fallback event (per-harness
+    stale handling; the default that leaked across harnesses is gone)."""
+    s = Settings(provider_defaults={'claude': 'ghost', 'grok': 'ghost'})
+    assert build_spawn_env(s, '/p') == (None, None)
+    from models import build_grok_spawn_env
+    assert build_grok_spawn_env(s, '/p') == (None, None)
+
+
+def test_provider_without_base_url_falls_back_native_with_reason():
+    s = Settings(providers={'p': {'name': 'P', 'base_url': '', 'api_key': '',
+                                   'models': ['m']}},
+                 provider_defaults={'claude': 'p'})
+    env, reason = build_spawn_env(s, '/p')
+    assert env is None
+    assert reason is not None
+    assert 'base_url' in reason
+
+
+# --- aggregate_fallback_notices (per-harness; grok never toasts "native Claude") ---
 
 def test_aggregate_empty_returns_none():
     assert aggregate_fallback_notices([]) is None
 
 
 def test_aggregate_single_project_verbatim_format():
-    text = aggregate_fallback_notices([('proj', 'provider X has no base_url')])
+    text = aggregate_fallback_notices(
+        [('proj', 'provider X has no base_url', 'Claude')])
     assert text == ('provider unavailable — running native Claude. '
                     'provider X has no base_url')
 
 
 def test_aggregate_same_reason_collapses():
-    events = [('a', 'r1'), ('b', 'r1'), ('c', 'r1')]
+    events = [('a', 'r1', 'Claude'), ('b', 'r1', 'Claude'), ('c', 'r1', 'Claude')]
     text = aggregate_fallback_notices(events)
     assert text == ('provider unavailable — 3 projects running native Claude. r1')
 
 
 def test_aggregate_distinct_reasons_return_list():
-    events = [('a', 'r1'), ('b', 'r2')]
+    events = [('a', 'r1', 'Claude'), ('b', 'r2', 'Claude')]
     out = aggregate_fallback_notices(events)
     assert isinstance(out, list)
     assert len(out) == 2
     assert ('provider unavailable — running native Claude. r1') in out
     assert ('provider unavailable — running native Claude. r2') in out
+
+
+def test_aggregate_grok_event_names_grok():
+    """A grok fallback says 'running native Grok Build' — never Claude."""
+    text = aggregate_fallback_notices(
+        [('proj', "provider 'ollama' has no base_url", 'Grok Build')])
+    assert text == ("provider unavailable — running native Grok Build. "
+                    "provider 'ollama' has no base_url")
+
+
+def test_aggregate_same_reason_different_harness_split():
+    events = [('a', 'r1', 'Claude'), ('b', 'r1', 'Grok Build')]
+    out = aggregate_fallback_notices(events)
+    assert isinstance(out, list)
+    assert len(out) == 2
+    assert 'provider unavailable — running native Claude. r1' in out
+    assert 'provider unavailable — running native Grok Build. r1' in out
+
+
+def test_aggregate_bare_two_tuple_defaults_to_claude():
+    """Back-compat: a legacy (name, reason) event renders as Claude."""
+    text = aggregate_fallback_notices([('proj', 'provider X has no base_url')])
+    assert text == ('provider unavailable — running native Claude. '
+                    'provider X has no base_url')
 
 
 def test_all_tiers_canonical():
@@ -278,11 +315,11 @@ def test_fable_tier_env_emitted():
     """The Fable tier is wired like the others: build_spawn_env emits
     ANTHROPIC_DEFAULT_FABLE_MODEL. Unset → the provider's first model."""
     s = Settings(providers=_provider(models=['glm-5.2:cloud[1m]', 'kimi']),
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     env, _ = build_spawn_env(s, '/p')
     assert env['ANTHROPIC_DEFAULT_FABLE_MODEL'] == 'glm-5.2:cloud[1m]'
     # Explicit Fable assignment is honored verbatim.
     s2 = Settings(providers=_provider(models=['glm-5.2:cloud[1m]', 'kimi']),
-                  model_default='ollama', tier_models={'ollama': {'fable': 'kimi'}})
+                  provider_defaults={'claude': 'ollama'}, tier_models={'ollama': {'fable': 'kimi'}})
     e2, _ = build_spawn_env(s2, '/p')
     assert e2['ANTHROPIC_DEFAULT_FABLE_MODEL'] == 'kimi'

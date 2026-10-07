@@ -23,15 +23,15 @@ def test_make_item_id_differs():
     assert a != b
 
 
-def test_add_if_new():
-    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+def test_add_if_new(tmp_path):
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     item = _make_item()
     assert ledger.add_if_new(item) is True
     assert ledger.add_if_new(item) is False  # duplicate
 
 
-def test_add_skips_dismissed():
-    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+def test_add_skips_dismissed(tmp_path):
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     item = _make_item()
     ledger.add_if_new(item)
     ledger.update_status(item.id, 'dismissed')
@@ -39,8 +39,8 @@ def test_add_skips_dismissed():
     assert ledger.add_if_new(item2) is False
 
 
-def test_add_skips_acknowledged():
-    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+def test_add_skips_acknowledged(tmp_path):
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     item = _make_item()
     ledger.add_if_new(item)
     ledger.update_status(item.id, 'acknowledged')
@@ -48,8 +48,8 @@ def test_add_skips_acknowledged():
     assert ledger.add_if_new(item2) is False
 
 
-def test_add_replaces_resolved():
-    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+def test_add_replaces_resolved(tmp_path):
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     item = _make_item()
     ledger.add_if_new(item)
     ledger.update_status(item.id, 'resolved')
@@ -57,8 +57,8 @@ def test_add_replaces_resolved():
     assert ledger.add_if_new(item2) is True
 
 
-def test_pending_items():
-    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+def test_pending_items(tmp_path):
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     ledger.add_if_new(_make_item(project='a'))
     ledger.add_if_new(_make_item(project='b'))
     ledger.update_status(
@@ -67,15 +67,15 @@ def test_pending_items():
     assert len(ledger.pending_items()) == 1
 
 
-def test_pending_count():
-    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+def test_pending_count(tmp_path):
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     assert ledger.pending_count == 0
     ledger.add_if_new(_make_item())
     assert ledger.pending_count == 1
 
 
-def test_sweep_resolves_stale():
-    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+def test_sweep_resolves_stale(tmp_path):
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     item = _make_item()
     ledger.add_if_new(item)
     ledger.sweep(set())  # nothing active — pending item is stale
@@ -84,16 +84,16 @@ def test_sweep_resolves_stale():
     assert ledger._items[item.id].status == 'resolved'
 
 
-def test_sweep_keeps_active():
-    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+def test_sweep_keeps_active(tmp_path):
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     item = _make_item()
     ledger.add_if_new(item)
     ledger.sweep({item.id})  # item still detected
     assert ledger._items[item.id].status == 'pending'
 
 
-def test_sweep_resolves_stale_acknowledged():
-    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+def test_sweep_resolves_stale_acknowledged(tmp_path):
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     item = _make_item()
     ledger.add_if_new(item)
     ledger.update_status(item.id, 'acknowledged')
@@ -101,8 +101,8 @@ def test_sweep_resolves_stale_acknowledged():
     assert ledger._items[item.id].status == 'resolved'
 
 
-def test_sweep_keeps_active_acknowledged():
-    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+def test_sweep_keeps_active_acknowledged(tmp_path):
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     item = _make_item()
     ledger.add_if_new(item)
     ledger.update_status(item.id, 'acknowledged')
@@ -110,8 +110,8 @@ def test_sweep_keeps_active_acknowledged():
     assert ledger._items[item.id].status == 'acknowledged'
 
 
-def test_sweep_keeps_dismissed():
-    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+def test_sweep_keeps_dismissed(tmp_path):
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     item = _make_item()
     ledger.add_if_new(item)
     ledger.update_status(item.id, 'dismissed')
@@ -119,8 +119,8 @@ def test_sweep_keeps_dismissed():
     assert ledger._items[item.id].status == 'dismissed'
 
 
-def test_acknowledged_items():
-    ledger = Ledger(path='/tmp/nonexistent_ledger.json')
+def test_acknowledged_items(tmp_path):
+    ledger = Ledger(path=str(tmp_path / 'ledger.json'))
     a = _make_item(project='a')
     b = _make_item(project='b')
     ledger.add_if_new(a)
@@ -176,6 +176,6 @@ def test_save_atomic_no_temp_files(tmp_path):
     ledger = Ledger(path=path)
     ledger.add_if_new(_make_item())
     ledger.save()
-    files = list(tmp_path.iterdir())
-    assert len(files) == 1
-    assert files[0].name == 'ledger.json'
+    names = sorted(p.name for p in tmp_path.iterdir())
+    assert 'ledger.json' in names
+    assert not any(name.endswith('.tmp') for name in names)

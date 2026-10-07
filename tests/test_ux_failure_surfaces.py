@@ -173,6 +173,57 @@ def test_on_spawn_failed_fires_one_dialog_then_dedups(monkeypatch):
     assert fake._sidebar.states == []
 
 
+def test_spawn_failure_binary_treats_ssh_as_transparent_transport():
+    """SSH rewrites argv[0] to 'ssh'; messaging must still name the harness
+    binary on the remote host, not the local ssh client."""
+    from window import AppWindow
+    fake = _win(Settings())
+    assert AppWindow._spawn_failure_binary(fake, 'kimi', 'ssh') == 'kimi'
+
+
+def test_on_spawn_failed_zellij_missing_shows_toast_not_harness_dialog(monkeypatch):
+    """A failed zellij client spawn must not blame the harness: toast about
+    zellij, no install dialog, and the Active-Only filter still drops."""
+    from window import AppWindow
+    toasts = []
+    dialogs = []
+    sb = _Sidebar()
+    fake = _win(Settings(), sidebar=sb)
+    fake._show_toast = lambda text, timeout=5: toasts.append(text)
+    monkeypatch.setattr(
+        'harness_install_dialog.present_harness_install_dialog',
+        lambda parent, recovery, on_copied=None: dialogs.append(recovery),
+    )
+    AppWindow._on_spawn_failed(fake, '/p', 'kimi', 'zellij')
+    assert dialogs == []
+    assert sb.active_only_calls == [(False, '/p', None)]
+    assert len(toasts) == 1
+    assert 'zellij' in toasts[0]
+    assert 'sudo dnf install zellij' in toasts[0]
+
+
+def test_on_spawn_failed_zellij_missing_does_not_poison_harness_warning(monkeypatch):
+    """Because the zellij miss is not a harness failure, it must not consume
+    the harness's one-shot dialog warning — a later real harness miss still
+    shows the install dialog."""
+    from window import AppWindow
+    toasts = []
+    dialogs = []
+    fake = _win(Settings())
+    fake._show_toast = lambda text, timeout=5: toasts.append(text)
+    monkeypatch.setattr(
+        'harness_install_dialog.present_harness_install_dialog',
+        lambda parent, recovery, on_copied=None: dialogs.append(recovery),
+    )
+    AppWindow._on_spawn_failed(fake, '/p', 'kimi', 'zellij')
+    AppWindow._on_spawn_failed(fake, '/p', 'kimi', 'zellij')  # not deduped
+    AppWindow._on_spawn_failed(fake, '/p', 'kimi', 'kimi')    # harness miss
+    assert len(toasts) == 2
+    assert all('zellij' in t for t in toasts)
+    assert len(dialogs) == 1
+    assert dialogs[0].dialog_title == 'Kimi Code not installed'
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # M-UX.10b/c — active-only timing (window, unbound)
 # ════════════════════════════════════════════════════════════════════════════
@@ -591,7 +642,7 @@ def test_project_created_toast_names_the_only_harness(tmp_path):
     from window import AppWindow
     # A Settings with a stale provider id in model_default does NOT leak into
     # the toast — effective_harness ignores it and the suffix is gone anyway.
-    s = Settings(model_default='ghost-provider')
+    s = Settings(provider_defaults={'claude': 'ghost-provider'})
     fake = types.SimpleNamespace(_settings=s, _store=_store_for(str(tmp_path)))
     text = AppWindow._project_created_toast_text(fake, 'p')
     assert text == "New project 'p'"

@@ -28,7 +28,7 @@ def test_old_model_default_slashes_split_into_provider_and_tiers():
     s = Settings(providers={
         'ollama': {'name': 'O', 'base_url': 'http://x', 'api_key': 'k',
                    'models': {'glm': {'name': 'GLM'}}}
-    }, model_default='ollama/glm')
+    }, provider_defaults={'claude': 'ollama/glm'})
     s._migrate_old_model_shape()
     assert s.model_default == 'ollama'
     # Legacy glm|deepseek auto-[1m] migration rewrites the list + tier pins.
@@ -58,7 +58,7 @@ def test_tier_models_scrubbed_when_not_on_active_provider():
     s = Settings(providers={
         'ollama': {'name': 'O', 'base_url': 'http://x', 'api_key': 'k',
                    'models': ['glm']}},
-        model_default='ollama',
+        provider_defaults={'claude': 'ollama'},
         tier_models={'opus': 'gone', 'sonnet': 'glm', 'haiku': 'glm',
                      'subagent': 'glm'})
     s._migrate_old_model_shape()
@@ -71,7 +71,7 @@ def test_tier_models_scrubbed_when_not_on_active_provider():
 def test_tier_models_dropped_when_native_default_and_no_providers():
     # Native default + no custom provider → nothing to fold the legacy global
     # tiers into, so they're dropped (they were inert under native anyway).
-    s = Settings(model_default='',
+    s = Settings(provider_defaults={'claude': ''},
                  tier_models={'opus': 'x', 'sonnet': 'y'})
     s._migrate_old_model_shape()
     assert s.tier_models == {}
@@ -84,7 +84,7 @@ def test_legacy_global_tier_models_fold_into_default_when_custom():
                    'models': ['glm', 'qwen']},
         'openrouter': {'name': 'OR', 'base_url': 'http://y', 'api_key': 'k2',
                        'models': ['m']}},
-        model_default='ollama',
+        provider_defaults={'claude': 'ollama'},
         tier_models={'opus': 'glm', 'sonnet': '', 'haiku': '', 'subagent': ''})
     s._migrate_old_model_shape()
     assert set(s.tier_models.keys()) == {'ollama'}   # not spread to openrouter
@@ -100,7 +100,7 @@ def test_legacy_global_tier_models_fold_into_first_custom_when_native_default():
                    'models': ['glm']},
         'openrouter': {'name': 'OR', 'base_url': 'http://y', 'api_key': 'k2',
                        'models': ['m']}},
-        model_default='',
+        provider_defaults={'claude': ''},
         tier_models={'opus': 'glm', 'sonnet': 'glm', 'haiku': '',
                      'subagent': ''})
     s._migrate_old_model_shape()
@@ -136,7 +136,7 @@ def test_new_shape_passes_through_unchanged():
     s = Settings(providers={
         'ollama': {'name': 'O', 'base_url': 'http://x', 'api_key': 'k',
                    'models': ['glm', 'qwen']}},
-        model_default='ollama',
+        provider_defaults={'claude': 'ollama'},
         provider_overrides={'/p': 'ollama'},
         model_pins={'/q': 'kimi'},
         tier_models={'ollama': {'opus': 'qwen', 'sonnet': '', 'haiku': '',
@@ -155,7 +155,7 @@ def test_new_shape_passes_through_unchanged():
 def test_malformed_old_shape_degrades_to_defaults():
     # providers value not a dict, models not a list/dict, weird tier value
     s = Settings(providers={'bad': 'x'},
-                 model_default=123,
+                 provider_defaults={'claude': 123},
                  tier_models={'opus': 9})
     # must not raise
     s._migrate_old_model_shape()
@@ -194,7 +194,7 @@ def test_legacy_1m_migration_appends_suffix_and_rewrites_tiers():
     s = Settings(providers={
         'ollama': {'name': 'O', 'base_url': 'http://x', 'api_key': 'k',
                    'models': ['glm-5.2:cloud', 'deepseek-v3', 'kimi']}},
-        model_default='ollama',
+        provider_defaults={'claude': 'ollama'},
         tier_models={'ollama': {
             'opus': 'glm-5.2:cloud', 'sonnet': 'kimi', 'haiku': '',
             'subagent': '', 'fable': 'deepseek-v3',
@@ -211,7 +211,7 @@ def test_legacy_1m_migration_idempotent_when_already_suffixed():
     s = Settings(providers={
         'ollama': {'name': 'O', 'base_url': 'http://x', 'api_key': 'k',
                    'models': ['glm-5.2:cloud[1m]']}},
-        model_default='ollama',
+        provider_defaults={'claude': 'ollama'},
         tier_models={'ollama': {
             'opus': 'glm-5.2:cloud[1m]', 'sonnet': '', 'haiku': '',
             'subagent': '', 'fable': '',

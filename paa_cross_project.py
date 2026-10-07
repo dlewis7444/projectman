@@ -126,15 +126,19 @@ def check_stale_projects(projects, settings):
 
 
 def check_cross_references(projects):
-    """Check CLAUDE.md files for broken references to sibling projects."""
+    """Check AGENTS.md (or legacy CLAUDE.md) files for broken references to sibling projects."""
     known_names = {p.name for p in projects}
     items = []
     for project in projects:
-        claude_md = os.path.join(project.path, 'CLAUDE.md')
-        if not os.path.isfile(claude_md):
+        rules_path = os.path.join(project.path, 'AGENTS.md')
+        rules_file = 'AGENTS.md'
+        if not os.path.isfile(rules_path):
+            rules_path = os.path.join(project.path, 'CLAUDE.md')
+            rules_file = 'CLAUDE.md'
+        if not os.path.isfile(rules_path):
             continue
         try:
-            with open(claude_md, 'r') as f:
+            with open(rules_path, 'r') as f:
                 text = f.read()
         except OSError:
             continue
@@ -148,7 +152,7 @@ def check_cross_references(projects):
                 continue  # valid reference
             if os.path.exists(ref_path):
                 continue  # path exists even if not a project
-            # Monorepo pattern: a CLAUDE.md may show commands run from
+            # Monorepo pattern: an AGENTS.md may show commands run from
             # subdirectories (`cd sub && ../bin/foo`). If the name matches
             # a top-level entry inside the project itself, `../<name>` is
             # almost certainly relative-to-subdir, not cross-project.
@@ -160,8 +164,8 @@ def check_cross_references(projects):
                 type='xp-broken-reference',
                 project=project.name,
                 project_path=project.path,
-                summary=f'{project.name}/CLAUDE.md references missing sibling: {ref_text}',
-                evidence=f'Reference to {ref_text} in CLAUDE.md — target not found',
+                summary=f'{project.name}/{rules_file} references missing sibling: {ref_text}',
+                evidence=f'Reference to {ref_text} in {rules_file} — target not found',
                 severity='warning',
                 created=now_iso(),
             ))
@@ -232,7 +236,8 @@ def check_shared_dep_conflicts(projects, settings):
                 'Set "critical" to true ONLY for known CVEs or confirmed incompatibilities.\n'
                 'If all conflicts are benign version range differences: {"issues": []}'
             )
-            # Cross-project: no single project pin — use global model_default.
+            # Cross-project: no single project pin — use claude's global
+            # default provider (per-harness defaults; claude is the scan harness).
             response, tokens = _run_scan_model(prompt, settings, project_path='')
             if response:
                 ai_issues = _parse_haiku_response(response)

@@ -38,14 +38,14 @@ class FakeSettings:
     resolved_projects_dir: str = '/tmp'
 
 
-def _make_project(tmp_path, name, with_git=True, claude_md=None, manifest=None):
+def _make_project(tmp_path, name, with_git=True, agents_md=None, manifest=None):
     """Create a project dir and return a FakeProject."""
     proj = tmp_path / name
     proj.mkdir(exist_ok=True)
     if with_git:
         (proj / '.git').mkdir()
-    if claude_md:
-        (proj / 'CLAUDE.md').write_text(claude_md)
+    if agents_md:
+        (proj / 'AGENTS.md').write_text(agents_md)
     if manifest:
         for filename, content in manifest.items():
             (proj / filename).write_text(content)
@@ -148,7 +148,7 @@ def test_custom_threshold(tmp_path):
 # ── check_cross_references tests ─────────────────────────────────────────
 
 def test_broken_relative_reference(tmp_path):
-    p = _make_project(tmp_path, 'alpha', claude_md='See ../nonexistent/ for details')
+    p = _make_project(tmp_path, 'alpha', agents_md='See ../nonexistent/ for details')
     items = check_cross_references([p])
     assert len(items) == 1
     assert items[0].type == 'xp-broken-reference'
@@ -157,12 +157,12 @@ def test_broken_relative_reference(tmp_path):
 
 def test_valid_relative_reference(tmp_path):
     sibling = _make_project(tmp_path, 'sibling')
-    p = _make_project(tmp_path, 'alpha', claude_md='See ../sibling/ for details')
+    p = _make_project(tmp_path, 'alpha', agents_md='See ../sibling/ for details')
     items = check_cross_references([p, sibling])
     assert len(items) == 0
 
 
-def test_no_claude_md_skipped(tmp_path):
+def test_no_agents_md_skipped(tmp_path):
     p = _make_project(tmp_path, 'bare')
     items = check_cross_references([p])
     assert len(items) == 0
@@ -175,11 +175,21 @@ def test_monorepo_relative_reference_skipped(tmp_path):
     p = _make_project(
         tmp_path,
         'alpha',
-        claude_md='From inside the `sub/` package, run `../bin/build.sh`.\n',
+        agents_md='From inside the `sub/` package, run `../bin/build.sh`.\n',
     )
     os.mkdir(os.path.join(p.path, 'bin'))
     items = check_cross_references([p])
     assert len(items) == 0, f'unexpected items: {[i.summary for i in items]}'
+
+
+def test_cross_references_fall_back_to_legacy_claude_md(tmp_path):
+    """When AGENTS.md is absent but legacy CLAUDE.md exists, sibling refs are checked."""
+    p = _make_project(tmp_path, 'alpha')
+    (tmp_path / 'alpha' / 'CLAUDE.md').write_text('See ../missing-sibling/ for details')
+    items = check_cross_references([p])
+    assert len(items) == 1
+    assert items[0].type == 'xp-broken-reference'
+    assert 'CLAUDE.md' in items[0].summary
 
 
 # ── check_shared_dep_conflicts tests ──────────────────────────────────────

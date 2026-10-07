@@ -103,6 +103,31 @@ def test_filter_remote_export_env_strips_home():
     assert 'SECRET_JUNK' not in out
 
 
+def test_filter_remote_export_env_keeps_grok_provider_keys():
+    """Grok custom providers ride env-only: the endpoint keys + managed home
+    cross the SSH boundary, exact-match (the huge GROK_* surface must not)."""
+    from ssh_transport import filter_remote_export_env
+    env = {
+        'HOME': '/home/user',
+        'GROK_MODELS_BASE_URL': 'http://localhost:11434/v1',
+        'XAI_API_KEY': 'dummy',
+        'GROK_HOME': '/home/user/.ProjectMan/grok-homes/ollama',
+        'GROK_CLAUDE_MCPS_ENABLED': '0',   # headless-only local switch
+        'GROK_CURSOR_MCPS_ENABLED': '0',
+        'GROK_SOME_OTHER_FLAG': 'x',
+        'SECRET_JUNK': 'nope',
+    }
+    out = filter_remote_export_env(env)
+    assert out['GROK_MODELS_BASE_URL'] == 'http://localhost:11434/v1'
+    assert out['XAI_API_KEY'] == 'dummy'
+    assert out['GROK_HOME'] == '/home/user/.ProjectMan/grok-homes/ollama'
+    assert 'HOME' not in out
+    assert 'GROK_CLAUDE_MCPS_ENABLED' not in out
+    assert 'GROK_CURSOR_MCPS_ENABLED' not in out
+    assert 'GROK_SOME_OTHER_FLAG' not in out
+    assert 'SECRET_JUNK' not in out
+
+
 def test_remote_status_cwd_maps_to_project_name():
     """Only …/.ProjectMan/projects/<name> cwds map; bare home does not."""
     marker = '/.ProjectMan/projects/'
@@ -204,7 +229,7 @@ def test_settings_load_normalizes_hosts_and_overrides(tmp_path):
     assert s.harness_overrides.get('local:/proj/a') == 'grok'
     assert s.effective_harness('/proj/a') == 'grok'
     # ollama not in providers → stale pin falls back to model_default ('')
-    assert s.effective_provider('/proj/a') == ''
+    assert s.effective_provider('/proj/a', 'claude') == ''
     assert s.provider_overrides.get('local:/proj/a') == 'ollama'
     assert s.effective_model('/proj/a') == 'qwen'
     assert s.remote_health_interval_sec == 15

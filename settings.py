@@ -212,14 +212,18 @@ class Settings:
     #   ``max_context_tokens`` injects CLAUDE_CODE_MAX_CONTEXT_TOKENS on spawn
     #   for that custom provider only (native Anthropic is untouched).
     providers: dict = field(default_factory=dict)
-    # model_default: provider_id | ''  — global default provider ('' = native).
-    # Historical name; this is the default *provider* axis, not a model id.
-    model_default: str = ''
+    # provider_defaults: {harness_id: provider_id} — per-harness DEFAULT
+    # provider ('' / absent = that harness's native backend). Provider choice
+    # is per-harness: claude's default must not leak onto grok (the
+    # "all grok sessions defaulted to claude's Ollama" bug, 2026-10-05).
+    # Edited on the Settings → Harness page ("Active Provider"); the Models
+    # page no longer carries a global default.
+    provider_defaults: dict = field(default_factory=dict)
     # --- Dual axes (1.4.1): provider vs model, harness-agnostic storage ---
     # provider_overrides: {project_path: provider_id | ''}
-    #   Absent → follow model_default. '' → explicit native. Custom id →
-    #   Settings.providers[id]. Today Claude uses this heavily; future: all
-    #   harnesses may honor custom providers.
+    #   Absent → follow provider_defaults[effective harness]. '' → explicit
+    #   native. Custom id → Settings.providers[id]. Shared across harnesses:
+    #   an override is pinned to the PROJECT, whichever harness it runs.
     provider_overrides: dict = field(default_factory=dict)
     # model_pins: {project_path: model_id}
     #   Absent → harness/provider default model. Present → adapters may pass
@@ -312,29 +316,71 @@ class Settings:
             return val or self.harness_default
         return self.harness_default
 
-    def effective_provider(self, project_path: str = '', host_id: str = 'localhost') -> str:
+    @property
+    def model_default(self) -> str:
+        """Deprecated alias for ``provider_defaults.get('claude', '')``.
+
+        The old GLOBAL default provider (every harness inherited it — the
+        bug where unpinned grok projects ran on claude's Ollama). Migrated
+        one-shot in load() to provider_defaults['claude']; kept as a property
+        so legacy readers/writers keep compiling while meaning claude only.
+        Never persisted (asdict skips properties).
+        """
+        pd = self.provider_defaults if isinstance(self.provider_defaults, dict) else {}
+        v = pd.get('claude', '')
+        return v if isinstance(v, str) else ''
+
+    @model_default.setter
+    def model_default(self, value) -> None:
+        pd = dict(self.provider_defaults) if isinstance(self.provider_defaults, dict) else {}
+        if isinstance(value, str) and value:
+            pd['claude'] = value
+        else:
+            pd.pop('claude', None)
+        self.provider_defaults = pd
+
+    def set_provider_default(self, harness_id: str, provider_id: str) -> None:
+        """Set the default provider for a harness ('' = native) and save.
+
+        The Harness page "Active Provider" combo writes through here.
+        Atomic via Settings.save (tempfile + os.replace)."""
+        pd = dict(self.provider_defaults) if isinstance(self.provider_defaults, dict) else {}
+        if provider_id:
+            pd[harness_id] = provider_id
+        else:
+            pd.pop(harness_id, None)
+        self.provider_defaults = pd
+        self.save()
+
+    def effective_provider(self, project_path: str, harness_id: str,
+                           host_id: str = 'localhost') -> str:
         """Return the active provider_id for a project ('' = native).
 
-        Per-project ``provider_overrides`` wins when the key is present.
-        ``''`` explicitly pins native. A non-empty pin that is not a known
-        provider id is treated as stale (fall back to ``model_default``).
+        The harness id is EXPLICIT (no default — a silent default is how the
+        cross-harness leak happened): the per-harness default provider comes
+        from ``provider_defaults[harness_id]``, never a global.
+
+        Per-project ``provider_overrides`` wins when the key is present
+        ('' = explicit native). A non-empty pin — override or default — that
+        is not a known provider id is stale: native.
         """
         from hosts import lookup_override, LOCALHOST_ID
         hid = host_id or LOCALHOST_ID
+        providers = self.providers if isinstance(self.providers, dict) else {}
         val, found = lookup_override(
             self.provider_overrides if isinstance(self.provider_overrides, dict)
             else None,
             hid, project_path,
         )
         if found:
-            if not isinstance(val, str):
-                return self.model_default or ''
-            if val == '':
-                return ''
-            if isinstance(self.providers, dict) and val in self.providers:
+            if isinstance(val, str) and val and val in providers:
                 return val
-            return self.model_default or ''
-        return self.model_default or ''
+            return ''
+        pd = self.provider_defaults if isinstance(self.provider_defaults, dict) else {}
+        dflt = pd.get(harness_id)
+        if isinstance(dflt, str) and dflt and dflt in providers:
+            return dflt
+        return ''
 
     def effective_model(self, project_path: str = '', host_id: str = 'localhost') -> str:
         """Per-project model pin (Grok/OpenCode ``-m`` today; harness-agnostic).
@@ -355,26 +401,37 @@ class Settings:
         """Opaque spawn-time signature for restart-staleness checks.
 
         Claude today is provider-shaped; Grok/OpenCode are model-pin-shaped.
-        Storage remains dual-axis so future multi-harness custom providers can
-        use both without another settings rewrite.
+        Grok (2026-10-05, custom providers) is BOTH: the signature combines
+        provider + model so a change to either prompts a restart-staleness
+        toast, exactly like claude's provider axis does. Storage remains
+        dual-axis so future multi-harness custom providers can use both
+        without another settings rewrite.
         """
-        if self.effective_harness(project_path) == 'claude':
-            return self.effective_provider(project_path)
+        harness = self.effective_harness(project_path)
+        if harness in _PROVIDER_AXIS_HARNESSES:
+            provider = self.effective_provider(project_path, harness)
+            if harness == 'grok':
+                return f'{provider}\x00{self.effective_model(project_path)}'
+            return provider
         return self.effective_model(project_path)
 
     def uses_custom_provider(self, project_path: str = '') -> bool:
-        """True if the effective provider for this project has a base_url
-        (i.e. spawn needs env injection rather than native Anthropic)."""
-        pid = self.effective_provider(project_path)
+        """True if the effective provider for this project (under its
+        EFFECTIVE harness) has a base_url (spawn needs env injection rather
+        than the native backend)."""
+        harness = self.effective_harness(project_path)
+        pid = self.effective_provider(project_path, harness)
         if not pid:
             return False
         prov = self.providers.get(pid) if isinstance(self.providers, dict) else None
         return isinstance(prov, dict) and bool(prov.get('base_url'))
 
     def any_custom_provider_active(self) -> bool:
-        """True if the global default or any per-project provider override
-        names a provider that has a base_url (env injection on its spawns)."""
-        candidates = [self.model_default]
+        """True if any per-harness default or per-project override names a
+        provider that has a base_url (env injection on its spawns)."""
+        candidates = []
+        if isinstance(self.provider_defaults, dict):
+            candidates.extend(self.provider_defaults.values())
         if isinstance(self.provider_overrides, dict):
             candidates.extend(self.provider_overrides.values())
         for pid in candidates:
@@ -402,6 +459,19 @@ class Settings:
                 data['harness_overrides'] = data['agent_overrides']
             # Legacy dual-use model_overrides (pre-1.4.1) — migrate after construct.
             legacy_mo = data.get('model_overrides')
+            # Per-harness provider defaults (2026-10-05): the old GLOBAL
+            # model_default was semantically Claude's (the Models-page combo
+            # was labeled "Default Provider, Claude Code") — migrate it
+            # one-shot into provider_defaults['claude']. model_default is no
+            # longer a persisted field (asdict skips the compat property).
+            raw_md = data.get('model_default')
+            if isinstance(raw_md, str) and raw_md:
+                pd = data.get('provider_defaults')
+                if not isinstance(pd, dict):
+                    pd = {}
+                if 'claude' not in pd:
+                    pd['claude'] = raw_md
+                data['provider_defaults'] = pd
             known = {k: v for k, v in data.items()
                      if k in cls.__dataclass_fields__}
             inst = cls(**known)
@@ -409,6 +479,7 @@ class Settings:
                 inst._legacy_model_overrides = legacy_mo
             inst._migrate_claude_binary()
             inst._migrate_old_model_shape()
+            inst._migrate_provider_defaults()
             inst._migrate_host_axis()
             # Sanitize VTE capture map (drop garbage entries; keep explicit empty).
             # Then fill harness keys missing from a partial map so upgrades pick
@@ -431,6 +502,21 @@ class Settings:
             return inst
         except (json.JSONDecodeError, TypeError):
             return cls()
+
+    def _migrate_provider_defaults(self) -> None:
+        """Normalize the per-harness provider-defaults map (2026-10-05):
+        dict with string values only, unknown harness ids dropped only when
+        they collide with nothing (kept — a default for a not-yet-registered
+        harness is inert). Stale provider ids are left for
+        effective_provider to treat as native at read time."""
+        if not isinstance(self.provider_defaults, dict):
+            self.provider_defaults = {}
+            return
+        self.provider_defaults = {
+            str(h): (v if isinstance(v, str) else '')
+            for h, v in self.provider_defaults.items()
+            if isinstance(h, str) and h
+        }
 
     def _migrate_claude_binary(self) -> None:
         """Mirror a legacy ``claude_binary`` into ``harnesses['claude']['binary']``.
@@ -839,8 +925,20 @@ class Settings:
         os.makedirs(dir_path, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix='.tmp')
         try:
+            payload = asdict(self)
+            # Old-app interop (round 6): a still-running pre-round-5 instance
+            # keeps ``model_default`` as a real field and rewrites this file
+            # from its (stale) memory on every save. Mirroring claude's
+            # current default keeps that field consistent for it — and a
+            # stale value can no longer resurrect a cleared claude default
+            # through the one-shot load migration. Other harnesses' defaults
+            # have no legacy key; an old save drops them (grok's default
+            # self-heals to native — the safe direction; see CHANGELOG).
+            pd = payload.get('provider_defaults')
+            payload['model_default'] = \
+                pd.get('claude', '') if isinstance(pd, dict) else ''
             with os.fdopen(fd, 'w') as f:
-                json.dump(asdict(self), f, indent=2)
+                json.dump(payload, f, indent=2)
             os.replace(tmp_path, path)
             # settings.json holds provider API keys in cleartext — keep it private.
             try:
@@ -860,25 +958,29 @@ class Settings:
 # owned axis is snapshotted into harness_axis_memory; on return, that axis is
 # restored into the flat maps (the other axis is cleared for the project).
 
-# Hardcoded to avoid circular imports with harnesses.ADAPTERS. Unknown ids are
-# not treated as model-pin harnesses (see apply_project_axes).
-_PROVIDER_AXIS_HARNESS = 'claude'
+# Hardcoded to avoid circular imports with harnesses.ADAPTERS. Unknown ids own
+# no axis (see apply_project_axes). Grok owns BOTH axes since 2026-10-05
+# (custom provider env + explicit -m model); claude owns provider; opencode/
+# kimi own model only.
+_PROVIDER_AXIS_HARNESSES = frozenset({'claude', 'grok'})
 _MODEL_AXIS_HARNESSES = frozenset({'grok', 'opencode', 'kimi'})
 
 
 def snapshot_project_axes(settings: 'Settings', project_path: str,
                           host_id: str = 'localhost',
                           harness_id: str = '') -> dict:
-    """Capture the axis this harness *owns* from flat provider/model maps.
+    """Capture the axes this harness *owns* from flat provider/model maps.
 
     Ownership-filtered (matches apply_project_axes):
       * ``claude`` — snapshot ``provider`` only (omit model even if pinned)
-      * ``grok`` / ``opencode`` / ``kimi`` — snapshot ``model`` only
+      * ``grok`` — snapshot ``provider`` AND ``model``
+      * ``opencode`` / ``kimi`` — snapshot ``model`` only
         (omit provider even if overridden)
       * unknown harness id — empty dict (nothing ownership-scoped)
 
     Encoding (lazy keys):
-      * no provider_overrides key → omit ``provider`` (follow model_default)
+      * no provider_overrides key → omit ``provider`` (follow the harness's
+        provider default)
       * provider_overrides == ''  → ``"provider": ""`` (explicit native)
       * provider_overrides == id  → ``"provider": id``
       * no model_pins key / empty → omit ``model``
@@ -887,13 +989,13 @@ def snapshot_project_axes(settings: 'Settings', project_path: str,
     from hosts import lookup_override, LOCALHOST_ID
     hid = host_id or LOCALHOST_ID
     entry: dict = {}
-    if harness_id == _PROVIDER_AXIS_HARNESS:
+    if harness_id in _PROVIDER_AXIS_HARNESSES:
         po = settings.provider_overrides if isinstance(
             settings.provider_overrides, dict) else None
         val, found = lookup_override(po, hid, project_path)
         if found and isinstance(val, str):
             entry['provider'] = val
-    elif harness_id in _MODEL_AXIS_HARNESSES:
+    if harness_id in _MODEL_AXIS_HARNESSES:
         mp = settings.model_pins if isinstance(
             settings.model_pins, dict) else None
         val, found = lookup_override(mp, hid, project_path)
@@ -926,8 +1028,9 @@ def apply_project_axes(settings: 'Settings', project_path: str, host_id: str,
 
     Ownership (today):
       * ``claude`` — restore provider_overrides only; clear model_pins
-      * ``grok`` / ``opencode`` / ``kimi`` — restore model_pins only;
-        clear provider_overrides
+      * ``grok`` — restore provider_overrides AND model_pins
+      * ``opencode`` / ``kimi`` — restore model_pins only; clear
+        provider_overrides
       * unknown harness id — clear both axes; do not restore from memory
       * missing / empty memory → clear both pins for the project
 
@@ -936,10 +1039,10 @@ def apply_project_axes(settings: 'Settings', project_path: str, host_id: str,
     """
     po, mp, ref = _dual_pop_override_maps(settings, project_path, host_id)
     mem = memory_entry if isinstance(memory_entry, dict) else {}
-    if harness_id == _PROVIDER_AXIS_HARNESS:
+    if harness_id in _PROVIDER_AXIS_HARNESSES:
         if 'provider' in mem and isinstance(mem['provider'], str):
             po[ref] = mem['provider']
-    elif harness_id in _MODEL_AXIS_HARNESSES:
+    if harness_id in _MODEL_AXIS_HARNESSES:
         mid = mem.get('model')
         if isinstance(mid, str) and mid:
             mp[ref] = mid

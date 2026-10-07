@@ -171,7 +171,7 @@ rm -f "$DESKTOP_DIR/projectman.desktop"
 cat > "$DESKTOP_DIR/io.github.projectman.desktop" <<EOF
 [Desktop Entry]
 Name=ProjectMan
-Comment=Manage Claude Code sessions
+Comment=GTK4 desktop cockpit for AI coding harnesses
 Exec=$BIN_DIR/projectman
 Icon=io.github.projectman
 Type=Application
@@ -390,6 +390,14 @@ install_kimi_bridge() {
 
 info "Installing kimi status bridge ..."
 install_kimi_bridge
+
+# PM-owned kimi-co shim for zellij reattach (under ~/.ProjectMan only — never
+# writes into ~/.kimi-code). Safe if kimi is installed later.
+info "Ensuring ProjectMan bin shims ..."
+python3 - <<'PY' 2>/dev/null || true
+from harnesses import ensure_kimi_co_shim
+ensure_kimi_co_shim()
+PY
 
 # ── done ───────────────────────────────────────────────────────────────────────
 echo ""

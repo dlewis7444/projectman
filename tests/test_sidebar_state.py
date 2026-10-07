@@ -45,6 +45,41 @@ def test_set_process_state_back_to_inactive_clears_css():
     assert not row._name_label.has_css_class('project-row-detached')
 
 
+def test_zellij_badge_visible_when_attached_zellij():
+    row = _make_row()
+    row.set_process_state('attached', is_zellij=True)
+    assert row._zellij_badge.get_visible() is True
+
+
+def test_zellij_badge_visible_when_detached():
+    """Detached implies zellij, so the badge shows."""
+    row = _make_row()
+    row.set_process_state('detached')
+    assert row._zellij_badge.get_visible() is True
+
+
+def test_zellij_badge_hidden_when_inactive():
+    row = _make_row()
+    row.set_process_state('attached', is_zellij=True)
+    row.set_process_state('inactive')
+    assert row._zellij_badge.get_visible() is False
+
+
+def test_zellij_badge_hidden_when_non_zellij_attached():
+    row = _make_row()
+    row.set_process_state('attached', is_zellij=False)
+    assert row._zellij_badge.get_visible() is False
+
+
+def test_zellij_badge_survives_subtitle_update():
+    """Subtitle refresh must not hide the zellij badge."""
+    from settings import Settings
+    s = Settings(harness_default='claude', harness_overrides={'/tmp/test': 'opencode'})
+    row = _make_row_with_settings(s, path='/tmp/test')
+    row.set_process_state('attached', is_zellij=True)
+    assert row._zellij_badge.get_visible() is True
+
+
 def test_deactivate_button_enabled_only_when_attached():
     row = _make_row()
     row.set_process_state('attached')
@@ -740,8 +775,9 @@ def _model_submenu_targets(row):
     return out
 
 
-def test_grok_project_model_submenu_lists_native_models(tmp_path, monkeypatch):
-    """Grok harness: only Grok (native) — no other natives or customs listed."""
+def test_grok_project_model_submenu_lists_native_plus_customs(tmp_path, monkeypatch):
+    """Grok harness (2026-10-05): Grok (native) + customs; the radio follows
+    the provider axis (native sentinel while no provider is effective)."""
     from settings import Settings
     from models import FOLLOW_DEFAULT, NATIVE_LABEL, NATIVE_GROK
     s = Settings(
@@ -752,9 +788,19 @@ def test_grok_project_model_submenu_lists_native_models(tmp_path, monkeypatch):
     row.set_model_options([], FOLLOW_DEFAULT, NATIVE_LABEL)
     labels = _model_submenu_labels(row)
     targets = _model_submenu_targets_all(row)
-    assert labels == ['Grok (native)']
-    assert targets == [NATIVE_GROK]
+    assert labels == ['Grok (native)', 'Ollama']
+    assert targets == [NATIVE_GROK, 'ollama']
     assert row._model_action.get_state().get_string() == NATIVE_GROK
+
+    # Custom provider effective → radio tracks it like claude's does.
+    s2 = Settings(
+        harness_default='grok',
+        provider_defaults={'grok': 'ollama'},
+        providers={'ollama': {'name': 'Ollama', 'base_url': 'http://x', 'models': []}},
+    )
+    row2 = _make_row_with_settings(s2, path='/tmp/grokproj2')
+    row2.set_model_options([], FOLLOW_DEFAULT, NATIVE_LABEL)
+    assert row2._model_action.get_state().get_string() == 'ollama'
 
 
 def test_claude_project_model_submenu_lists_ccr_options_unchanged(tmp_path):
@@ -763,7 +809,7 @@ def test_claude_project_model_submenu_lists_ccr_options_unchanged(tmp_path):
     from models import FOLLOW_DEFAULT, NATIVE_LABEL, NATIVE_GROK
     s = Settings(
         harness_default='claude',
-        model_default='ollama',
+        provider_defaults={'claude': 'ollama'},
         providers={'ollama': {'name': 'Ollama', 'base_url': 'http://x', 'models': []}},
     )
     row = _make_row_with_settings(s, path='/tmp/claudeproj')
@@ -1831,7 +1877,7 @@ def test_close_session_button_tooltip_and_a11y_label():
     tip = row._deactivate_btn.get_tooltip_text() or ''
     assert tip == _TIP_CLOSE_SESSION
     assert 'Close session' in tip
-    assert 'Open it again to continue the session' in tip
+    assert 'zellij session keeps running' in tip
     assert 'sidebar' not in tip.lower()
     # Accessible name is Close session (not Deactivate)
     assert 'Deactivate' not in tip
@@ -1944,3 +1990,79 @@ def test_new_project_rejects_slash_and_shell_meta_with_feedback():
     row._on_activate(row._entry)
     assert committed == ['ok-name']
 
+
+
+# --- Provider-aware harness label + window title (round 5) -------------------
+
+_PROVIDERS = {
+    'ollama': {'name': 'Ollama', 'base_url': 'http://x', 'models': []},
+    'kimi-code': {'name': 'Kimi Code', 'base_url': 'http://y', 'models': []},
+}
+
+
+def _subtitle_for(settings, path='/tmp/proj'):
+    from settings import Settings as _S  # noqa: F401 (file style: local imports)
+    row = _make_row_with_settings(settings, path=path)
+    return row._subtitle_text()
+
+
+def test_subtitle_grok_native_is_plain_name():
+    from settings import Settings
+    """Grok project on its NATIVE provider → subtitle shows just the harness
+    name (never a provider suffix) — and a default-harness row stays clean."""
+    s = Settings(harness_default='claude', harness_overrides={'/tmp/proj': 'grok'},
+                 providers=_PROVIDERS, provider_defaults={'claude': 'ollama'})
+    assert _subtitle_for(s) == 'Grok Build'
+
+
+def test_subtitle_grok_custom_provider_annotated():
+    from settings import Settings
+    """Custom provider in effect → "Grok Build (Kimi Code)"."""
+    s = Settings(harness_default='grok',
+                 providers=_PROVIDERS, provider_defaults={'grok': 'kimi-code'})
+    assert _subtitle_for(s) == 'Grok Build (Kimi Code)'
+
+
+def test_subtitle_claude_custom_provider_annotated():
+    from settings import Settings
+    """Same rule for claude rows: "Claude Code (Ollama)"."""
+    s = Settings(harness_default='claude',
+                 providers=_PROVIDERS, provider_defaults={'claude': 'ollama'})
+    assert _subtitle_for(s) == 'Claude Code (Ollama)'
+
+
+def test_subtitle_opencode_never_annotated():
+    from settings import Settings
+    """OpenCode/Kimi are native-only adapters — no provider suffix ever."""
+    s = Settings(harness_default='opencode',
+                 providers=_PROVIDERS, provider_defaults={'claude': 'ollama'})
+    assert _subtitle_for(s) == 'OpenCode'
+
+
+def test_subtitle_grok_custom_plus_model_pin():
+    from settings import Settings
+    """Model pin suffix still appends after the annotated head."""
+    s = Settings(harness_default='grok',
+                 providers=_PROVIDERS, provider_defaults={'grok': 'kimi-code'},
+                 model_pins={'/tmp/proj': 'k3'})
+    assert _subtitle_for(s) == 'Grok Build (Kimi Code) · k3'
+
+
+def test_window_title_host_slash_project_format():
+    """ProjectMan (host/project) — remote host name in place of localhost."""
+    from settings import Settings
+    from window import AppWindow
+    import types
+    s = Settings(hosts={
+        'h1': {'ssh_target': 'user@bench.example', 'display_name': 'Bench'},
+    })
+    fake = types.SimpleNamespace(_settings=s)
+    from window import AppWindow as _AW
+    fake._host_label_for_project = lambda p:         _AW._host_label_for_project(fake, p)
+    proj = types.SimpleNamespace(name='projectman', host_id='localhost')
+    assert AppWindow._format_window_title(fake, proj) == \
+        'ProjectMan (localhost/projectman)'
+    remote = types.SimpleNamespace(name='proj', host_id='h1')
+    assert AppWindow._format_window_title(fake, remote) == \
+        'ProjectMan (Bench/proj)'
+    assert AppWindow._format_window_title(fake, None) == 'ProjectMan'

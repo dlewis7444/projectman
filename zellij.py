@@ -8,10 +8,30 @@ gi.require_version('GLib', '2.0')
 from gi.repository import Gio, GLib, GObject
 
 
-def session_name(project_name: str) -> str:
-    """Generate a stable zellij session name for a project."""
+def session_name(project_name: str, host_id: str = 'localhost') -> str:
+    """Generate a stable zellij session name for a project.
+
+    Localhost keeps the historical ``pm-<slug>`` form so existing sessions
+    reattach. Remotes must NOT share that namespace — a local project named
+    ``general`` and ``localhost/general`` both used to map to ``pm-general``, so
+    opening one lit the other in the sidebar (detached Z under localhost).
+    Remote form: ``pm-r-<host8>-<slug>`` (host id truncated for length).
+    """
     slug = re.sub(r'[^a-zA-Z0-9_-]', '-', project_name)[:48] or 'default'
-    return f'pm-{slug}'
+    hid = (host_id or 'localhost').strip() or 'localhost'
+    if hid == 'localhost':
+        return f'pm-{slug}'
+    host_part = re.sub(r'[^a-zA-Z0-9_-]', '-', hid)[:12] or 'remote'
+    # Cap total length roughly like before (zellij is fine with ~50+ chars).
+    rem_slug = slug[: max(8, 40 - len(host_part))]
+    return f'pm-r-{host_part}-{rem_slug}'
+
+
+def session_name_for_project(project) -> str:
+    """``session_name`` from a Project (or anything with name/host_id)."""
+    name = getattr(project, 'name', None) or 'default'
+    host_id = getattr(project, 'host_id', None) or 'localhost'
+    return session_name(name, host_id)
 
 
 def socket_dir() -> str:
@@ -43,18 +63,23 @@ def session_exists(name: str) -> bool:
 
 
 def kill_session(name: str) -> None:
-    """Kill the zellij SERVER session ``name`` (FB-4 — the one implementation).
+    """Kill the zellij SERVER session ``name``.
 
-    The deactivate path and the harness-change/new-session spawn path both need to
-    tear down a live zellij server session (not just the local attach child, which
-    persists the server by design). This is that single call. Defensive: only
-    runs ``zellij kill-session`` when the session actually exists, and never
-    raises (a missing zellij binary / dead session is a no-op)."""
+    ProjectMan is detach-only everywhere else: closing/deactivating a project
+    only SIGTERMs the local ``zellij attach`` client, and spawning a new direct
+    child over a live zellij session only clears the local flags. Archive is
+    the ONE exception: moving a project to ``.archive/`` tears the server
+    session down so it does not keep running for a project that no longer
+    exists in the active set.
+
+    Defensive: only runs ``zellij kill-session`` when the session actually
+    exists, and never raises (a missing zellij binary / dead session is a
+    no-op)."""
     try:
         if session_exists(name):
-            # timeout=: callers are synchronous UI paths (deactivate, archive,
-            # harness-change respawn) — a wedged zellij server must not hang
-            # the GTK main loop (docs/popover-leak-main-thread-hang.md).
+            # timeout=: archive is a synchronous UI path — a wedged zellij
+            # server must not hang the GTK main loop
+            # (docs/popover-leak-main-thread-hang.md).
             subprocess.run(['zellij', 'kill-session', name],
                            capture_output=True, timeout=5)
     except Exception:

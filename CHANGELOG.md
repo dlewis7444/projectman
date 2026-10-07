@@ -2,6 +2,189 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
+## [1.7.0] - 2026-10-06
+
+### Added
+- **Grok Build custom providers (Settings → Models axis).** GrokAdapter now
+  honors the same custom-provider catalog Claude Code uses, for interactive
+  spawns, zellij spawns, and (non-empty-path) headless plans. Custom picks in
+  the projects Provider submenu apply to grok rows; a per-project provider
+  override + model pin round-trip through harness switches (grok owns both
+  axes now — opencode/kimi stay model-pin-only). Spawn env carries the
+  derived ``GROK_MODELS_BASE_URL`` (+ ``/v1`` when the catalog path is
+  unversioned) and ``XAI_API_KEY``; ``-m`` always names a concrete catalog
+  model (Claude's ``[1m]`` suffix stripped). Provider-fallback toasts name
+  the harness that actually spawned ("running native Grok Build", not
+  "Claude").
+- **ProjectMan-managed GROK_HOME per custom provider**
+  (``~/.ProjectMan/grok-homes/<provider>/``). Custom-provider grok spawns run
+  sessionless: the managed home's config wires every catalog model as BYOK
+  (``[model.<id>]`` with ``base_url`` + ``env_key = "XAI_API_KEY"``), so the
+  xAI session JWT is never sent to third-party endpoints and key-auth
+  providers stop 401ing (capture-server proven: a logged-in home sends the
+  session JWT, not ``XAI_API_KEY``). The home also replicates the minimal
+  status-bridge hook wiring (absolute paths to the existing
+  ``~/.grok/hooks/projectman-status.py`` — nothing is ever written under
+  ``~/.grok/``) and ``[compat.claude] hooks = false``. Idempotent, refreshed
+  when the provider's model list changes, and never clobbers a grok- or
+  user-owned config. Grok-side find 2026-10-05: the bare env path
+  (``GROK_MODELS_BASE_URL`` + ``XAI_API_KEY``) is gated by grok's first-party
+  API-key probe at startup ("Not signed in" for non-xAI keys) — model-level
+  credentials bypass the gate, hence the managed config. A catalog id that
+  carried the ``[1m]`` suffix emits ``context_window = 1048576`` in its BYOK
+  block (the Kimi endpoint serves 1M on bare ``k3``; grok's prefetched catalog
+  clamps to 256K, so the config must carry it). Refresh is
+  marker-independent — grok strips comments when it rewrites the config, so
+  PM owns its sections textually (every ``[model.*]`` + ``[compat.claude]``,
+  everything else preserved verbatim) and tracks the fingerprint in a
+  ``.pm-fingerprint`` sidecar. ``GROK_HOME`` is on
+  the remote-SSH env whitelist, but remote grok custom-provider spawns are
+  REFUSED for now (terminal.py ``_maybe_wrap_ssh``): a laptop-local managed
+  home cannot cross hosts — a self-healed remote tree would lack the BYOK
+  blocks/hooks, and a logged-in remote ``~/.grok`` would leak the xAI
+  session JWT to the third-party endpoint. Native (non-provider) remote
+  grok is unaffected.
+
+### Changed
+- **Per-harness provider defaults (the "all Grok sessions defaulted to
+  Claude's Ollama" fix).** The old global ``model_default`` leaked onto every
+  harness; provider defaults are now per-harness in
+  ``provider_defaults {harness_id: provider_id}`` (absent = that harness's
+  native backend). ``Settings.effective_provider`` takes the harness id
+  explicitly (no silent default parameter). The legacy ``model_default``
+  migrates one-shot to ``provider_defaults['claude']`` (it was semantically
+  Claude's — the Models-page combo was labeled "Default Provider, Claude
+  Code") and is never persisted again; stale pids resolve to native.
+- **Settings → Harness page gains an "Active Provider" combo per harness**
+  (claude/grok selectable: native + each custom provider; opencode/kimi
+  present-but-insensitive — native-only adapters). Settings → Models loses
+  the global "Default Provider, Claude Code" combo and its placeholder rows;
+  the intro copy no longer claims routing is Claude-only.
+- **Sidebar row subtitle annotates the effective custom provider**
+  (claude/grok: "Grok Build (Kimi Code)"; native → plain harness name).
+- **Window title format** is now ``ProjectMan (host/project)``.
+- **Models page no longer shows "Managed by the harness"** for Grok
+  Build, OpenCode, or Kimi. Which backend a harness uses is the
+  Harnesses page Active Provider row (selectable for Claude Code and
+  Grok Build; present and insensitive for OpenCode and Kimi).
+- **Provider web search via a ProjectMan-owned MCP bridge.** Providers gain
+  an optional ``search_url`` catalog field (Settings → Models provider
+  editor); when set, managed grok homes register ``[mcp_servers.pm-search]``
+  (repo ``pm_search_mcp.py --provider <pid>``), a stdio MCP ``web_search``
+  tool that POSTs the provider's own search endpoint with the catalog key
+  and returns trimmed markdown. The provider-specific part is catalog data,
+  not code — the pattern recurs for other harness/provider combos. Built-in
+  web_search stays disabled on custom providers (grok's hosted web_search
+  hardcodes its sampling request shape, which custom endpoints reject).
+  The bridge tool advertises ``readOnlyHint``. Stock Grok still gives
+  workflow ``agent()`` children in ``capability_mode: "read-only"`` no
+  MCP tools, so ``/deep-research`` does not see this search tool.
+  Subagents do. The provider editor’s Search endpoint tooltip says
+  this bridge is Grok Build only.
+- **Subagent tier "Default".** An empty Subagent tier stays on the
+  harness default: Grok inherits the parent model; Claude does not force
+  a subagent model. An explicit in-catalog pick still pins. The provider
+  editor says that.
+- **Managed-home config grows three probe-verified emissions.** The managed
+  ``config.toml`` now also pins aux session titles to the provider's first
+  catalog model (``[models] session_summary`` — key-level merge, grok's own
+  ``default`` preserved), pins subagent spawns when the provider's Subagent
+  tier names a catalog model (``[subagents.models] general-purpose``;
+  inherit-parent stands when the tier is unset/stale), and drops the hosted
+  web_search tool (``disable_web_search = true`` — the tool POSTs
+  {base}/responses with hardcoded sampling and is deterministically broken on
+  any custom endpoint; the agent falls back to curl).
+- **Old-app interop:** ``save()`` mirrors ``model_default`` as a copy of
+  claude's current default, so a still-running pre-round-5 instance sees a
+  consistent legacy field (and can no longer resurrect a cleared claude
+  default through the one-shot load migration). Note: an old instance's own
+  save still drops per-harness defaults — grok's default is unrecoverable
+  through an old save and self-heals to native (the safe direction).
+- PAA Telegram headless turns are unchanged and stay native-only: the
+  provider env (including ``GROK_HOME``) applies only when ``project_path``
+  is non-empty.
+
+### Internal
+- Publish gate: gitleaks ignores the RFC 6238 TOTP test-vector fixtures
+  (path allowlist in ``.gitleaks.toml``, which still matches after the
+  publish gate rewrites history), and the image EXIF strip fails the
+  gate when exiftool is missing (previously a silent skip).
+
+## [1.6.0] - 2026-08-25
+
+### Fixed
+- **PAA Chat button did nothing** after the AGENTS.md migration: the 1.5.3
+  install still copied ``paa/CLAUDE.md``, which that migration deleted, and
+  GTK swallowed the ``FileNotFoundError``. Deploy requires ``AGENTS.md``,
+  writes AGENTS names only, and a missing package file shows a banner on the
+  cards side (the terminal pane can stay at zero width on Wayland).
+- **Zellij-mode session restore no longer drops remote tabs.** With the
+  multiplexer set to zellij, restore previously only considered localhost
+  ProjectStore paths + local ``pm-*`` zellij sessions, so open remote
+  projects vanished on restart. Remotes in ``session.json`` are restored
+  via SSH continue (v1 still does not attach *remote* zellij).
+- **Remote project history expanders list sessions.** ``list_sessions`` for
+  claude / grok / opencode / kimi now runs over SSH for remote projects
+  (was always empty — local-only disk/CLI). Expand loads async so the UI
+  does not freeze.
+- **Local + remote same project name no longer share a zellij session.**
+  Names were ``pm-<name>`` only, so ``localhost/general`` and
+  ``localhost/general`` both used ``pm-general`` — opening one marked the other
+  detached under localhost. Remotes use ``pm-r-<host>-<name>``; localhost
+  keeps ``pm-<name>`` for reattach. "Open in Zellij" on a remote is refused
+  with a toast (local zellij only). Local child cwd for remotes is ``$HOME``
+  (not the invalid ``ssh:…`` path).
+- **Zellij reattach + Kimi: ``Command not found: kimi-co``.** The Kimi CLI
+  sets its process title to ``kimi-co`` while the binary is ``kimi``; Zellij
+  0.44 reattaches suspended panes by that title. Fix is **wholly under
+  ProjectMan**: a shim at ``~/.ProjectMan/bin/kimi-co`` (resolves real
+  ``kimi`` at exec time — safe if kimi is installed later) prepended on PATH
+  for PM spawns. Does **not** modify ``~/.kimi-code`` or other harness trees.
+
+### Changed
+- **PAA Chat / Discuss follow the default harness.** Interactive PAA no
+  longer hardcodes the ``claude`` CLI. Spawn uses
+  ``settings.effective_harness('')`` (global default) and that harness's
+  default provider when it has one (Claude Code: Settings → Models). Chat
+  and scan **tier** (Fast / Standard / Capable; stored as
+  haiku/sonnet/opus) still live in Settings → PAA and apply when the
+  resolved harness maps those tiers. Settings copy no longer calls the
+  Fast tier "Haiku" or claims PAA always uses Claude Code.
+- **PAA package is AGENTS.md-only.** Deploy writes ``AGENTS.md`` /
+  ``AGENTS-SUPPLEMENT.md`` (a leftover package ``CLAUDE.md`` may still be
+  *read* from an old tree). Project scans still treat a project-root
+  ``CLAUDE.md`` as a legacy fallback.
+- **Zellij is now detach-only everywhere except archive.** Closing a project
+  (or spawning a new direct child over a live zellij session) no longer kills
+  the zellij server session; ProjectMan only terminates its local
+  ``zellij attach`` client. The server session keeps running and can be
+  reattached. Archiving a project remains the one exception and still tears
+  the server session down.
+- **PAA AI scans route through the harness adapter seam** (Phase A package 1).
+  ``_run_scan_model`` resolves ``settings.effective_harness()`` and falls back
+  to claude when the harness lacks a real headless plan. Claude headless argv
+  is unchanged byte-for-byte. Non-Claude headless plans (W5): grok
+  (``-p`` + ``--output-format json``), opencode (``run --format json``), and
+  kimi (``-p`` + ``--output-format stream-json``) are probe-verified on the primary workstation
+  with ``headless_chat=True`` (resume-by-id works headless). Tier settings
+  stay claude-only. Review nits: fallback logged once per ``run_ai_checks``
+  run; ``plan.cwd is None`` never inherits process cwd; ``headless_plan``
+  returning None falls back to claude; ``register_adapter`` binds headless
+  defaults. Scan fallback log-once covers resolve *and* plan-None.
+
+### Added
+- **Green "Z" badge in the sidebar** next to a project's harness subtitle for
+  zellij sessions (attached or detached). Non-zellij sessions show no badge.
+- **Headless harness plan/result types** (``HeadlessPlan``, ``HeadlessResult``)
+  and per-adapter ``headless_plan`` / ``parse_headless_output`` (claude,
+  opencode, grok, kimi); GTK-free ``paa_headless`` runner with
+  ``run_headless``, ``resolve_headless_adapter``, and resumable ``chat_turn``
+  primitive (for Phase B daemon).
+- **Debug logging covers every session launch** when Debug Logging / ``--debug``
+  is on: VTE (fresh/continue/resume), zellij attach/create, PAA headless AI
+  scans (``paa scan harness=…`` + argv), and Discuss spawn. Shared
+  ``debug_log`` helper prints ``[DBG]`` lines to stdout.
+
 ## [1.5.3] - 2026-08-03
 
 ### Added
