@@ -165,13 +165,16 @@ def test_check_child_alive_respawn_race_does_not_double_fire():
     assert tv._child_pid == 12345
 
 
-# ── FB-4 (P3.5e): a DIRECT spawn over a live zellij project kills the server ──
-# session first (mirror of the deactivate path) — orphan-free agent change.
+# ── FB-4 (P3.5e): a DIRECT spawn over a live zellij project is detach-only ──
+# The server session is never killed; only the local attach client is torn down
+# and the zellij flags are cleared so the new direct child is not mistaken for
+# a detach when it exits.
 
-def test_spawn_harness_on_live_zellij_kills_session_first():
-    """BINDING (FB-4): spawn_harness on a terminal currently holding a live zellij
-    session calls zellij.kill_session for it (and clears the zellij flags) before
-    the new direct spawn — the spawn path no longer orphans the server."""
+def test_spawn_harness_on_live_zellij_does_not_kill_server_session():
+    """BINDING (detach-only): spawn_harness on a terminal currently holding a live
+    zellij session does NOT call zellij.kill_session. It clears the zellij flags
+    and kills the local child so the new direct spawn is not mistaken for a
+    detach later."""
     tv = _make_tv()
     tv._is_zellij = True
     tv._zellij_session = 'pm-test'
@@ -180,7 +183,7 @@ def test_spawn_harness_on_live_zellij_kills_session_first():
                side_effect=lambda name: killed.append(name)), \
          patch.object(tv, '_spawn', side_effect=lambda argv, env=None: None):
         tv.spawn_harness('continue')
-    assert killed == ['pm-test']        # the server session was killed
+    assert killed == []                 # server session is never killed here
     assert tv._is_zellij is False       # flags cleared for the new direct child
     assert tv._zellij_session is None
 

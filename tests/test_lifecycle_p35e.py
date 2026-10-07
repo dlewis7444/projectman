@@ -2,17 +2,19 @@
 
 Window/app glue tested UNBOUND against SimpleNamespace recorders (the
 test_lifecycle.py pattern); the pure decision lives in session.py and is tested
-directly. The spawn-path zellij kill (item 11) and the late-death pane feed
+directly. The spawn-path zellij detach (item 11) and the late-death pane feed
 (item 10) that need a real Vte terminal are exercised display-gated in
 test_terminal_zellij.py / test_terminal_agent.py; here the window-side branching
-and the shared zellij.kill_session helper are covered headless.
+and the shared zellij.kill_session helper (kept for archive) are covered
+headless.
 
 Binding tests:
   FB-2  should_save_session decision table; _save_session guard skips/saves
   FB-3  _handle_late_death feeds the code; the Active Only filter is NOT
         touched on any death (the maintainer 2026-06-18: closing a session must leave
         the user's filter alone)
-  FB-4  zellij.kill_session only kills a live session; spawn-path decision
+  FB-4  zellij.kill_session only kills a live session; archive remains the
+        only caller
   FB-10 the spawn-failure toast call pins timeout=0
 """
 import types
@@ -170,12 +172,13 @@ def test_late_death_undecodable_status_falls_back_to_raw():
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# FB-4 — the shared zellij kill helper (audit-1)
+# FB-4 — the shared zellij kill helper (archive only)
 # ════════════════════════════════════════════════════════════════════════════
 
 def test_zellij_kill_session_only_kills_when_alive(monkeypatch):
-    """BINDING (FB-4): kill_session runs `zellij kill-session` ONLY when the
-    session exists; an absent session is a silent no-op."""
+    """BINDING (FB-4): archive still calls kill_session; it runs `zellij
+    kill-session` ONLY when the session exists; an absent session is a silent
+    no-op."""
     import zellij
     runs = []
     monkeypatch.setattr(zellij.subprocess, 'run',
@@ -192,13 +195,91 @@ def test_zellij_kill_session_only_kills_when_alive(monkeypatch):
 
 
 def test_zellij_kill_session_never_raises(monkeypatch):
-    """A missing zellij binary / subprocess error is swallowed (defensive)."""
+    """A missing zellij binary / subprocess error is swallowed (defensive).
+    Archive is the remaining caller; deactivate/spawn are detach-only."""
     import zellij
     monkeypatch.setattr(zellij, 'session_exists', lambda name: True)
     def boom(*a, **k):
         raise FileNotFoundError('no zellij')
     monkeypatch.setattr(zellij.subprocess, 'run', boom)
     zellij.kill_session('pm-x')   # must not raise
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# FB-4 continued — detach-only policy for deactivate vs. archive
+# ════════════════════════════════════════════════════════════════════════════
+
+def _deactivate_fake(zellij_session=None):
+    """A duck-typed AppWindow self for _on_project_deactivate tests."""
+    tv_calls = []
+    tv = types.SimpleNamespace(
+        _is_zellij=zellij_session is not None,
+        _zellij_session=zellij_session,
+        deactivate=lambda: tv_calls.append('deactivate'),
+    )
+    return types.SimpleNamespace(
+        _terminals={'/p': tv},
+        _find_project=lambda p: types.SimpleNamespace(name='p'),
+        _show_toast=lambda *a, **k: None,
+        _sidebar=types.SimpleNamespace(cancel_pending_deactivate=lambda p: None),
+    ), tv, tv_calls
+
+
+def test_on_project_deactivate_zellij_is_detach_only():
+    """BINDING (detach-only): deactivating a zellij terminal calls tv.deactivate()
+    (SIGTERM the local attach client) and does NOT call zellij.kill_session or
+    clear the zellij flags."""
+    fake, tv, calls = _deactivate_fake(zellij_session='pm-p')
+    killed = []
+    import zellij
+    orig_kill = zellij.kill_session
+    zellij.kill_session = lambda name: killed.append(name)
+    try:
+        AppWindow._on_project_deactivate(fake, None, '/p')
+    finally:
+        zellij.kill_session = orig_kill
+    assert calls == ['deactivate']
+    assert killed == []
+    assert tv._is_zellij is True
+    assert tv._zellij_session == 'pm-p'
+
+
+def test_on_project_archive_zellij_kills_server_session():
+    """BINDING (archive exception): archiving a zellij project kills the server
+    session after tearing down the local attach child."""
+    tv_calls = []
+    tv = types.SimpleNamespace(
+        _is_zellij=True,
+        _zellij_session='pm-p',
+        _kill_child=lambda: tv_calls.append('kill_child'),
+    )
+    project = types.SimpleNamespace(name='p', project_ref='ref-p')
+    fake = types.SimpleNamespace(
+        _terminals={'/p': tv},
+        _stack=types.SimpleNamespace(remove=lambda w: None),
+        _find_project=lambda p: project,
+        _settings=types.SimpleNamespace(multiplexer='zellij'),
+        _sidebar=types.SimpleNamespace(
+            cancel_pending_deactivate=lambda p: None,
+            get_group_forest=lambda host_id: None,
+            refresh=lambda: None,
+        ),
+        _store=types.SimpleNamespace(archive=lambda proj: tv_calls.append(('archive', proj))),
+        _sync_running_state=lambda: None,
+        _active_path=None,
+        _set_active_project=lambda p: None,
+    )
+    killed = []
+    import zellij
+    orig_kill = zellij.kill_session
+    zellij.kill_session = lambda name: killed.append(name)
+    try:
+        AppWindow._on_project_archive(fake, None, '/p')
+    finally:
+        zellij.kill_session = orig_kill
+    assert 'kill_child' in tv_calls
+    assert killed == ['pm-p']
+    assert '/p' not in fake._terminals
 
 
 # ════════════════════════════════════════════════════════════════════════════

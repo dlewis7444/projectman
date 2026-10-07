@@ -1,0 +1,24 @@
+# ProjectMan PAA Telegram bot (user unit).
+#
+# ExecStart picks the code tree at runtime:
+#   PROJECTMAN_SOURCE — repo root that contains paa_telegram.py
+#   otherwise the desktop install layout ~/.local/share/projectman
+#     (install.sh copies *.py there; this unit does not run install.sh)
+#
+# No secrets and no hostnames. The process reads its token with
+# `pass show` (default entry internal/telegram/paa-bot-token).
+# Do not enable this unit until that entry exists and the live probes pass.
+
+[Unit]
+Description=ProjectMan PAA Telegram bot
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'root="${PROJECTMAN_SOURCE:-$HOME/.local/share/projectman}"; exec /usr/bin/python3 "$root/paa_telegram.py"'
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -151,11 +151,18 @@ def build_remote_shell_command(
 # Env keys safe to export into a remote SSH session. Never forward the local
 # process environment wholesale — laptop HOME/USER/PATH break remote cd and
 # harnesses (e.g. giskard@clawdbot seeing /home/user/…).
+# GROK_MODELS_BASE_URL/XAI_API_KEY/GROK_HOME are exact-match on purpose:
+# grok's full GROK_* surface is huge and mostly local-only (compat-MCP
+# switches etc.). GROK_HOME crosses so remote custom-provider spawns get the
+# same sessionless managed home (grok creates the tree if missing remotely).
 _REMOTE_ENV_EXACT = frozenset({
     'DISABLE_AUTOUPDATER',
     'TERM',
     'COLORTERM',
     'OLLAMA_HOST',
+    'GROK_MODELS_BASE_URL',
+    'XAI_API_KEY',
+    'GROK_HOME',
 })
 _REMOTE_ENV_PREFIXES = (
     'ANTHROPIC_',
@@ -199,6 +206,54 @@ def build_ssh_spawn_argv(
     return base[:-1] + [
         '-tt', base[-1], f'bash -lc {shlex.quote(remote)}',
     ]
+
+
+def build_remote_capture_argv(
+    ssh_target: str,
+    remote_cwd: str,
+    argv: Sequence[str],
+    env: Mapping[str, str] | None = None,
+    *,
+    batch: bool = True,
+    connect_timeout: int = 5,
+) -> list[str]:
+    """Non-interactive SSH argv: run *argv* on the remote under *remote_cwd*.
+
+    Same remote script shape as :func:`build_ssh_spawn_argv` (cd + PATH + exec)
+    but **without** ``-tt`` — for ``list_sessions`` and other capture-only ops.
+    """
+    remote = build_remote_shell_command(
+        remote_cwd, argv, filter_remote_export_env(env),
+    )
+    return _bash_lc_argv(
+        ssh_target, remote, batch=batch, connect_timeout=connect_timeout,
+    )
+
+
+def build_remote_cat_argv(
+    ssh_target: str,
+    remote_rel_path: str,
+    *,
+    batch: bool = True,
+    connect_timeout: int = 5,
+) -> list[str]:
+    """``ssh … cat`` a home-relative or absolute remote file (capture).
+
+    *remote_rel_path* like ``.claude/history.jsonl`` or ``~/.claude/history.jsonl``.
+    """
+    path = remote_rel_path if remote_rel_path is not None else ''
+    if path.startswith('~/'):
+        assign = f'f="$HOME"{shlex.quote(path[1:])}'
+    elif path == '~':
+        assign = 'f="$HOME"'
+    elif path.startswith('/'):
+        assign = f'f={shlex.quote(path)}'
+    else:
+        assign = f'f="$HOME"/' + shlex.quote(path.lstrip('/'))
+    script = f'{assign}; cat -- "$f" 2>/dev/null'
+    return _bash_lc_argv(
+        ssh_target, script, batch=batch, connect_timeout=connect_timeout,
+    )
 
 
 def _remote_dir_assign(remote_projects_dir: str) -> str:

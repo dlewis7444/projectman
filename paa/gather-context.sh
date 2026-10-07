@@ -36,8 +36,8 @@ HISTORY_FILE="${HOME}/.claude/history.jsonl"
       fi
     fi
 
-    # Missing CLAUDE.md flag
-    [ ! -f "$proj_path/CLAUDE.md" ] && tags="$tags [NO CLAUDE.md]"
+    # Missing AGENTS.md flag
+    [ ! -f "$proj_path/AGENTS.md" ] && tags="$tags [NO AGENTS.md]"
 
     # Last Claude session date (history.jsonl timestamp is in ms)
     if [ -f "$HISTORY_FILE" ]; then

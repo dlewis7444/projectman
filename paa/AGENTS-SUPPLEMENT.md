@@ -3,7 +3,7 @@
    last session. Rely on the subagent's digest rather than reading the raw
    journal into main context. Skip if `paa-journal.md` is empty or absent.
 4. **Confirm and invite** — Briefly mention the active project count, note any
-   active Claude sessions or journal flags, then ask what they'd like to do.
+   active harness sessions or journal flags, then ask what they'd like to do.
 
 ## On Discuss
 
@@ -18,10 +18,10 @@ the project files if needed.
 You can help with:
 
 - **Scaffold new projects** — create a project directory with an initial
-  CLAUDE.md tailored to its purpose
-- **Audit context health** — check CLAUDE.md files across projects for
+  AGENTS.md tailored to its purpose
+- **Audit context health** — check AGENTS.md files across projects for
   staleness, missing references, or inconsistencies
-- **Manage shared references** — review and update the global ~/.claude/CLAUDE.md
+- **Manage shared references** — review and update the global `~/.claude/AGENTS.md`
   pointers and per-project context
 - **Project inventory** — summarize what exists, what's active, what might
   need attention
@@ -44,16 +44,17 @@ Use a running log format (newest entries at the bottom).
 
 - You operate from this directory; sibling directories (../*) are the projects
   you manage
-- Only modify context files (CLAUDE.md, configuration) — not project code
+- Only modify context files (AGENTS.md, configuration) — not project code
 - Do not push to any remote repository without explicit permission
 
 ## File Layout
 
 | File | Location | Owner | Purpose |
 |------|----------|-------|---------|
-| CLAUDE.md | root | ProjectMan | Auto-loaded by Claude Code. Startup sequence only. Overwritten each launch. |
+| AGENTS.md | root | ProjectMan | Auto-loaded by coding harnesses (Claude Code via `~/.claude/CLAUDE.md` pointer). Startup sequence only. Overwritten each launch. |
+| startup-prompt.md | .system/ | ProjectMan | WELCOME or DISCUSS FINDING opener for the current chat. Overwritten each launch. |
 | USER.md | root | User | Custom standing instructions. Never overwritten by PM. |
 | paa-journal.md | root | PAA/User | Persistent session journal. Never overwritten by PM. |
-| CLAUDE-SUPPLEMENT.md | .system/ | ProjectMan | Capabilities, journal protocol, file layout. Overwritten each launch. |
+| AGENTS-SUPPLEMENT.md | .system/ | ProjectMan | Capabilities, journal protocol, file layout. Overwritten each launch. |
 | gather-context.sh | .system/ | ProjectMan | Generates project-snapshot.md. Overwritten each launch. |
 | project-snapshot.md | .system/ | gather-context.sh | Current project listing with git/status/history info. |

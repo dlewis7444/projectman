@@ -74,6 +74,7 @@
 
 /* ── Effective-agent subtitle under a project name ────────────────── */
 .pm-harness-subtitle { font-size: 10px; opacity: 0.55; margin-top: -2px; }
+.zellij-badge { font-size: 10px; font-weight: bold; margin-left: 4px; }
 
 /* ── Resource bar ─────────────────────────────────────────────────── */
 .resource-bar { padding: 6px 12px; }

@@ -94,7 +94,7 @@ def test_builds_without_crash_with_provider_defined():
     """The Models page builds with a provider defined — the state that triggered
     the Adw.ExpandableRow crash (the card wasn't built when providers was
     empty, so the first open after adding a provider crashed)."""
-    s = Settings(providers=_ollama_provider(), model_default='ollama',
+    s = Settings(providers=_ollama_provider(), provider_defaults={'claude': 'ollama'},
                  tier_models={'ollama': {'opus': 'glm-5.2:cloud[1m]'}})
     sw = _make_sw(s)  # must not raise
     assert sw is not None
@@ -110,7 +110,7 @@ def test_provider_row_titled_with_name_preserves_walk_assertion():
     """The slim provider row's title is the provider's display name — the gate
     walk asserts ``has('Ollama')``, so this must hold after the ExpanderRow→row
     refactor."""
-    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    s = Settings(providers=_ollama_provider(), provider_defaults={'claude': 'ollama'})
     sw = _make_sw(s)
     row = sw._build_provider_row('ollama', s.providers['ollama'])
     assert row.get_title() == 'Ollama'
@@ -132,7 +132,7 @@ def test_provider_row_activatable_opens_editor_for_pid():
     children through the widget walk). Replaces the old 'Models' button
     (dropped per the maintainer: a button inside Settings opening another window was the
     wrong shape; the row itself is the affordance now)."""
-    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    s = Settings(providers=_ollama_provider(), provider_defaults={'claude': 'ollama'})
     sw = _make_sw(s)
     opened = []
     sw._open_editor = lambda pid: opened.append(pid)
@@ -145,7 +145,7 @@ def test_provider_row_activatable_opens_editor_for_pid():
 # --- #2: editor tier combos (replaces the old provider-card combo tests) ----
 
 def test_editor_has_five_tier_combos():
-    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    s = Settings(providers=_ollama_provider(), provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     combos = _tier_combos(editor)
@@ -153,7 +153,7 @@ def test_editor_has_five_tier_combos():
 
 
 def test_editor_fable_combo_enabled():
-    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    s = Settings(providers=_ollama_provider(), provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     combos = _tier_combos(editor)
@@ -167,7 +167,7 @@ def test_editor_tier_combos_sensitive_even_when_default_is_native():
     the default. With a native default, the ollama editor's tier combos are
     still sensitive (the old standalone TA group disabled them when
     default='')."""
-    s = Settings(providers=_ollama_provider(), model_default='')  # native default
+    s = Settings(providers=_ollama_provider(), provider_defaults={'claude': ''})  # native default
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     combos = _tier_combos(editor)
@@ -189,7 +189,7 @@ def test_override_provider_tiers_honored_and_editor_editable():
     s = Settings(providers={**_ollama_provider(models=('glm', 'kimi')),
                             **{'openrouter': {'name': 'OR', 'base_url': 'http://b',
                                               'api_key': 'k', 'models': ['or-opus']}}},
-                 model_default='',                       # native default
+                 provider_defaults={'claude': ''},                       # native default
                  provider_overrides={'/p': 'openrouter'},  # project on openrouter
                  tier_models={'openrouter': {'opus': 'or-opus'}})
     # Spawn side: the override provider's tiers are injected.
@@ -223,7 +223,7 @@ def test_editor_writes_all_four_fields_on_close(monkeypatch, tmp_path):
     monkeypatch.setattr(settings_mod, 'DEFAULT_SETTINGS_PATH', str(tmp_settings))
     s = Settings(providers={'ollama': {'name': '', 'base_url': '',
                                        'api_key': '', 'models': []}},
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
 
@@ -270,7 +270,7 @@ def test_editor_defers_disk_write_to_close(monkeypatch, tmp_path):
                         str(tmp_path / 'settings.json'))
     s = Settings(providers={'ollama': {'name': '', 'base_url': '',
                                        'api_key': '', 'models': []}},
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     # Patch save AFTER construction so build-time saves use the real path;
@@ -307,7 +307,7 @@ def test_editor_add_model_does_not_destroy_other_fields():
     group from the model list, so it survives the rebuild."""
     s = Settings(providers={'ollama': {'name': '', 'base_url': '',
                                        'api_key': '', 'models': []}},
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     editor._name_row.set_text('Ollama')
@@ -339,7 +339,7 @@ def _find_row(widget, title):
 
 def test_editor_has_classifier_controls():
     s = Settings(providers=_ollama_provider(models=('glm', 'kimi')),
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     assert _find_row(editor, 'Classifier temperature') is not None
@@ -356,7 +356,7 @@ def test_editor_classifier_temperature_persists_on_close():
     import settings as settings_mod
     s = Settings(providers={'ollama': {'name': '', 'base_url': '',
                                        'api_key': '', 'models': ['glm', 'kimi']}},
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
 
@@ -378,7 +378,7 @@ def test_editor_classifier_temperature_persists_when_adding_model():
     classifier temperature."""
     s = Settings(providers={'ollama': {'name': '', 'base_url': '',
                                        'api_key': '', 'models': ['glm']}},
-                 model_default='ollama',
+                 provider_defaults={'claude': 'ollama'},
                  classifier_temperature={'ollama': 0.7})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
@@ -416,7 +416,7 @@ def test_editor_select_models_picker_merges_server_and_manual(monkeypatch):
                                        'base_url': 'http://localhost:11434',
                                        'api_key': 'k',
                                        'models': ['manual-model']}},
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
 
@@ -468,7 +468,7 @@ def test_editor_select_models_picker_offline_falls_back_to_add_row(monkeypatch):
                                        'base_url': 'http://offline:11434',
                                        'api_key': 'k',
                                        'models': ['manual-model']}},
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     editor._picker_expander.set_expanded(True)
@@ -496,7 +496,7 @@ def test_editor_close_attempt_commits_pending_name_edit(monkeypatch, tmp_path):
                         str(tmp_path / 'settings.json'))
     s = Settings(providers={'ollama': {'name': '', 'base_url': '',
                                        'api_key': '', 'models': []}},
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     # Type a name but do NOT emit 'apply' — it's a pending edit held only in
@@ -518,7 +518,7 @@ def test_editor_probe_result_bails_after_teardown():
     on the _closed flag rather than touch disposed widgets."""
     s = Settings(providers={'ollama': {'name': '', 'base_url': '',
                                        'api_key': '', 'models': ['glm']}},
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     editor._teardown()
@@ -539,7 +539,7 @@ def test_editor_constructs_with_preferencesdialog_parent():
     editor with a real PreferencesDialog parent must not raise."""
     s = Settings(providers={'ollama': {'name': '', 'base_url': '',
                                        'api_key': '', 'models': ['glm']}},
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     sw = _make_sw(s)  # a real Adw.PreferencesDialog
     orig = sw_mod.ProviderEditorWindow.present
     sw_mod.ProviderEditorWindow.present = _no_present_factory()
@@ -555,7 +555,7 @@ def test_editor_constructs_with_preferencesdialog_parent():
 def test_editor_bad_url_rejected_on_apply():
     """Invalid schemes or unparseable URLs must not overwrite the stored
     base_url, and the row must show an inline error."""
-    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    s = Settings(providers=_ollama_provider(), provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     prior = s.providers['ollama']['base_url']
@@ -574,7 +574,7 @@ def test_editor_bad_url_rejected_on_apply():
 
 def test_editor_bad_url_rejected_on_focus_out():
     """Focus-out (the type-and-move-on path B4 fixed) must also validate."""
-    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    s = Settings(providers=_ollama_provider(), provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     prior = s.providers['ollama']['base_url']
@@ -589,7 +589,7 @@ def test_editor_good_url_committed_on_apply():
     """A valid http/https URL with a host commits and clears any prior error."""
     s = Settings(providers={'ollama': {'name': '', 'base_url': '',
                                        'api_key': '', 'models': []}},
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
 
@@ -602,7 +602,7 @@ def test_editor_good_url_committed_on_apply():
 
 def test_editor_empty_url_clears_base_url():
     """Empty base_url is valid: it means "no base_url, provider skipped"."""
-    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    s = Settings(providers=_ollama_provider(), provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
 
@@ -617,7 +617,7 @@ def test_editor_bad_url_discarded_on_close():
     persist it. _teardown calls _commit_url(); validation rejects it, leaving
     the prior valid value in _prov and therefore in settings.json."""
     import settings as settings_mod
-    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    s = Settings(providers=_ollama_provider(), provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     prior = s.providers['ollama']['base_url']
@@ -630,7 +630,7 @@ def test_editor_bad_url_discarded_on_close():
 # --- #9: context window + per-model 1M toggle --------------------------------
 
 def test_editor_tier_description_includes_fable():
-    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    s = Settings(providers=_ollama_provider(), provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     desc = editor._tier_group.get_description() or ''
@@ -640,7 +640,7 @@ def test_editor_tier_description_includes_fable():
 def test_editor_max_context_tokens_field_commits():
     s = Settings(providers={'ollama': {'name': 'O', 'base_url': 'http://x',
                                        'api_key': '', 'models': []}},
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     assert hasattr(editor, '_max_ctx_row')
@@ -662,7 +662,7 @@ def test_editor_1m_toggle_rewrites_model_id_and_tier_pin():
 
     s = Settings(providers={'ollama': {'name': 'O', 'base_url': 'http://x',
                                        'api_key': '', 'models': ['my-model']}},
-                 model_default='ollama',
+                 provider_defaults={'claude': 'ollama'},
                  tier_models={'ollama': {
                      'opus': 'my-model', 'sonnet': '', 'haiku': '',
                      'subagent': '', 'fable': '',
@@ -682,7 +682,7 @@ def test_editor_model_row_shows_bare_title_when_1m_stored():
     s = Settings(providers={'ollama': {'name': 'O', 'base_url': 'http://x',
                                        'api_key': '',
                                        'models': ['my-model[1m]']}},
-                 model_default='ollama')
+                 provider_defaults={'claude': 'ollama'})
     _make_sw(s)
     editor = _make_editor(s, 'ollama')
     row = editor._model_row_for['my-model[1m]']
@@ -700,7 +700,7 @@ def test_rebuild_providers_group_reentry_safe():
     refresh, editor close → refresh) must not leave the add row parentless
     or double-parented, and must not raise.
     """
-    s = Settings(providers=_ollama_provider(), model_default='ollama')
+    s = Settings(providers=_ollama_provider(), provider_defaults={'claude': 'ollama'})
     sw = _make_sw(s)
     add_row = sw._provider_add_row
     assert add_row.get_parent() is not None
@@ -742,7 +742,7 @@ def test_add_provider_dismiss_without_fill_does_not_persist(
     import settings as settings_mod
     monkeypatch.setattr(settings_mod, 'DEFAULT_SETTINGS_PATH',
                         str(tmp_path / 'settings.json'))
-    s = Settings(providers={}, model_default='')
+    s = Settings(providers={}, provider_defaults={'claude': ''})
     # Persist a clean baseline so a later load reflects disk truth.
     s.save(settings_mod.DEFAULT_SETTINGS_PATH)
     sw = _make_sw(s)
@@ -786,7 +786,7 @@ def test_add_provider_with_name_kept_on_close(monkeypatch, tmp_path):
     import settings as settings_mod
     monkeypatch.setattr(settings_mod, 'DEFAULT_SETTINGS_PATH',
                         str(tmp_path / 'settings.json'))
-    s = Settings(providers={}, model_default='')
+    s = Settings(providers={}, provider_defaults={'claude': ''})
     s.save(settings_mod.DEFAULT_SETTINGS_PATH)
     sw = _make_sw(s)
 
@@ -825,7 +825,7 @@ def test_add_provider_does_not_save_before_editor_close(monkeypatch, tmp_path):
     import settings as settings_mod
     monkeypatch.setattr(settings_mod, 'DEFAULT_SETTINGS_PATH',
                         str(tmp_path / 'settings.json'))
-    s = Settings(providers={}, model_default='')
+    s = Settings(providers={}, provider_defaults={'claude': ''})
     s.save(settings_mod.DEFAULT_SETTINGS_PATH)
     saves = []
     monkeypatch.setattr(s, 'save', lambda *a, **k: saves.append(1))
@@ -838,3 +838,123 @@ def test_add_provider_does_not_save_before_editor_close(monkeypatch, tmp_path):
         sw_mod.ProviderEditorWindow.present = orig_present
     assert saves == []  # no disk write on add
     assert s.providers  # in-memory yes
+
+
+# --- Per-harness Active Provider (round 5) -----------------------------------
+
+_PROVIDERS = {
+    'ollama': {'name': 'Ollama', 'base_url': 'http://x', 'models': []},
+    'kimi-code': {'name': 'Kimi Code', 'base_url': 'http://y', 'models': []},
+}
+
+
+def _all_rows(sw):
+    """All preference rows anywhere in the dialog. Adw.Dialog doesn't expose
+    its set_child content via get_first_child (the content lives in a
+    dialog-internal slot) — walk from the content child."""
+    root = sw.get_child() if isinstance(sw, Adw.Dialog) else sw
+    return [w for w in _walk(root or sw)
+            if isinstance(w, (Adw.ComboRow, Adw.ActionRow, Adw.EntryRow))]
+
+
+def test_models_page_has_no_global_default_combo():
+    """The global "Default Provider, Claude Code" combo (and its (future)
+    placeholder rows) are gone — defaults are per-harness on the Harness
+    page since the cross-harness leak."""
+    sw = _make_sw(Settings(providers=_PROVIDERS))
+    titles = [r.get_title() for r in _all_rows(sw)]
+    assert 'Default Provider, Claude Code' not in titles
+    assert 'Default Provider, Grok Build (future)' not in titles
+    assert 'Default Provider, OpenCode (future)' not in titles
+    # Native-model placeholder groups used to sit under the catalog
+    # ("Managed by the harness" for Grok, OpenCode, and Kimi). Harness
+    # choice, including the grayed Active Provider rows, lives on the
+    # Harnesses page.
+    assert 'Managed by the harness' not in titles
+    # The provider catalog itself stays.
+    assert any(t == 'Ollama' for t in titles)
+
+
+def test_harness_page_active_provider_rows():
+    """Every harness section gets an Active Provider row: selectable for
+    claude/grok (Native + each custom provider), insensitive for the
+    native-only adapters."""
+    s = Settings(providers=_PROVIDERS,
+                 provider_defaults={'grok': 'kimi-code'})
+    sw = _make_sw(s)
+    import harnesses
+    active = [r for r in _all_rows(sw) if r.get_title() == 'Active Provider']
+    assert len(active) == 4                      # claude, grok, opencode, kimi
+    by_harness = {h: r for h, r in zip(harnesses.ADAPTERS.keys(), active)}
+    assert by_harness['claude'].get_sensitive() is True
+    assert by_harness['grok'].get_sensitive() is True
+    for hid in ('opencode', 'kimi'):
+        assert by_harness[hid].get_sensitive() is False
+        assert 'Not configurable' in by_harness[hid].get_subtitle()
+    # Selectable rows list Native + every custom provider, and track the
+    # stored per-harness default.
+    def labels(row):
+        m = row.get_model()
+        return [m.get_string(i) for i in range(m.get_n_items())]
+    assert labels(by_harness['claude'])[0] == 'Anthropic (native)'
+    assert labels(by_harness['grok'])[0] == 'Grok (native)'
+    assert 'Ollama' in labels(by_harness['claude'])
+    assert 'Kimi Code' in labels(by_harness['grok'])
+    assert labels(by_harness['grok'])[
+        by_harness['grok'].get_selected()] == 'Kimi Code'
+    assert labels(by_harness['claude'])[
+        by_harness['claude'].get_selected()] == 'Anthropic (native)'
+
+
+def test_harness_page_active_provider_change_writes_setting():
+    """Selecting a provider writes provider_defaults via set_provider_default."""
+    s = Settings(providers=_PROVIDERS)
+    sw = _make_sw(s)
+    import harnesses
+    order = list(harnesses.ADAPTERS.keys())
+    active = [r for r in _all_rows(sw) if r.get_title() == 'Active Provider']
+    grok_row = active[order.index('grok')]
+    model = grok_row.get_model()
+    idx = [model.get_string(i) for i in range(model.get_n_items())].index('Ollama')
+    sw._suppress_combos = False
+    grok_row.set_selected(idx)                   # fires notify::selected
+    assert s.provider_defaults.get('grok') == 'ollama'
+
+
+# --- Provider search endpoint (round 9) --------------------------------------
+
+
+def test_editor_search_url_committed_and_validated():
+    s = Settings(providers={'ollama': {'name': '', 'base_url': '',
+                                       'api_key': '', 'models': []}},
+                 provider_defaults={'claude': 'ollama'})
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    assert 'web_search' in (editor._search_url_row.get_tooltip_text() or '')
+
+    editor._search_url_row.set_text('https://api.example.com/v1/search')
+    editor._search_url_row.emit('apply')
+    assert s.providers['ollama']['search_url'] == \
+        'https://api.example.com/v1/search'
+    assert editor._search_url_row.has_css_class('error') is False
+
+    editor._search_url_row.set_text('ftp://nope')
+    editor._search_url_row.emit('apply')
+    assert s.providers['ollama']['search_url'] == \
+        'https://api.example.com/v1/search'          # rejected, prior kept
+    assert editor._search_url_row.has_css_class('error') is True
+
+    editor._search_url_row.set_text('')
+    editor._search_url_row.emit('apply')
+    assert 'search_url' not in s.providers['ollama']   # blank clears
+    assert editor._search_url_row.has_css_class('error') is False
+
+
+def test_editor_search_url_prefilled_from_settings():
+    s = Settings(providers={'ollama': {
+        'name': '', 'base_url': '', 'api_key': '', 'models': [],
+        'search_url': 'https://api.example.com/v1/search'}},
+        provider_defaults={'claude': 'ollama'})
+    _make_sw(s)
+    editor = _make_editor(s, 'ollama')
+    assert editor._search_url_row.get_text() == 'https://api.example.com/v1/search'

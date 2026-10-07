@@ -19,39 +19,72 @@ Still optional / polish:
 - Detach/reattach (remote zellij) — disconnect kills process today
 - ControlMaster / async SSH to avoid UI stalls on slow hosts
 
-### 2. Update PAA to use the correct model(s) — **shipped in 1.4.4**
+### 2. Update PAA to use the correct model(s) — **shipped in 1.4.4; Discuss harness in 1.6.0**
 
-PAA AI scans and Discuss sessions route through the model axis
-(`build_spawn_env` + tier resolution). Scan/chat pick a Claude Code tier
-(Fast/Standard/Capable = Haiku/Sonnet/Opus) mapped to the configured
-provider. Sidebar label is **AI Scan** (was “Haiku Check”). Storage key
-`paa_allow_haiku` kept for settings back-compat.
+PAA AI scans route through the harness adapter seam (`effective_harness` +
+`headless_plan`). Discuss/Chat VTE follows the **global default harness**
+(same as a new unpinned project) and that harness’s default provider when it
+has a provider axis. Fast/Standard/Capable remain PAA settings and apply
+when the resolved harness maps those tiers (Claude Code). Sidebar label is
+**AI Scan** (was “Haiku Check”). Storage key `paa_allow_haiku` kept for
+settings back-compat.
 
 PAA remains **localhost-only**.
 
 ### 3. Custom providers for every harness
 
-Today Settings → Models defines Anthropic-compatible **custom providers**
-(base URL, API key, model list, tiers, max context, 1M toggle) that ProjectMan
-injects for **Claude Code** only (`models.build_spawn_env`). Grok Build and
-OpenCode still run against their own native configs; the Models page shows
-placeholders / “managed by the harness” for them.
+Settings → Models defines Anthropic-compatible **custom providers** (base
+URL, API key, model list, tiers, max context, 1M toggle, optional search
+endpoint).
 
-**Intention:** the same Settings provider catalog should be usable with
-**Claude Code, OpenCode, and Grok Build** — pick a harness *and* a custom
-provider (or that harness’s native backend) per project. Sidebar Provider /
-model pins already use dual axes (`provider_overrides` + `model_pins`, 1.4.1);
-the remaining work is adapter-side: teach Grok/OpenCode to honor a selected
-custom provider (env / base URL / credentials as appropriate) instead of
-native-only, and flesh out the Models UI beyond placeholders.
+**Shipped in 1.7.0:** Claude Code and Grok Build. Each harness has its own
+**Active Provider** (Settings → Harnesses; absent means that harness’s native
+backend). A project can override it from the sidebar. Grok custom spawns use
+a ProjectMan-managed home at `~/.ProjectMan/grok-homes/<provider>/` and are
+refused over remote SSH. An optional **Search endpoint** on the provider
+registers a `web_search` MCP tool for those grok sessions.
 
-This is a product goal, not a commitment to a specific design. Native
-subscription backends stay first-class; custom providers are the portable
-path (e.g. Ollama pool) across harnesses.
+**Still open:** OpenCode and Kimi stay native-only (the Active Provider row
+is shown and cannot be changed). Remote custom-provider grok needs a way to
+ship the managed home to the other host. The phone bot stays on native Grok
+until per-provider reviewer certification.
+
+Native subscription backends stay first-class; custom providers are the
+portable path (for example an Ollama pool) across harnesses.
 
 ### 4. Set up claude/projectman to work with telegram
 
-Wire ProjectMan / Claude workflows to Telegram (details TBD).
+Telegram-PAA is `docs/paa-telegram-plan.md`. The private bot is the phone
+client: it owns one resumable PAA conversation and, in the same process, runs
+the existing scan loop so new pending findings show up in that chat. The
+Kotlin/Compose Android app is deferred.
+
+**Status 2026-10-05:** live on the primary workstation and in daily testing. Locked behind TOTP
+(`/unlock`), ro read-only mode probe-verified, rw reviewer-gated shell via a
+bot-owned MCP `run_command` (the reviewer model is the sole gate; static
+denylist + denial memory + full-command audit in `paa-journal.md`). Automated
+findings deliberately do NOT post to Telegram (the maintainer override). Remaining
+PAA-specific changes are tabled; the open items are harness portability
+(item 5) and per-provider reviewer certification when item 3 lands.
+
+### 5. Make PAA work with any harness
+
+Today PAA's verified posture exists **only for Grok Build**: `chat_turn`
+refuses opencode/kimi for any non-legacy policy (`_UNCONSTRAINED`,
+`paa_headless.py:411` — no verified read-only flag), and the rw reviewer
+gate is grok-specific end-to-end (bypassPermissions argv, deny-rule names,
+MCP registration in the PAA cwd's `.grok/config.toml`, trust entry,
+`--reasoning-effort`). Switching `harness_default` makes the bot refuse
+every turn (fail-closed, but dead).
+
+The work, per harness: probe-verify a read-only posture (its equivalent of
+deny-guarded `plan`); port the reviewer-gated `run_command` channel (MCP
+registration + the bot's per-turn token broker are harness-agnostic by
+design); re-run the adversarial review + live probe gauntlet. Also add a
+`harness_id` pin in `paa-telegram.json` so the bot's harness doesn't
+silently follow the desktop default. Kimi first (it has MCP support and
+headless chat); OpenCode after; Claude already has the plan/acceptEdits
+mapping scaffolded but was never probe-verified for the bot.
 
 ## Future Possible Features/Changes
 

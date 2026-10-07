@@ -8,7 +8,7 @@ gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib
 
 from settings import TIERS
-from models import (build_provider_options, build_tier_options,
+from models import (build_tier_options,
                     list_provider_models, normalize_model_id,
                     is_1m_model_id, with_1m_suffix, without_1m_suffix)
 
@@ -166,6 +166,23 @@ class ProviderEditorWindow(Adw.Dialog):
         self._wire_focus_commit(
             self._max_ctx_row, self._commit_max_context_tokens)
         ident.add(self._max_ctx_row)
+
+        # Search endpoint (optional) — Grok Build only. The managed grok home
+        # registers pm-search when this is set. Claude and the other harnesses
+        # do not read it. Catalog data, not code: POST {search_url} with
+        # {"text_query", "limit"}.
+        self._search_url_row = Adw.EntryRow(
+            title='Search endpoint (optional)')
+        self._search_url_row.set_text(prov.get('search_url') or '')
+        self._search_url_row.set_show_apply_button(True)
+        self._search_url_row.set_input_hints(Gtk.InputHints.NO_SPELLCHECK)
+        self._search_url_row.set_tooltip_text(
+            'Grok Build sessions on this provider get a web_search tool '
+            'that POSTs this URL. Other harnesses ignore it.')
+        self._search_url_row.connect(
+            'apply', lambda _r: self._commit_search_url())
+        self._wire_focus_commit(self._search_url_row, self._commit_search_url)
+        ident.add(self._search_url_row)
         outer.append(ident)
 
         # -- Models (ABOVE tier assignments — the maintainer wants the models list first,
@@ -194,7 +211,9 @@ class ProviderEditorWindow(Adw.Dialog):
         self._tier_group = Adw.PreferencesGroup(
             title='Tier assignments',
             description='Opus/Sonnet/Haiku/Subagent/Fable → a model on this '
-                        'provider. "Default" uses the first model.')
+                        'provider. "Default" uses the first model, except '
+                        'Subagent, which stays on the harness default until '
+                        'you pick a model.')
         self._tier_combos = {}
         self._rebuild_tier_combos()
         outer.append(self._tier_group)
@@ -514,6 +533,22 @@ class ProviderEditorWindow(Adw.Dialog):
         self._prov['max_context_tokens'] = value
         self._mark_dirty()
 
+    def _commit_search_url(self):
+        url = self._search_url_row.get_text().strip()
+        err = 'Must start with http:// or https:// (or leave blank)'
+        if url and not (url.startswith('http://') or url.startswith('https://')):
+            self._search_url_row.add_css_class('error')
+            self._search_url_row.set_tooltip_text(err)
+            return
+        self._search_url_row.remove_css_class('error')
+        if (self._prov.get('search_url') or '') == url:
+            return
+        if url:
+            self._prov['search_url'] = url
+        else:
+            self._prov.pop('search_url', None)
+        self._mark_dirty()
+
     def _commit_url(self):
         url = self._url_row.get_text().strip()
         if self._prov.get('base_url') == url:
@@ -652,8 +687,12 @@ class ProviderEditorWindow(Adw.Dialog):
         from settings import scrub_provider_from_axis_memory
         if isinstance(self._settings.providers, dict):
             self._settings.providers.pop(self._pid, None)
-        if self._settings.model_default == self._pid:
-            self._settings.model_default = ''
+        if isinstance(self._settings.provider_defaults, dict):
+            # Drop the deleted provider from EVERY harness's default.
+            self._settings.provider_defaults = {
+                h: v for h, v in self._settings.provider_defaults.items()
+                if v != self._pid
+            }
         if isinstance(self._settings.provider_overrides, dict):
             self._settings.provider_overrides = {
                 p: v for p, v in self._settings.provider_overrides.items()
@@ -727,8 +766,11 @@ class ProviderEditorWindow(Adw.Dialog):
         from settings import scrub_provider_from_axis_memory
         if isinstance(self._settings.providers, dict):
             self._settings.providers.pop(self._pid, None)
-        if self._settings.model_default == self._pid:
-            self._settings.model_default = ''
+        if isinstance(self._settings.provider_defaults, dict):
+            self._settings.provider_defaults = {
+                h: v for h, v in self._settings.provider_defaults.items()
+                if v != self._pid
+            }
         if isinstance(self._settings.provider_overrides, dict):
             self._settings.provider_overrides = {
                 p: v for p, v in self._settings.provider_overrides.items()
@@ -846,7 +888,11 @@ class SettingsWindow(Adw.PreferencesDialog):
 
         self._debug_row = Adw.SwitchRow(
             title='Debug Logging',
-            subtitle='Print debug output to stdout (also enabled by --debug flag)',
+            subtitle=(
+                'Print [DBG] lines to stdout: session launches (terminal, '
+                'zellij, PAA AI scans, Discuss), plus other traces. Also '
+                'enabled by the --debug flag.'
+            ),
         )
         self._debug_row.set_active(self._settings.debug_logging)
         self._debug_row.connect('notify::active', self._on_debug_toggled)
@@ -1438,12 +1484,13 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_enabled_row = Adw.SwitchRow(
             title='Enable PAA',
             # M-UX.4 (C2): the old "filesystem only — no API cost" lied — PAA's
-            # AI scans use Claude Code with the configured provider. Split the
-            # copy: the master toggle enables the monitor (whose FILESYSTEM
-            # checks are free); the API cost belongs to "Enable AI Scans" below.
+            # AI scans use the default harness (and its provider when it has
+            # one). Split the copy: the master toggle enables the monitor
+            # (FILESYSTEM checks are free); API cost belongs to AI Scans.
             subtitle='Turn on the Projects Admin Agent background monitor. '
-                     'Filesystem checks are free; AI scans (below) use Claude '
-                     'Code with your configured provider.',
+                     'Filesystem checks are free; AI scans (below) use your '
+                     'default harness (and its default provider when that '
+                     'harness has one).',
         )
         self._paa_enabled_row.set_tooltip_text(
             'When on, ProjectMan periodically scans local projects (interval '
@@ -1486,13 +1533,14 @@ class SettingsWindow(Adw.PreferencesDialog):
         # sessions work whether or not background AI scans are enabled.
         _chat_models = ['sonnet', 'haiku', 'opus']
         _chat_labels = [
-            'Standard (Sonnet tier)',
-            'Fast (Haiku tier)',
-            'Capable (Opus tier)',
+            'Standard',
+            'Fast',
+            'Capable',
         ]
         self._paa_chat_model_row = Adw.ComboRow(
             title='Chat Model',
-            subtitle='Claude Code tier for Discuss sessions',
+            subtitle='Chat tier (used when the default harness maps '
+                     'Fast/Standard/Capable)',
         )
         self._paa_chat_model_row.set_model(Gtk.StringList.new(_chat_labels))
         chat_idx = _chat_models.index(self._settings.paa_chat_model) \
@@ -1511,10 +1559,11 @@ class SettingsWindow(Adw.PreferencesDialog):
 
         self._paa_ai_scans_row = Adw.SwitchRow(
             title='Enable AI Scans',
-            # AI scans use Claude Code with the Models-page provider + scan tier
-            # (model-axis routing — not always Anthropic native).
-            subtitle='Optional AI-powered analysis of projects (uses Claude Code '
-                     'and your Models-page provider — may cost API tokens).',
+            # AI scans use the default harness (and its default provider when
+            # that harness has a provider axis — Claude Code today).
+            subtitle='Optional AI-powered analysis of projects (uses your '
+                     'default harness and its default provider when that '
+                     'harness has one — may cost API tokens).',
         )
         self._paa_ai_scans_row.set_tooltip_text(
             'Requires Enable PAA above. When on, PAA can run deeper AI analysis '
@@ -1565,17 +1614,17 @@ class SettingsWindow(Adw.PreferencesDialog):
         self._paa_budget_row.add_suffix(self._paa_budget_scale)
         ai_group.add(self._paa_budget_row)
 
-        # Scan model (stored values remain haiku/sonnet/opus CC tiers)
+        # Scan model (stored values remain haiku/sonnet/opus claude-axis tiers)
         _scan_models = ['haiku', 'sonnet', 'opus']
         _scan_labels = [
-            'Fast (Haiku tier)',
-            'Standard (Sonnet tier)',
-            'Capable (Opus tier)',
+            'Fast',
+            'Standard',
+            'Capable',
         ]
         self._paa_scan_model_row = Adw.ComboRow(
             title='Scan Model',
-            subtitle="Claude Code tier used for background AI scans "
-                     "(mapped to your provider's models)",
+            subtitle='Scan tier (used when the default harness maps '
+                     'Fast/Standard/Capable)',
         )
         self._paa_scan_model_row.set_model(Gtk.StringList.new(_scan_labels))
         scan_idx = _scan_models.index(self._settings.paa_scan_model) \
@@ -1901,36 +1950,23 @@ class SettingsWindow(Adw.PreferencesDialog):
 
         intro_group = Adw.PreferencesGroup(
             title='Models',
-            description='Route Claude Code at any Anthropic-compatible provider '
-                        '(ollama, LiteLLM, etc.). Pick a default provider and '
-                        'define providers below — each provider card carries its '
-                        'own tier assignments. Override the provider per project '
-                        'from the sidebar menu. Under Zellij the provider applies '
-                        'to new sessions only (an attach inherits the server env).',
+            description='Define Anthropic-compatible providers and their models. '
+                        'The catalog serves Claude Code and Grok Build — each '
+                        "harness's default provider is set on the Harness page "
+                        '(Active Provider), and the provider can be overridden '
+                        'per project from the sidebar menu. Each provider card '
+                        'carries its own tier assignments. Under Zellij the '
+                        'provider applies to new sessions only (an attach '
+                        'inherits the server env).',
         )
         page.add(intro_group)
 
-        # -- Active Provider --
-        self._active_provider_group = Adw.PreferencesGroup(title='Active Provider')
-        page.add(self._active_provider_group)
-        self._provider_combo = Adw.ComboRow(title='Default Provider, Claude Code')
-        self._provider_combo.set_subtitle(
-            'Anthropic (native) uses your own Anthropic credentials')
-        self._provider_combo.connect('notify::selected', self._on_default_provider_changed)
-        self._active_provider_group.add(self._provider_combo)
-        for future_title in (
-            'Default Provider, Grok Build (future)',
-            'Default Provider, OpenCode (future)',
-        ):
-            future_row = Adw.ActionRow(title=future_title)
-            future_row.set_subtitle('Not configurable in ProjectMan yet')
-            future_row.set_sensitive(False)
-            self._active_provider_group.add(future_row)
-
         # -- Providers --
-        # Each provider card holds its own per-provider Tier Assignments (B2):
-        # TA applies to any defined provider, not just the default, so the combos
-        # live in the card instead of a separate group gated on the default.
+        # (The per-harness "Active Provider" default lives on the Harness page
+        # since 2026-10-05 — the old global "Default Provider, Claude Code"
+        # combo and its (future) placeholder rows were removed: a global
+        # default leaked onto every harness, e.g. unpinned grok projects
+        # inheriting claude's Ollama.)
         self._providers_group = Adw.PreferencesGroup(
             title='Providers',
             description='Define Anthropic-compatible providers and their models. '
@@ -1949,24 +1985,14 @@ class SettingsWindow(Adw.PreferencesDialog):
 
         self._provider_card_rows = []
         self._refresh_models_page()
-        self._build_native_model_sections(page)
 
     def _refresh_models_page(self):
         """Rebuild the whole Models page from settings (after any change)."""
-        self._refresh_provider_combo()
         self._rebuild_providers_group()
-
-    def _refresh_provider_combo(self):
-        ids, labels = build_provider_options(self._settings.providers)
-        self._provider_ids = ids
-        cur = self._settings.model_default
-        self._suppress_combos = True
-        self._provider_combo.set_model(Gtk.StringList.new(labels))
-        self._provider_combo.set_selected(ids.index(cur) if cur in ids else 0)
-        self._suppress_combos = False
-        if cur not in ids:
-            # The stored default's provider was removed — fall back to native.
-            self._settings.model_default = ''
+        # The catalog changed — re-sync the Harness page's Active Provider
+        # combos (added/removed providers, renamed cards).
+        if getattr(self, '_provider_default_rows', None):
+            self._refresh_active_provider_rows()
 
     def _rebuild_providers_group(self):
         for row in list(self._provider_card_rows):
@@ -2023,21 +2049,6 @@ class SettingsWindow(Adw.PreferencesDialog):
 
     # --- Models page handlers ------------------------------------------
 
-    def _on_default_provider_changed(self, row, _param):
-        if self._suppress_combos:
-            return
-        idx = row.get_selected()
-        ids = getattr(self, '_provider_ids', [])
-        if not (0 <= idx < len(ids)):
-            return
-        self._settings.model_default = ids[idx]
-        self._settings.save()
-        self._app.emit('settings-changed')
-        # Tier assignments are per-provider (in each provider's editor), so
-        # changing the default doesn't invalidate any provider's tiers — just
-        # refresh the combo + slim-row layout.
-        self._refresh_models_page()
-
     def _on_add_provider(self, button):
         if not isinstance(self._settings.providers, dict):
             self._settings.providers = {}
@@ -2056,40 +2067,6 @@ class SettingsWindow(Adw.PreferencesDialog):
         # Open the editor on the freshly-added empty provider so the user can
         # fill it immediately (the flow that lost fields under the ExpanderRow).
         self._open_editor(pid)
-
-    # ------------------------------------------------------------------ #
-    #  Extra Pages                                                         #
-    # ------------------------------------------------------------------ #
-
-    def _build_native_model_sections(self, page):
-        """Placeholder sections for native-model harness ownership.
-
-        Grok / OpenCode / Kimi pick models in their own configs; PM does not
-        list or edit those models here. One non-interactive row each points
-        at that. Iterate every adapter whose load_harness_config is non-None
-        so new native-model harnesses show up without a hardcoded list.
-        """
-        import harnesses
-        import harness_configs
-        for harness_id in harnesses.ADAPTERS:
-            cfg = harness_configs.load_harness_config(harness_id)
-            if cfg is None:
-                continue
-            adapter = harnesses.ADAPTERS.get(harness_id)
-            display = adapter.display_name if adapter else harness_id
-            shown_path = harness_configs._display_path(cfg.source_path)
-            group = Adw.PreferencesGroup(title=display)
-            if shown_path:
-                group.set_description(
-                    f'Models are chosen in the harness’s own config ({shown_path}).')
-            else:
-                group.set_description(
-                    'Models are chosen in the harness’s own config.')
-            page.add(group)
-            row = Adw.ActionRow(title='Managed by the harness')
-            row.set_sensitive(False)
-            group.add(row)
-
 
     # ------------------------------------------------------------------ #
     #  Harnesses page (B3 — minimal this phase; full doctor is P3)            #
@@ -2143,6 +2120,11 @@ class SettingsWindow(Adw.PreferencesDialog):
 
         # Per-harness config: binary path + doctor-lite check.
         self._harness_binary_rows = {}
+        # Active Provider combos (claude/grok selectable; opencode/kimi
+        # insensitive placeholders) — keyed by harness id for refresh after
+        # the Models page adds/removes providers.
+        self._provider_default_rows = {}
+        self._provider_default_row_ids = {}
         # M-UX.8: (row, button) per harness so the bridge state can refresh after
         # an install click without rebuilding the page.
         self._bridge_rows = {}
@@ -2168,6 +2150,7 @@ class SettingsWindow(Adw.PreferencesDialog):
                 'apply', lambda r, aid=harness_id: self._on_harness_binary_apply(aid, r))
             group.add(binary_row)
             self._harness_binary_rows[harness_id] = binary_row
+            self._add_active_provider_row(group, harness_id)
 
             # Doctor-lite: <binary> --version.
             check_row = Adw.ActionRow(title='Status')
@@ -2227,6 +2210,97 @@ class SettingsWindow(Adw.PreferencesDialog):
     @staticmethod
     def _app_dir():
         return os.path.dirname(os.path.abspath(__file__))
+
+    def _add_active_provider_row(self, group, harness_id):
+        """Per-harness "Active Provider" default (2026-10-05): which custom
+        Settings → Models provider this harness spawns against ('' = its
+        native backend). Selectable for claude/grok; opencode/kimi are
+        native-only adapters — the row is present but insensitive."""
+        from models import (NATIVE_LABEL, GROK_NATIVE_LABEL,
+                            OPENCODE_NATIVE_LABEL, KIMI_NATIVE_LABEL)
+        native_label = {
+            'grok': GROK_NATIVE_LABEL,
+            'opencode': OPENCODE_NATIVE_LABEL,
+            'kimi': KIMI_NATIVE_LABEL,
+        }.get(harness_id, NATIVE_LABEL)
+        row = Adw.ComboRow(
+            title='Active Provider',
+            subtitle='Custom provider this harness spawns against '
+                     '(native = its own backend)')
+        if harness_id not in ('claude', 'grok'):
+            row.set_subtitle('Not configurable in ProjectMan yet')
+            row.set_sensitive(False)
+            row.set_model(Gtk.StringList.new([native_label]))
+            row.set_selected(0)
+            group.add(row)
+            return
+        ids, labels = self._provider_default_options(native_label)
+        row.set_model(Gtk.StringList.new(labels))
+        self._provider_default_rows[harness_id] = row
+        self._provider_default_row_ids[harness_id] = ids
+        self._select_active_provider_row(harness_id)
+        row.connect('notify::selected',
+                    lambda r, _p, hid=harness_id:
+                    self._on_active_provider_changed(hid, r))
+        group.add(row)
+
+    def _provider_default_options(self, native_label):
+        """(ids, labels): '' = native, then one entry per custom provider."""
+        ids = ['']
+        labels = [native_label]
+        providers = self._settings.providers \
+            if isinstance(self._settings.providers, dict) else {}
+        for pid in sorted(providers):
+            prov = providers.get(pid)
+            if not isinstance(prov, dict):
+                continue
+            ids.append(pid)
+            labels.append(prov.get('name') or pid)
+        return ids, labels
+
+    def _select_active_provider_row(self, harness_id):
+        """Point the harness's combo at its stored default (native when the
+        stored pid is unknown/stale)."""
+        row = self._provider_default_rows.get(harness_id)
+        ids = self._provider_default_row_ids.get(harness_id, [''])
+        if row is None:
+            return
+        pd = self._settings.provider_defaults \
+            if isinstance(self._settings.provider_defaults, dict) else {}
+        cur = pd.get(harness_id, '')
+        self._suppress_combos = True
+        row.set_selected(ids.index(cur) if cur in ids else 0)
+        self._suppress_combos = False
+
+    def _refresh_active_provider_rows(self):
+        """Re-sync every Active Provider combo after the provider catalog
+        changed (Models page add/remove/editor)."""
+        from models import (NATIVE_LABEL, GROK_NATIVE_LABEL,
+                            OPENCODE_NATIVE_LABEL, KIMI_NATIVE_LABEL)
+        native_labels = {
+            'grok': GROK_NATIVE_LABEL,
+            'opencode': OPENCODE_NATIVE_LABEL,
+            'kimi': KIMI_NATIVE_LABEL,
+        }
+        for hid in list(self._provider_default_rows):
+            ids, labels = self._provider_default_options(
+                native_labels.get(hid, NATIVE_LABEL))
+            row = self._provider_default_rows[hid]
+            self._suppress_combos = True
+            row.set_model(Gtk.StringList.new(labels))
+            self._suppress_combos = False
+            self._provider_default_row_ids[hid] = ids
+            self._select_active_provider_row(hid)
+
+    def _on_active_provider_changed(self, harness_id, row):
+        if self._suppress_combos:
+            return
+        ids = self._provider_default_row_ids.get(harness_id, [])
+        idx = row.get_selected()
+        if not (0 <= idx < len(ids)):
+            return
+        self._settings.set_provider_default(harness_id, ids[idx])
+        self._app.emit('settings-changed')
 
     def _on_harness_default_changed(self, row, _param):
         idx = row.get_selected()

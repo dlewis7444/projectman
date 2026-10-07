@@ -55,6 +55,13 @@ def _isolate_projectman_paths(tmp_path_factory, monkeypatch):
             str(fake_home / 'paa-mtime-cache.json'),
             raising=False,
         )
+        # Scan exclusion uses a real flock. Keep it off the maintainer's ledger dir.
+        monkeypatch.setattr(
+            paa_monitor,
+            'SCAN_LOCK_PATH',
+            str(fake_home / 'paa-scan.lock'),
+            raising=False,
+        )
     except ImportError:
         pass
     # Virtual groups: Sidebar loads localhost forest on init; keep tests off

@@ -38,6 +38,45 @@ def test_with_harness_path_prepends_and_is_idempotent(tmp_path):
     assert out2['PATH'].split(os.pathsep).count(str(kimi)) == 1
 
 
+def test_ensure_kimi_co_shim_is_pm_owned_not_harness_tree(tmp_path):
+    """Shim lives under ~/.ProjectMan/bin — never touches ~/.kimi-code."""
+    shim_path = harnesses.ensure_kimi_co_shim(home=str(tmp_path))
+    assert shim_path
+    assert shim_path.startswith(str(tmp_path / '.ProjectMan' / 'bin'))
+    assert (tmp_path / '.ProjectMan' / 'bin' / 'kimi-co').is_file()
+    # No writes into the harness install tree
+    assert not (tmp_path / '.kimi-code').exists()
+    # Idempotent rewrite
+    assert harnesses.ensure_kimi_co_shim(home=str(tmp_path)) == shim_path
+
+
+def test_kimi_co_shim_execs_real_kimi(tmp_path):
+    bindir = tmp_path / '.kimi-code' / 'bin'
+    bindir.mkdir(parents=True)
+    marker = tmp_path / 'ran'
+    kimi = bindir / 'kimi'
+    kimi.write_text(f'#!/bin/sh\necho ok > "{marker}"\n')
+    kimi.chmod(0o755)
+    shim = harnesses.ensure_kimi_co_shim(home=str(tmp_path))
+    env = harnesses.with_harness_path({'PATH': '/usr/bin'}, home=str(tmp_path))
+    import subprocess
+    r = subprocess.run(
+        [shim, '--version'],
+        env={**os.environ, **env, 'HOME': str(tmp_path)},
+        capture_output=True, text=True, timeout=5,
+    )
+    assert r.returncode == 0
+    assert marker.read_text().strip() == 'ok'
+
+
+def test_with_harness_path_prepends_pm_bin(tmp_path):
+    (tmp_path / '.ProjectMan' / 'bin').mkdir(parents=True)
+    (tmp_path / '.kimi-code' / 'bin').mkdir(parents=True)
+    out = harnesses.with_harness_path({'PATH': '/usr/bin'}, home=str(tmp_path))
+    parts = out['PATH'].split(os.pathsep)
+    assert parts[0] == str(tmp_path / '.ProjectMan' / 'bin')
+
+
 def test_with_harness_path_empty_path(tmp_path):
     home = tmp_path
     (home / '.local' / 'bin').mkdir(parents=True)

@@ -63,6 +63,7 @@ row.active-project {
 .status-dot.status-done    { background: #33ff00; box-shadow: 0 0 7px alpha(#33ff00, 0.75); }
 .status-dot.status-working { background: #ffb300; box-shadow: 0 0 7px alpha(#ffb300, 0.70); }
 .status-dot.status-waiting { background: #00e5ff; box-shadow: 0 0 7px alpha(#00e5ff, 0.65); }
+.zellij-badge { color: #33ff00; }
 
 .sidebar-header {
     color: alpha(#33ff00, 0.40);

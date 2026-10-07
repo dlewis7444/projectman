@@ -485,9 +485,10 @@ def _label_for_agent(harness_id, *, settings=None, project_path='',
             try:
                 from models import provider_label
                 if project_path:
-                    pid = settings.effective_provider(project_path)
+                    pid = settings.effective_provider(project_path, 'claude')
                 else:
-                    pid = getattr(settings, 'model_default', '') or ''
+                    pid = settings.provider_defaults.get('claude', '') \
+                        if isinstance(settings.provider_defaults, dict) else ''
                 if pid:
                     return provider_label(
                         getattr(settings, 'providers', None), pid)
@@ -496,6 +497,22 @@ def _label_for_agent(harness_id, *, settings=None, project_path='',
         return native_label
 
     src = _display_path(cfg.source_path, home=home)
+    # Grok + custom Settings provider (2026-10-05): the model comes from PM's
+    # env/-m, not config.toml — attribute the PROVIDER, the way the claude
+    # branch above does, instead of "Managed by Grok Build".
+    if harness_id == 'grok' and settings is not None:
+        try:
+            from models import provider_label
+            if project_path:
+                pid = settings.effective_provider(project_path, 'grok')
+            else:
+                pid = settings.provider_defaults.get('grok', '') \
+                    if isinstance(settings.provider_defaults, dict) else ''
+            if pid:
+                return provider_label(
+                    getattr(settings, 'providers', None), pid)
+        except Exception:
+            pass
     base = f'Managed by {display} ({src})'
     if cfg.default_key:
         entry = cfg.default_entry()

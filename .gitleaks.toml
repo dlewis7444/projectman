@@ -1,0 +1,15 @@
+# Path allowlist for the publish gate. publish/publish-public.sh rewrites
+# history, so .gitleaksignore fingerprints (they embed the private commit
+# SHA) do not match the filtered repo. These two files hold the public
+# RFC 6238 TOTP test vector, not a credential.
+title = "ProjectMan"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "RFC 6238 TOTP test vectors"
+paths = [
+  '''(^|/)tests/test_paa_totp\.py$''',
+  '''(^|/)tests/test_paa_unlock\.py$''',
+]
