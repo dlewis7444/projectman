@@ -192,7 +192,7 @@ def test_explicit_harness_spawn_uses_that_adapter(monkeypatch):
     assert captured['argv'] == ['fake-agent']
 
 
-# ── FB-9 (P3.5e): sticky-agent lifetime = SESSION lifetime (the the maintainer repro) ───
+# ── FB-9 (P3.5e): sticky-agent lifetime = SESSION lifetime ─────────────────────
 # Construction-time _explicit_harness (A2) is cleared when the child TRULY ends and
 # re-resolved at the next spawn, so a deactivate→reactivate honors a pending
 # per-project override; a detach/reattach keeps it. Full round-trip here (real
@@ -200,10 +200,10 @@ def test_explicit_harness_spawn_uses_that_adapter(monkeypatch):
 # in test_terminal_lifetime.py.
 
 def test_fb9_deactivate_reactivate_honors_pending_override(monkeypatch):
-    """T-a (THE DAVID REPRO): a restored-grok session (explicit agent 'fake')
-    whose project is NOW overridden to claude, deactivated then reactivated, must
-    spawn CLAUDE. Reverting the FB-9 clear leaves _explicit_harness='fake' and the
-    reactivation re-spawns the fake agent → this FAILS with the verbatim repro."""
+    """T-a: a restored-grok session (explicit agent 'fake') whose project is
+    NOW overridden to claude, deactivated then reactivated, must spawn CLAUDE.
+    Reverting the FB-9 clear leaves _explicit_harness='fake' and the
+    reactivation re-spawns the fake agent → this FAILS with the regression."""
     import harnesses
     from settings import Settings
     monkeypatch.setitem(harnesses.ADAPTERS, 'fake', _FakeAdapter())

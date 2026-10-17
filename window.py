@@ -1445,7 +1445,8 @@ class AppWindow(Adw.ApplicationWindow):
     # --- deactivate (SIGTERM local child, keep in sidebar as inactive) ---
 
     def _on_project_deactivate(self, sidebar, path):
-        # Timer-fired deactivate only; immediate-kill paths bypass the grace period.
+        # Fired by the row's second-click CONFIRM; the first click only arms
+        # the pending-confirm state (no kill, no toast, no timer).
         self._sidebar.cancel_pending_deactivate(path)
         find = getattr(self, '_find_project', None)
         project = find(path) if callable(find) else None
@@ -1453,27 +1454,20 @@ class AppWindow(Adw.ApplicationWindow):
         tv = self._terminals.get(path)
         if tv is None:
             self._sidebar.set_project_state(path, 'inactive')
-            show = getattr(self, '_show_toast', None)
-            if callable(show):
-                show(
-                    f"Session closed for '{proj_name}'. "
-                    f"If it disappeared, switch the host filter to Show all."
-                )
-            return
-        # Detach-only policy: ProjectMan never kills the zellij SERVER session.
-        # For zellij, SIGTERM the local attach client; _fire_exit_if_current
-        # will see the still-alive server and emit process-detached. For direct
-        # children the same SIGTERM ends the session and emits process-exited.
-        tv.deactivate()
+        else:
+            # Detach-only policy: ProjectMan never kills the zellij SERVER session.
+            # For zellij, SIGTERM the local attach client; _fire_exit_if_current
+            # will see the still-alive server and emit process-detached. For direct
+            # children the same SIGTERM ends the session and emits process-exited.
+            tv.deactivate()
         # process-exited / process-detached signal fires → set_project_state(...)
-        # Soft feedback: one-click close is intentional for power users, but the
-        # active-only filter can hide the row and look like "delete". Point at
-        # Show all rather than "stays in the sidebar".
+        # Exactly one toast: the active-only filter can hide the row and look
+        # like "delete", so point at Show All rather than "stays in the sidebar".
         show = getattr(self, '_show_toast', None)
         if callable(show):
             show(
-                f"Session closed for '{proj_name}'. "
-                f"If it disappeared, switch the host filter to Show all."
+                f"Project '{proj_name}' closed. "
+                f"Set host filter to Show All to see it."
             )
 
     # --- archive (move to .archive, remove terminal) ---

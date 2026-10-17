@@ -89,8 +89,8 @@ class TerminalView(Gtk.Box):
         # raw bash error + a vanished row. process-exited still fires too (the
         # row goes 'inactive'); this is the explanatory layer on top.
         'process-spawn-failed': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
-        # Fired at spawn entry (before kill) so window.py can cancel a pending
-        # deferred deactivate before the grace timer can race a respawn.
+        # Fired at spawn entry (before kill) so window.py can disarm a pending
+        # stop-confirmation before the new child can be stopped by a stale click.
         'spawn-begin': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 

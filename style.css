@@ -83,16 +83,30 @@
 /* ── Project row action buttons — visible on hover ───────────────── */
 .project-row-actions { opacity: 0; transition: opacity 150ms; }
 row:hover .project-row-actions { opacity: 1; }
-/* Pending deactivate: actions box loses .project-row-actions in Python so
-   UNDO is always visible until the grace timer fires (no hover needed). */
+/* Pending stop-confirm: actions box loses .project-row-actions in Python so
+   the yellow CONFIRM stays visible without hover until confirmed/cancelled. */
 .project-row-actions-pending { opacity: 1; }
+
+/* Stop-confirm button — yellow with dark readable text; replaces the stop
+   button after the first click until the user confirms or cancels. */
+.project-row-confirm-btn {
+    background-color: #ffb900;
+    color: #241a00;
+    font-weight: 700;
+    font-size: 11px;
+    padding: 1px 8px;
+    min-height: 0;
+}
+.project-row-confirm-btn:hover { background-color: #ffc63d; }
+.project-row-confirm-btn:active { background-color: #e0a100; }
 
 /* ── Detached zellij session ──────────────────────────────────────── */
 .project-row-detached { font-style: italic; }
 
-/* ── Pending deactivate grace period ──────────────────────────────── */
+/* ── Pending stop-confirmation ────────────────────────────────────── */
 /* Italic only on the name label (class applied there). Row also gets the
-   same class so themes can wash the entry background while the timer runs. */
+   same class so themes can wash the entry background while confirmation
+   is armed. */
 label.project-row-pending-deactivate { font-style: italic; }
 
 /* ── Polling sweeper caught an exit our pidfd watch missed ───────── */

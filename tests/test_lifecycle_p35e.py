@@ -212,6 +212,7 @@ def test_zellij_kill_session_never_raises(monkeypatch):
 def _deactivate_fake(zellij_session=None):
     """A duck-typed AppWindow self for _on_project_deactivate tests."""
     tv_calls = []
+    toasts = []
     tv = types.SimpleNamespace(
         _is_zellij=zellij_session is not None,
         _zellij_session=zellij_session,
@@ -220,16 +221,16 @@ def _deactivate_fake(zellij_session=None):
     return types.SimpleNamespace(
         _terminals={'/p': tv},
         _find_project=lambda p: types.SimpleNamespace(name='p'),
-        _show_toast=lambda *a, **k: None,
+        _show_toast=lambda text, timeout=5: toasts.append(text),
         _sidebar=types.SimpleNamespace(cancel_pending_deactivate=lambda p: None),
-    ), tv, tv_calls
+    ), tv, tv_calls, toasts
 
 
 def test_on_project_deactivate_zellij_is_detach_only():
     """BINDING (detach-only): deactivating a zellij terminal calls tv.deactivate()
     (SIGTERM the local attach client) and does NOT call zellij.kill_session or
-    clear the zellij flags."""
-    fake, tv, calls = _deactivate_fake(zellij_session='pm-p')
+    clear the zellij flags. Exactly one post-close toast names the project."""
+    fake, tv, calls, toasts = _deactivate_fake(zellij_session='pm-p')
     killed = []
     import zellij
     orig_kill = zellij.kill_session
@@ -242,6 +243,9 @@ def test_on_project_deactivate_zellij_is_detach_only():
     assert killed == []
     assert tv._is_zellij is True
     assert tv._zellij_session == 'pm-p'
+    assert toasts == [
+        "Project 'p' closed. Set host filter to Show All to see it."
+    ]
 
 
 def test_on_project_archive_zellij_kills_server_session():
