@@ -36,13 +36,19 @@ _TIP_ADD_HOST = (
     'default harness (coding agent). Group: organizational folder only '
     '(no session).'
 )
-_TIP_CLOSE_SESSION = (
-    'Close session — stops the running agent terminal for this project. '
-    'For zellij, only the local attach client closes; the zellij session '
-    'keeps running and can be reattached.'
+_TIP_STOP_SESSION = (
+    'Stop Session — stops the running agent terminal for this project. '
+    'Click again to confirm. For zellij, only the local attach client '
+    'closes; the zellij session keeps running and can be reattached.'
 )
-_TIP_UNDO_CLOSE_SESSION = (
-    'Keep session open — cancel the pending close (session stays running).'
+_TIP_CONFIRM_STOP_SESSION = (
+    'Stop Session — confirm stopping the running agent terminal for this '
+    'project. For zellij, only the local attach client closes; the server '
+    'session keeps running and can be reattached.'
+)
+_TIP_CANCEL_STOP_SESSION = (
+    'Cancel Stop Session — disarm the confirmation and keep the session '
+    'running.'
 )
 
 
@@ -161,10 +167,9 @@ class Sidebar(Gtk.Box):
         self._process_states = {}
         # path → harness_id | None (C5 running harness)
         self._running_harnesses = {}
-        # Deferred deactivate grace: path stays 'attached' until timer fires.
+        # Pending stop-confirmation: the first click on the row's stop button
+        # arms a yellow CONFIRM (no kill); the second click stops the session.
         self._pending_deactivates = set()
-        self._pending_deactivate_timers = {}  # path → GLib timeout id
-        self.PENDING_DEACTIVATE_MS = 5000
 
         # Local groups: one load here so the first _populate() already has the
         # forest. Window adopts status via localhost_groups_load_status() —
@@ -176,8 +181,10 @@ class Sidebar(Gtk.Box):
         self._localhost_groups_status = _lg.status  # ok|missing|invalid|error
         self._localhost_groups_error = _lg.error
 
-        # CAPTURE Escape so cancel works even when the filter entry (or another
-        # sidebar control) has focus — not only when the create row is focused.
+        # CAPTURE Escape so sidebar-level cancels work even when another
+        # sidebar control has focus — not only when the create row is focused.
+        # Also disarms any armed stop-confirmation (✕ is the primary cancel),
+        # except while an inline rename is active — rename Escape wins there.
         _esc = Gtk.EventControllerKey.new()
         _esc.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         _esc.connect('key-pressed', self._on_sidebar_capture_key)
@@ -511,7 +518,9 @@ class Sidebar(Gtk.Box):
                         lambda r, p=proj.path: self.emit('project-archive', p))
         row.connect('deactivate-requested',
                     lambda r, p=proj.path: self._begin_pending_deactivate(p))
-        row.connect('deactivate-undo',
+        row.connect('deactivate-confirm',
+                    lambda r, p=proj.path: self._confirm_pending_deactivate(p))
+        row.connect('deactivate-cancel',
                     lambda r, p=proj.path: self.cancel_pending_deactivate(p))
         if proj.path in self._pending_deactivates:
             row.set_pending_deactivate(True)
@@ -973,17 +982,13 @@ class Sidebar(Gtk.Box):
         self._refresh_section_counts()
         self._update_count_label()
 
-    def _cancel_pending_deactivate_timer(self, path):
-        tid = self._pending_deactivate_timers.pop(path, None)
-        if tid is not None:
-            GLib.source_remove(tid)
-
     def cancel_pending_deactivate(self, path):
-        """Cancel a pending deactivate (UNDO, natural exit, or immediate-kill paths)."""
+        """Cancel an armed stop-confirmation — the row's ✕ button or Escape,
+        or natural exit, respawn, archive, and shutdown paths (anywhere the
+        session must survive)."""
         if path not in self._pending_deactivates:
             return
         self._pending_deactivates.discard(path)
-        self._cancel_pending_deactivate_timer(path)
         if path in self._rows:
             self._rows[path].set_pending_deactivate(False)
 
@@ -998,12 +1003,17 @@ class Sidebar(Gtk.Box):
             return
         self._pending_deactivates.discard(old_path)
         self._pending_deactivates.add(new_path)
-        self._cancel_pending_deactivate_timer(old_path)
-        self._pending_deactivate_timers[new_path] = GLib.timeout_add(
-            self.PENDING_DEACTIVATE_MS, self._fire_pending_deactivate, new_path)
+        old_row = self._rows.get(old_path)
+        if old_row is not None:
+            old_row.set_pending_deactivate(False)
+        new_row = self._rows.get(new_path)
+        if new_row is not None:
+            new_row.set_pending_deactivate(True)
 
     def _begin_pending_deactivate(self, path):
-        """Start the hidden grace period; kill only when the timer fires."""
+        """Arm the two-click stop: the row swaps its stop button for a yellow
+        CONFIRM and stays 'attached'. No timer, no toast — the session stops
+        only if CONFIRM is clicked (see _confirm_pending_deactivate)."""
         if path in self._pending_deactivates:
             return
         row = self._rows.get(path)
@@ -1011,28 +1021,15 @@ class Sidebar(Gtk.Box):
             return
         self._pending_deactivates.add(path)
         row.set_pending_deactivate(True)
-        self._cancel_pending_deactivate_timer(path)
-        self._pending_deactivate_timers[path] = GLib.timeout_add(
-            self.PENDING_DEACTIVATE_MS, self._fire_pending_deactivate, path)
-        # Soft confirm: 5s UNDO is already on the row; toast so distracted
-        # users notice before ProjectMan's terminal view closes. For zellij the
-        # server session keeps running (detach); for direct agents the process ends.
-        root = self.get_root()
-        if root is not None and hasattr(root, '_show_toast'):
-            root._show_toast(
-                'Closing session — click UNDO on the project row to keep it running',
-                timeout=4,
-            )
 
-    def _fire_pending_deactivate(self, path):
-        self._pending_deactivate_timers.pop(path, None)
+    def _confirm_pending_deactivate(self, path):
+        """Second click on CONFIRM: disarm and stop the session immediately."""
         if path not in self._pending_deactivates:
-            return False
+            return
         self._pending_deactivates.discard(path)
         if path in self._rows:
             self._rows[path].set_pending_deactivate(False)
         self.emit('project-deactivate', path)
-        return False
 
     def set_remote_projects(self, host_id, projects, *, rebuild=True):
         """Replace the cached project list for a remote host.
@@ -1230,8 +1227,23 @@ class Sidebar(Gtk.Box):
         self._new_project_host_id = 'localhost'
         self._new_project_group_id = ''
 
+    def _any_rename_active(self):
+        """True while any project or group row is in inline rename mode.
+
+        Rename entries own Escape (their own key controllers cancel the
+        rename), so the sidebar-level capture must yield to them.
+        """
+        for row in self._rows.values():
+            if getattr(row, '_rename_active', False):
+                return True
+        for grow in self._group_rows.values():
+            if getattr(grow, '_rename_active', False):
+                return True
+        return False
+
     def _on_sidebar_capture_key(self, _ctrl, keyval, _keycode, _state):
-        """Escape cancels pending create/group rows regardless of focus target."""
+        """Sidebar-level Escape cancellation: create/group rows first, inline
+        rename yields to its own handler, then armed stop-confirmations."""
         if keyval != Gdk.KEY_Escape:
             return False
         if self._new_project_row is not None:
@@ -1239,6 +1251,15 @@ class Sidebar(Gtk.Box):
             return True
         if self._new_group_entry_row is not None:
             self._cancel_new_group_entry()
+            return True
+        if self._any_rename_active():
+            # The focused rename entry cancels rename on Escape via its own
+            # controller — precedence over disarming stop-confirmations.
+            return False
+        if self._pending_deactivates:
+            # Convenience only — the row's ✕ button is the primary cancel
+            # affordance; Escape just disarms every armed confirmation.
+            self.cancel_all_pending_deactivates()
             return True
         return False
 
@@ -1968,7 +1989,8 @@ class ProjectRow(Gtk.ListBoxRow):
         'session-activated':  (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         'project-archive':    (GObject.SignalFlags.RUN_FIRST, None, ()),
         'deactivate-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'deactivate-undo':      (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'deactivate-confirm':   (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'deactivate-cancel':    (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-new-session': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-zellij':     (GObject.SignalFlags.RUN_FIRST, None, ()),
         'project-ntfy-toggle': (GObject.SignalFlags.RUN_FIRST, None, ()),
@@ -2078,29 +2100,42 @@ class ProjectRow(Gtk.ListBoxRow):
         self._deactivate_btn = Gtk.Button.new_from_icon_name('media-playback-stop-symbolic')
         self._deactivate_btn.add_css_class('flat')
         self._deactivate_btn.set_valign(Gtk.Align.CENTER)
-        # Persona feedback: "Deactivate" sounded destructive and was unexplained.
-        # Accessible name + tooltip: close the agent session, keep the project.
-        self._deactivate_btn.set_tooltip_text(_TIP_CLOSE_SESSION)
+        # Persona feedback: name the action, not the mechanism. Accessible
+        # name + tooltip: stop the agent session, keep the project.
+        self._deactivate_btn.set_tooltip_text(_TIP_STOP_SESSION)
         self._deactivate_btn.update_property(
             [Gtk.AccessibleProperty.LABEL],
-            ['Close session'],
+            ['Stop Session'],
         )
         self._deactivate_btn.set_sensitive(False)  # only enabled when process running
         self._deactivate_btn.connect('clicked',
                                      lambda b: self.emit('deactivate-requested'))
         actions_box.append(self._deactivate_btn)
 
-        self._undo_btn = Gtk.Button(label='UNDO')
-        self._undo_btn.add_css_class('flat')
-        self._undo_btn.set_valign(Gtk.Align.CENTER)
-        self._undo_btn.set_tooltip_text(_TIP_UNDO_CLOSE_SESSION)
-        self._undo_btn.update_property(
+        self._confirm_btn = Gtk.Button(label='CONFIRM')
+        self._confirm_btn.add_css_class('project-row-confirm-btn')
+        self._confirm_btn.set_valign(Gtk.Align.CENTER)
+        self._confirm_btn.set_tooltip_text(_TIP_CONFIRM_STOP_SESSION)
+        self._confirm_btn.update_property(
             [Gtk.AccessibleProperty.LABEL],
-            ['Keep session open'],
+            ['Confirm Stop Session'],
         )
-        self._undo_btn.set_visible(False)
-        self._undo_btn.connect('clicked', lambda b: self.emit('deactivate-undo'))
-        actions_box.append(self._undo_btn)
+        self._confirm_btn.set_visible(False)
+        self._confirm_btn.connect('clicked', lambda b: self.emit('deactivate-confirm'))
+        actions_box.append(self._confirm_btn)
+
+        self._cancel_btn = Gtk.Button.new_from_icon_name('window-close-symbolic')
+        self._cancel_btn.add_css_class('flat')
+        self._cancel_btn.add_css_class('circular')
+        self._cancel_btn.set_valign(Gtk.Align.CENTER)
+        self._cancel_btn.set_tooltip_text(_TIP_CANCEL_STOP_SESSION)
+        self._cancel_btn.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ['Cancel Stop Session'],
+        )
+        self._cancel_btn.set_visible(False)
+        self._cancel_btn.connect('clicked', lambda b: self.emit('deactivate-cancel'))
+        actions_box.append(self._cancel_btn)
 
         self._actions_box = actions_box
         top.append(actions_box)
@@ -2659,12 +2694,15 @@ class ProjectRow(Gtk.ListBoxRow):
             self.emit('session-activated', self._project.path, row._ref.id)
 
     def set_pending_deactivate(self, pending: bool):
-        """Visual grace-period state: italics + row wash + always-visible UNDO.
+        """Pending stop-confirmation state: italics + row wash + always-visible
+        yellow CONFIRM and ✕ cancel.
 
-        While pending, strip the hover-only opacity class so UNDO stays
-        visible even when the pointer leaves the row. Session state remains
-        attached until the sidebar timer fires. Row class drives theme
-        background wash; name label class drives italic.
+        Armed by the first stop-button click; the session state remains
+        'attached' until CONFIRM (second click) fires the actual deactivate,
+        or the ✕ / Escape cancels. While pending, strip the hover-only
+        opacity class so CONFIRM and ✕ stay visible even when the pointer
+        leaves the row. Row class drives theme background wash; name label
+        class drives italic.
         """
         self._pending_deactivate = pending
         if pending:
@@ -2674,13 +2712,15 @@ class ProjectRow(Gtk.ListBoxRow):
             self._actions_box.remove_css_class('project-row-actions')
             self._actions_box.add_css_class('project-row-actions-pending')
             self._deactivate_btn.set_visible(False)
-            self._undo_btn.set_visible(True)
+            self._confirm_btn.set_visible(True)
+            self._cancel_btn.set_visible(True)
         else:
             self.remove_css_class('project-row-pending-deactivate')
             self._name_label.remove_css_class('project-row-pending-deactivate')
             self._actions_box.remove_css_class('project-row-actions-pending')
             self._actions_box.add_css_class('project-row-actions')
-            self._undo_btn.set_visible(False)
+            self._confirm_btn.set_visible(False)
+            self._cancel_btn.set_visible(False)
             self._deactivate_btn.set_visible(True)
             self._deactivate_btn.set_sensitive(self._process_state == 'attached')
 

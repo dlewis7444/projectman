@@ -1011,7 +1011,7 @@ def test_paa_count_label_renders_count_and_scanning_states():
 
 
 # ===========================================================================
-# Deferred deactivate + UNDO grace period
+# Stop-confirm flow: first stop click arms a yellow CONFIRM, second click stops
 # ===========================================================================
 
 def _sidebar_with_projects(paths=None):
@@ -1033,7 +1033,7 @@ def _sidebar_with_projects(paths=None):
     return Sidebar(FakeStore(), HistoryReader(), StatusWatcher(), settings=settings)
 
 
-def test_pending_deactivate_shows_italic_and_undo():
+def test_pending_deactivate_shows_italic_and_confirm():
     row = _make_row()
     row.set_process_state('attached')
     row.set_pending_deactivate(True)
@@ -1041,14 +1041,15 @@ def test_pending_deactivate_shows_italic_and_undo():
     assert row.has_css_class('project-row-pending-deactivate')
     assert row._name_label.has_css_class('project-row-pending-deactivate')
     assert row._actions_box.has_css_class('project-row-actions-pending')
-    # Hover-hide class must be gone so UNDO stays visible without hover.
+    # Hover-hide class must be gone so CONFIRM/✕ stay visible without hover.
     assert not row._actions_box.has_css_class('project-row-actions')
-    assert row._undo_btn.get_visible() is True
+    assert row._confirm_btn.get_visible() is True
+    assert row._cancel_btn.get_visible() is True
     assert row._deactivate_btn.get_visible() is False
     assert row._process_state == 'attached'
 
 
-def test_undo_clears_pending_ui():
+def test_cancel_clears_pending_ui():
     row = _make_row()
     row.set_process_state('attached')
     row.set_pending_deactivate(True)
@@ -1056,23 +1057,18 @@ def test_undo_clears_pending_ui():
     assert not row.has_css_class('project-row-pending-deactivate')
     assert not row._name_label.has_css_class('project-row-pending-deactivate')
     assert not row._actions_box.has_css_class('project-row-actions-pending')
-    # Hover-hide restored after UNDO / cancel.
+    # Hover-hide restored after cancel.
     assert row._actions_box.has_css_class('project-row-actions')
-    assert row._undo_btn.get_visible() is False
+    assert row._confirm_btn.get_visible() is False
+    assert row._cancel_btn.get_visible() is False
     assert row._deactivate_btn.get_visible() is True
     assert row._deactivate_btn.get_sensitive() is True
 
 
-def test_begin_pending_deactivate_schedules_timer_not_immediate(monkeypatch):
-    captured = {}
-
-    def fake_timeout_add(ms, fn, *args):
-        captured['ms'] = ms
-        captured['fn'] = fn
-        captured['args'] = args
-        return 99
-
-    monkeypatch.setattr('sidebar.GLib.timeout_add', fake_timeout_add)
+def test_begin_pending_deactivate_arms_without_emitting(monkeypatch):
+    scheduled = []
+    monkeypatch.setattr('sidebar.GLib.timeout_add',
+                        lambda *a, **k: scheduled.append(a) or 1)
     sb = _sidebar_with_projects(['/tmp/pm-alpha'])
     path = '/tmp/pm-alpha'
     sb.set_project_state(path, 'attached')
@@ -1081,37 +1077,155 @@ def test_begin_pending_deactivate_schedules_timer_not_immediate(monkeypatch):
 
     sb._begin_pending_deactivate(path)
 
+    # Armed only: no signal, no timer, no toast on the first click.
     assert path in sb._pending_deactivates
     assert emitted == []
-    assert captured['ms'] == sb.PENDING_DEACTIVATE_MS
-    assert captured['args'] == (path,)
+    assert scheduled == []
     row = sb._rows[path]
     assert row._pending_deactivate is True
+    assert row._confirm_btn.get_visible() is True
+    assert row._deactivate_btn.get_visible() is False
 
 
-def test_fire_pending_deactivate_emits_signal(monkeypatch):
-    monkeypatch.setattr('sidebar.GLib.source_remove', lambda tid: None)
+def test_confirm_pending_deactivate_emits_immediately():
     sb = _sidebar_with_projects(['/tmp/pm-alpha'])
     path = '/tmp/pm-alpha'
     sb.set_project_state(path, 'attached')
-    sb._pending_deactivates.add(path)
-    sb._rows[path].set_pending_deactivate(True)
+    sb._begin_pending_deactivate(path)
     emitted = []
     sb.connect('project-deactivate', lambda s, p: emitted.append(p))
 
-    sb._fire_pending_deactivate(path)
+    sb._confirm_pending_deactivate(path)
 
     assert emitted == [path]
     assert path not in sb._pending_deactivates
     assert sb._rows[path]._pending_deactivate is False
+    # Already disarmed → a stray second confirm is a no-op (no double emit).
+    sb._confirm_pending_deactivate(path)
+    assert emitted == [path]
 
 
-def test_cancel_pending_deactivate_on_undo(monkeypatch):
-    removed = []
-    monkeypatch.setattr('sidebar.GLib.source_remove',
-                        lambda tid: removed.append(tid))
-    monkeypatch.setattr('sidebar.GLib.timeout_add', lambda *a, **k: 77)
+def test_stop_button_then_confirm_button_emits_once():
+    """End-to-end through the widgets: first click arms, second click stops."""
+    sb = _sidebar_with_projects(['/tmp/pm-alpha'])
+    path = '/tmp/pm-alpha'
+    sb.set_project_state(path, 'attached')
+    emitted = []
+    sb.connect('project-deactivate', lambda s, p: emitted.append(p))
+    row = sb._rows[path]
 
+    row._deactivate_btn.emit('clicked')   # first click: arm only
+    assert emitted == []
+    assert path in sb._pending_deactivates
+
+    row._confirm_btn.emit('clicked')      # second click: stop now
+    assert emitted == [path]
+    assert path not in sb._pending_deactivates
+
+
+def test_stop_button_then_cancel_button_no_emit():
+    """The ✕ beside CONFIRM disarms the armed stop; session keeps running."""
+    sb = _sidebar_with_projects(['/tmp/pm-alpha'])
+    path = '/tmp/pm-alpha'
+    sb.set_project_state(path, 'attached')
+    emitted = []
+    sb.connect('project-deactivate', lambda s, p: emitted.append(p))
+    row = sb._rows[path]
+
+    row._deactivate_btn.emit('clicked')   # first click: arm only
+    assert path in sb._pending_deactivates
+
+    row._cancel_btn.emit('clicked')       # cancel: disarm, no stop
+    assert emitted == []
+    assert path not in sb._pending_deactivates
+    assert row._pending_deactivate is False
+    assert row._confirm_btn.get_visible() is False
+    assert row._cancel_btn.get_visible() is False
+    assert row._deactivate_btn.get_visible() is True
+    assert row._deactivate_btn.get_sensitive() is True
+    # And the row is still fully attached.
+    assert row._process_state == 'attached'
+
+
+def test_escape_cancels_armed_stop_confirmation():
+    """Escape disarms every armed stop-confirmation (convenience, not sole
+    affordance) without emitting project-deactivate."""
+    from gi.repository import Gdk
+    sb = _sidebar_with_projects(['/tmp/pm-alpha'])
+    path = '/tmp/pm-alpha'
+    sb.set_project_state(path, 'attached')
+    emitted = []
+    sb.connect('project-deactivate', lambda s, p: emitted.append(p))
+    sb._begin_pending_deactivate(path)
+    assert path in sb._pending_deactivates
+
+    handled = sb._on_sidebar_capture_key(None, Gdk.KEY_Escape, 0, 0)
+
+    assert handled is True
+    assert path not in sb._pending_deactivates
+    assert emitted == []
+    assert sb._rows[path]._pending_deactivate is False
+    # Nothing armed anymore → Escape passes through unhandled.
+    assert sb._on_sidebar_capture_key(None, Gdk.KEY_Escape, 0, 0) is False
+
+
+def test_escape_during_project_rename_keeps_stop_confirmation_armed():
+    """Rename Escape wins: while a project row is in inline rename mode the
+    sidebar capture yields, so cancelling the rename does not disarm an
+    unrelated armed stop-confirmation."""
+    from gi.repository import Gdk
+    sb = _sidebar_with_projects(['/tmp/pm-alpha', '/tmp/pm-beta'])
+    sb.set_project_state('/tmp/pm-alpha', 'attached')
+    sb._begin_pending_deactivate('/tmp/pm-alpha')
+    beta = sb._rows['/tmp/pm-beta']
+    beta._enter_rename_mode()
+    assert beta._rename_active is True
+
+    handled = sb._on_sidebar_capture_key(None, Gdk.KEY_Escape, 0, 0)
+
+    # Sidebar yields so the rename entry's own controller can cancel the
+    # rename; the armed stop-confirmation on alpha is untouched.
+    assert handled is False
+    assert beta._rename_active is True
+    assert '/tmp/pm-alpha' in sb._pending_deactivates
+    assert sb._rows['/tmp/pm-alpha']._pending_deactivate is True
+
+    # The rename entry then consumes Escape itself: rename cancels, and the
+    # stop-confirmation is still armed.
+    assert beta._on_rename_key(None, Gdk.KEY_Escape, 0, 0) is True
+    assert beta._rename_active is False
+    assert '/tmp/pm-alpha' in sb._pending_deactivates
+
+
+def test_escape_during_group_rename_keeps_stop_confirmation_armed():
+    """Same precedence for a GroupRow inline rename."""
+    from gi.repository import Gdk
+    from project_groups import empty_forest, add_group
+
+    sb = _sidebar_with_projects(['/tmp/pm-alpha'])
+    forest = empty_forest()
+    g = add_group(forest, 'Work')
+    sb.set_group_forest('localhost', forest)
+    sb.refresh()
+
+    sb.set_project_state('/tmp/pm-alpha', 'attached')
+    sb._begin_pending_deactivate('/tmp/pm-alpha')
+    grow = sb._group_rows[('localhost', g.id)]
+    grow._enter_rename_mode()
+    assert grow._rename_active is True
+
+    handled = sb._on_sidebar_capture_key(None, Gdk.KEY_Escape, 0, 0)
+
+    assert handled is False
+    assert grow._rename_active is True
+    assert '/tmp/pm-alpha' in sb._pending_deactivates
+
+    assert grow._on_rename_key(None, Gdk.KEY_Escape, 0, 0) is True
+    assert grow._rename_active is False
+    assert '/tmp/pm-alpha' in sb._pending_deactivates
+
+
+def test_cancel_pending_deactivate_disarms():
     sb = _sidebar_with_projects(['/tmp/pm-alpha'])
     path = '/tmp/pm-alpha'
     sb.set_project_state(path, 'attached')
@@ -1119,14 +1233,13 @@ def test_cancel_pending_deactivate_on_undo(monkeypatch):
     sb.cancel_pending_deactivate(path)
 
     assert path not in sb._pending_deactivates
-    assert removed == [77]
-    assert sb._rows[path]._pending_deactivate is False
+    row = sb._rows[path]
+    assert row._pending_deactivate is False
+    assert row._confirm_btn.get_visible() is False
+    assert row._deactivate_btn.get_visible() is True
 
 
-def test_set_project_state_inactive_clears_pending(monkeypatch):
-    monkeypatch.setattr('sidebar.GLib.source_remove', lambda tid: None)
-    monkeypatch.setattr('sidebar.GLib.timeout_add', lambda *a, **k: 1)
-
+def test_set_project_state_inactive_clears_pending():
     sb = _sidebar_with_projects(['/tmp/pm-alpha'])
     path = '/tmp/pm-alpha'
     sb.set_project_state(path, 'attached')
@@ -1137,10 +1250,7 @@ def test_set_project_state_inactive_clears_pending(monkeypatch):
     assert sb._rows[path]._pending_deactivate is False
 
 
-def test_pending_deactivate_survives_populate(monkeypatch):
-    monkeypatch.setattr('sidebar.GLib.source_remove', lambda tid: None)
-    monkeypatch.setattr('sidebar.GLib.timeout_add', lambda *a, **k: 5)
-
+def test_pending_deactivate_survives_populate():
     sb = _sidebar_with_projects(['/tmp/pm-alpha'])
     path = '/tmp/pm-alpha'
     sb.set_project_state(path, 'attached')
@@ -1150,14 +1260,12 @@ def test_pending_deactivate_survives_populate(monkeypatch):
     row = sb._rows[path]
     assert path in sb._pending_deactivates
     assert row._pending_deactivate is True
-    assert row._undo_btn.get_visible() is True
+    assert row._confirm_btn.get_visible() is True
+    assert row._cancel_btn.get_visible() is True
     assert row._process_state == 'attached'
 
 
-def test_active_filter_keeps_pending_row_visible(monkeypatch):
-    monkeypatch.setattr('sidebar.GLib.timeout_add', lambda *a, **k: 1)
-    monkeypatch.setattr('sidebar.GLib.source_remove', lambda tid: None)
-
+def test_active_filter_keeps_pending_row_visible():
     sb = _sidebar_with_projects(['/tmp/pm-alpha', '/tmp/pm-beta'])
     sb.set_host_section_mode('localhost', 'active')
     sb.set_project_state('/tmp/pm-alpha', 'attached')
@@ -1172,29 +1280,35 @@ def test_active_filter_keeps_pending_row_visible(monkeypatch):
 def test_deactivate_signals_exist():
     from sidebar import ProjectRow
     assert GObject_signal_exists(ProjectRow, 'deactivate-requested')
-    assert GObject_signal_exists(ProjectRow, 'deactivate-undo')
+    assert GObject_signal_exists(ProjectRow, 'deactivate-confirm')
+    assert GObject_signal_exists(ProjectRow, 'deactivate-cancel')
+    assert not GObject_signal_exists(ProjectRow, 'deactivate-undo')
 
 
 def test_on_project_deactivate_without_terminal_sets_inactive():
-    """Timer-fired deactivate with no TerminalView must not leave a stuck row."""
+    """Confirmed deactivate with no TerminalView must not leave a stuck row."""
     from window import AppWindow
     states = []
+    toasts = []
     fake = types.SimpleNamespace(
         _terminals={},
         _sidebar=types.SimpleNamespace(
             cancel_pending_deactivate=lambda p: None,
             set_project_state=lambda p, s, is_zellij=False: states.append((p, s)),
         ),
+        _find_project=None,
+        _show_toast=lambda text, timeout=5: toasts.append(text),
     )
     AppWindow._on_project_deactivate(fake, None, '/missing')
     assert states == [('/missing', 'inactive')]
+    # Exactly one toast, naming the project and the Show All filter.
+    assert toasts == [
+        "Project 'missing' closed. Set host filter to Show All to see it."
+    ]
 
 
-def test_spawn_begin_cancels_pending_deactivate(monkeypatch):
-    """Respawn must cancel grace before kill so the timer cannot hit the new child."""
-    monkeypatch.setattr('sidebar.GLib.source_remove', lambda tid: None)
-    monkeypatch.setattr('sidebar.GLib.timeout_add', lambda *a, **k: 42)
-
+def test_spawn_begin_cancels_pending_deactivate():
+    """Respawn must disarm the confirmation before the new child starts."""
     sb = _sidebar_with_projects(['/tmp/pm-alpha'])
     path = '/tmp/pm-alpha'
     sb.set_project_state(path, 'attached')
@@ -1207,20 +1321,18 @@ def test_spawn_begin_cancels_pending_deactivate(monkeypatch):
     assert sb._rows[path]._pending_deactivate is False
 
 
-def test_migrate_pending_deactivate_rewrites_path(monkeypatch):
-    monkeypatch.setattr('sidebar.GLib.source_remove', lambda tid: None)
-    added = []
-    monkeypatch.setattr('sidebar.GLib.timeout_add',
-                        lambda ms, fn, path: added.append(path) or 3)
+def test_migrate_pending_deactivate_rewrites_path():
+    sb = _sidebar_with_projects(['/tmp/old', '/tmp/new'])
+    sb.set_project_state('/tmp/old', 'attached')
+    sb._begin_pending_deactivate('/tmp/old')
 
-    sb = _sidebar_with_projects(['/tmp/old'])
-    sb._pending_deactivates.add('/tmp/old')
-    sb._pending_deactivate_timers['/tmp/old'] = 2
     sb.migrate_pending_deactivate('/tmp/old', '/tmp/new')
 
     assert '/tmp/old' not in sb._pending_deactivates
     assert '/tmp/new' in sb._pending_deactivates
-    assert added == ['/tmp/new']
+    assert sb._rows['/tmp/old']._pending_deactivate is False
+    assert sb._rows['/tmp/new']._pending_deactivate is True
+    assert sb._rows['/tmp/new']._confirm_btn.get_visible() is True
 
 
 # ===========================================================================
@@ -1867,20 +1979,36 @@ def test_new_project_empty_name_flashes_required():
     assert row._entry.get_placeholder_text() == 'Name required'
 
 
-def test_close_session_button_tooltip_and_a11y_label():
-    """Deactivate control is labeled Close session with explanatory tooltip."""
-    from sidebar import _TIP_CLOSE_SESSION, ProjectRow
+def test_stop_session_button_tooltip_and_a11y_label():
+    """Stop control is labeled Stop Session with explanatory tooltip."""
+    from sidebar import (
+        _TIP_STOP_SESSION, _TIP_CONFIRM_STOP_SESSION, _TIP_CANCEL_STOP_SESSION,
+        ProjectRow,
+    )
     from model import Project
-    from gi.repository import Gtk
     proj = Project(name='x', path='/tmp/pm-x', host_id='localhost')
     row = ProjectRow(proj, None, None, settings=None)
     tip = row._deactivate_btn.get_tooltip_text() or ''
-    assert tip == _TIP_CLOSE_SESSION
-    assert 'Close session' in tip
+    assert tip == _TIP_STOP_SESSION
+    assert 'Stop Session' in tip
     assert 'zellij session keeps running' in tip
     assert 'sidebar' not in tip.lower()
-    # Accessible name is Close session (not Deactivate)
+    # Accessible name is Stop Session (not Close session / Deactivate)
+    assert 'Close session' not in tip
     assert 'Deactivate' not in tip
+    # Confirm button is the same Stop Session action, never an UNDO.
+    ctip = row._confirm_btn.get_tooltip_text() or ''
+    assert ctip == _TIP_CONFIRM_STOP_SESSION
+    assert 'Stop Session' in ctip
+    assert row._confirm_btn.get_label() == 'CONFIRM'
+    assert row._confirm_btn.has_css_class('project-row-confirm-btn')
+    # Cancel button disarms the confirmation; a11y name carries the action.
+    ktip = row._cancel_btn.get_tooltip_text() or ''
+    assert ktip == _TIP_CANCEL_STOP_SESSION
+    assert 'Cancel Stop Session' in ktip
+    assert row._cancel_btn.get_icon_name() == 'window-close-symbolic'
+    assert not row._confirm_btn.get_visible()
+    assert not row._cancel_btn.get_visible()
 
 
 def test_new_group_dialog_disables_create_until_named():

@@ -2,6 +2,16 @@
 
 All notable changes to ProjectMan will be documented in this file.
 
+## [1.7.1] - 2026-10-17
+
+### Changed
+- **Sidebar session stop is now an explicit two-step confirmation.** The stop
+  control is labeled Stop Session; the first click arms a yellow CONFIRM,
+  and CONFIRM stops the session. An inline cancel button or Escape backs
+  out, replacing the old five-second UNDO window. Only one post-close toast
+  remains, naming the project and pointing to the Show All host filter;
+  zellij sessions still detach rather than being killed.
+
 ## [1.7.0] - 2026-10-06
 
 ### Added

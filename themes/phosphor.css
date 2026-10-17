@@ -46,7 +46,7 @@ row.active-project {
     border-left: 2px solid #33ff00;
 }
 
-/* Pending deactivate grace — amber warning wash (wins over hover/selected). */
+/* Pending stop-confirmation — amber warning wash (wins over hover/selected). */
 .pm-sidebar list.navigation-sidebar row.project-row-pending-deactivate {
     background-color: alpha(#ffb300, 0.16);
 }
